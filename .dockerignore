@@ -1,0 +1,17 @@
+node_modules
+cache
+config
+.git
+.agents
+.codex
+config.json
+*.log
+npm-debug.log*
+Dockerfile
+docker-compose*.yml
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+bin
+fallback
+media

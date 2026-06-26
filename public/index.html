@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Media Baker</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="backdrop" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Go to home">
+        <span class="brand-mark"></span>
+        <span>Media Baker</span>
+      </a>
+      <label class="search-shell">
+        <span>Search</span>
+        <input id="searchInput" type="search" placeholder="Movies, shows, episodes">
+      </label>
+      <div class="topbar-actions">
+        <button id="adminPanelButton" class="icon-button" type="button" title="Admin panel">Admin</button>
+        <button id="historyButton" class="icon-button" type="button" title="History">History</button>
+        <button id="lockButton" class="icon-button" type="button" title="Change secret">Lock</button>
+      </div>
+    </header>
+
+    <section id="systemBanner" class="system-banner hidden" aria-live="polite"></section>
+
+    <main class="shell">
+      <section id="homeToolbar" class="home-toolbar" aria-label="Home row mode">
+        <div>
+          <p class="eyebrow">Home</p>
+          <h2 id="homeModeTitle">Recently Added</h2>
+        </div>
+        <div class="segmented-control">
+          <button id="recentMode" class="active" type="button">Recently Added</button>
+          <button id="randomMode" type="button">Random</button>
+        </div>
+      </section>
+      <section id="homeRows" class="rows"></section>
+      <section id="searchResults" class="search-results hidden">
+        <div class="section-heading">
+          <h2>Search Results</h2>
+          <span id="searchCount"></span>
+        </div>
+        <div id="searchGrid" class="grid"></div>
+      </section>
+    </main>
+
+    <aside id="detailsPanel" class="details" aria-hidden="true">
+      <button id="closeDetails" class="close-button" type="button" title="Close">x</button>
+      <div class="poster-panel">
+        <div class="poster-large" id="detailsPoster"></div>
+        <button id="editPoster" class="secondary-button compact-button" type="button">Edit poster</button>
+        <form id="posterForm" class="poster-form hidden">
+          <label>
+            Poster URL
+            <input id="posterUrlInput" type="url" placeholder="https://example.com/poster.jpg">
+          </label>
+          <div class="action-row compact-actions">
+            <button id="cancelPosterEdit" class="secondary-button" type="button">Cancel</button>
+            <button id="savePoster" class="primary-button" type="submit">Save</button>
+          </div>
+          <p id="posterStatus" class="status"></p>
+        </form>
+      </div>
+      <div class="details-body">
+        <p id="detailsCategory" class="eyebrow"></p>
+        <h1 id="detailsTitle"></h1>
+        <p id="detailsSubtitle"></p>
+        <div id="detailsProgress" class="detail-progress hidden">
+          <div class="progress-track" aria-hidden="true"><span id="detailsProgressFill" class="progress-fill"></span></div>
+          <span id="detailsProgressText" class="field-note"></span>
+        </div>
+        <div id="hierarchyNav" class="hierarchy-nav hidden"></div>
+        <p id="detailsOverview" class="overview"></p>
+        <div class="file-path-block">
+          <button id="toggleFilePath" class="secondary-button compact-button" type="button" aria-expanded="false">Show file path</button>
+          <label id="filePathLabel" class="hidden">
+            File path
+            <textarea id="filePath" readonly rows="3"></textarea>
+          </label>
+        </div>
+        <label>
+          Audio
+          <select id="audioSelect"></select>
+        </label>
+        <label>
+          Quality
+          <select id="qualitySelect"></select>
+        </label>
+        <label id="audioChannelsLabel" class="hidden">
+          Audio channels
+          <select id="audioChannelsSelect">
+            <option value="stereo">Stereo mixdown (default)</option>
+            <option value="surround51">5.1</option>
+            <option value="stabby51">Stabby Cinema 5.1</option>
+          </select>
+        </label>
+        <label>
+          Subtitles
+          <select id="subtitleSelect"></select>
+        </label>
+        <div id="subtitleSearchPanel" class="subtitle-search hidden">
+          <div class="subtitle-search-row">
+            <label>
+              Search language
+              <input id="subtitleLanguageInput" type="text" value="en" maxlength="12">
+            </label>
+            <button id="searchSubtitles" class="secondary-button" type="button">Find subtitles</button>
+          </div>
+          <label id="subtitleCandidatesLabel" class="hidden">
+            Matches
+            <select id="subtitleCandidatesSelect"></select>
+          </label>
+          <div id="subtitleSyncControls" class="subtitle-search-row hidden">
+            <button id="addSubtitle" class="secondary-button" type="button">Add selected</button>
+          </div>
+          <p id="subtitleSearchStatus" class="status"></p>
+        </div>
+        <label id="proTv3dLabel" class="hidden">
+          ProTV 3D mode
+          <select id="proTv3dSelect">
+            <option value="auto">Auto</option>
+            <option value="off">Off</option>
+            <option value="1">Side by side</option>
+            <option value="2">Side by side swapped</option>
+            <option value="3">Over under</option>
+            <option value="4">Over under swapped</option>
+          </select>
+          <span id="proTv3dStatus" class="field-note"></span>
+        </label>
+        <div class="action-row">
+          <button id="playStream" class="primary-button" type="button">Play</button>
+          <button id="pregenerateHls" class="secondary-button" type="button">Pre-generate HLS</button>
+          <button id="copyUrl" class="secondary-button" type="button">Copy URL</button>
+        </div>
+        <p id="copyStatus" class="status"></p>
+        <div id="manualCopyBar" class="manual-copy-bar hidden">
+          <span>Copy failed. Select the URL manually.</span>
+          <input id="manualCopyUrl" type="text" readonly>
+        </div>
+        <div class="drawer-management">
+          <button id="rematchMetadata" class="secondary-button" type="button">Rematch</button>
+          <button id="markWatched" class="secondary-button" type="button">Mark watched</button>
+          <button id="removeOnDeck" class="secondary-button" type="button">Remove</button>
+        </div>
+      </div>
+    </aside>
+
+    <div id="resumeOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal">
+        <h2>Resume playback?</h2>
+        <p id="resumePrompt"></p>
+        <div class="action-row resume-primary-actions">
+          <button id="resumeFromStart" class="secondary-button" type="button">Start over</button>
+          <button id="resumeFromProgress" class="primary-button" type="button">Resume</button>
+        </div>
+        <div class="resume-cancel-row">
+          <button id="resumeCancel" class="secondary-button" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="metadataMatchOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal metadata-match-modal">
+        <h2>Match metadata</h2>
+        <p id="metadataMatchPrompt" class="status"></p>
+        <div class="metadata-match-form">
+          <label>
+            Search title
+            <input id="metadataSearchTitle" type="text" autocomplete="off">
+          </label>
+          <label>
+            Year
+            <input id="metadataSearchYear" type="number" min="1900" max="2100" step="1">
+          </label>
+          <button id="metadataSearchButton" class="secondary-button" type="button">Search</button>
+        </div>
+        <label>
+          Provider ID
+          <input id="metadataProviderId" type="text" autocomplete="off" placeholder="TMDb ID">
+        </label>
+        <label>
+          Results
+          <select id="metadataCandidateSelect" size="6"></select>
+        </label>
+        <p id="metadataCandidateOverview" class="status"></p>
+        <div class="action-row">
+          <button id="metadataApplyMatch" class="primary-button" type="button">Apply match</button>
+          <button id="metadataCancelMatch" class="secondary-button" type="button">Cancel</button>
+        </div>
+        <p id="metadataMatchStatus" class="status"></p>
+      </div>
+    </div>
+
+    <div id="playerOverlay" class="player-overlay hidden" aria-hidden="true">
+      <div class="player-shell">
+        <div class="player-heading">
+          <div>
+            <p id="playerCategory" class="eyebrow"></p>
+            <h2 id="playerTitle"></h2>
+          </div>
+          <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
+        </div>
+        <video id="webPlayer" class="web-player" controls playsinline></video>
+        <p id="playerStatus" class="status"></p>
+      </div>
+    </div>
+
+    <div id="adminPanelOverlay" class="choice-overlay admin-overlay hidden" aria-hidden="true">
+      <div class="admin-panel-modal">
+        <aside class="admin-sidebar">
+          <div>
+            <p class="eyebrow">Admin</p>
+            <h2>Admin Panel</h2>
+          </div>
+          <nav class="admin-nav" aria-label="Admin sections">
+            <button id="adminAccountsTab" class="admin-nav-button" type="button">Accounts</button>
+            <button id="adminApiKeysTab" class="admin-nav-button" type="button">API Keys</button>
+            <button id="adminLibrariesTab" class="admin-nav-button" type="button">Libraries</button>
+            <button id="adminDuplicatesTab" class="admin-nav-button" type="button">Duplicates</button>
+            <button id="adminSettingsTab" class="admin-nav-button" type="button">Settings</button>
+            <button id="adminHardwareTab" class="admin-nav-button" type="button">Hardware</button>
+            <button id="adminCurrentlyPlayingTab" class="admin-nav-button" type="button">Currently Playing</button>
+            <button id="adminLogsTab" class="admin-nav-button" type="button">Live Log</button>
+            <button id="adminHistoryTab" class="admin-nav-button" type="button">User History</button>
+          </nav>
+          <button id="closeAdminPanel" class="secondary-button compact-button admin-close" type="button">Close</button>
+        </aside>
+        <main class="admin-main">
+          <section id="adminAccountsPage" class="admin-page">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Accounts</p>
+                <h2>User Accounts</h2>
+              </div>
+            </div>
+            <form id="accountForm" class="account-form">
+              <input id="accountIdInput" type="hidden">
+              <label>Username<input id="accountUsernameInput" type="text" autocomplete="off"></label>
+              <label>Password<input id="accountPasswordInput" type="password" autocomplete="new-password" placeholder="Required for new accounts"></label>
+              <label class="account-libraries-field">
+                Libraries
+                <select id="accountLibrariesSelect" multiple size="4"></select>
+              </label>
+              <div class="permission-grid">
+                <label><input id="accountIsAdmin" type="checkbox"> Admin</label>
+                <label><input id="accountCanShare" type="checkbox"> Create share links</label>
+                <label><input id="accountCanLibraries" type="checkbox"> Manage libraries</label>
+                <label><input id="accountCanMetadata" type="checkbox"> Manage metadata</label>
+                <label><input id="accountCanSettings" type="checkbox"> Manage settings</label>
+                <label><input id="accountCanApiKeys" type="checkbox"> Manage API keys</label>
+                <label><input id="accountCanReindex" type="checkbox"> Re-index libraries</label>
+                <label><input id="accountCanUsers" type="checkbox"> Manage users</label>
+                <label><input id="accountCanHardware" type="checkbox"> View hardware</label>
+                <label><input id="accountCanLogs" type="checkbox"> View logs</label>
+                <label><input id="accountCanHistory" type="checkbox"> View user history</label>
+              </div>
+              <div class="action-row compact-actions">
+                <button id="resetAccountForm" class="secondary-button" type="button">Clear form</button>
+                <button id="createAccount" class="primary-button" type="submit">Create account</button>
+                <button id="updateAccount" class="primary-button hidden" type="submit">Update account</button>
+              </div>
+            </form>
+            <p id="accountStatus" class="status"></p>
+            <div id="accountList" class="library-manager-list"></div>
+          </section>
+          <section id="adminApiKeysPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Access</p>
+                <h2>API Keys</h2>
+              </div>
+            </div>
+            <form id="apiKeyForm" class="api-key-form">
+              <label>
+                User
+                <select id="apiKeyUserSelect"></select>
+              </label>
+              <label>
+                Name
+                <input id="apiKeyNameInput" type="text" autocomplete="off" placeholder="Automation, scripts, mobile client" required>
+              </label>
+              <button id="createApiKey" class="primary-button" type="submit">Create API key</button>
+            </form>
+            <section id="apiKeySecretPanel" class="api-key-secret hidden">
+              <p class="eyebrow">New key</p>
+              <code id="apiKeySecretValue"></code>
+              <button id="copyApiKeySecret" class="secondary-button compact-button" type="button">Copy</button>
+            </section>
+            <p id="apiKeyStatus" class="status"></p>
+            <div id="apiKeyList" class="library-manager-list"></div>
+          </section>
+          <section id="adminLibrariesPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Management</p>
+                <h2>Library Management</h2>
+              </div>
+              <button id="reindexLibraries" class="secondary-button compact-button" type="button">Re-index</button>
+            </div>
+            <form id="libraryForm" class="library-form">
+              <label>
+                Name
+                <input id="libraryNameInput" type="text" placeholder="Weeb TV" required>
+              </label>
+              <label>
+                Type
+                <select id="libraryTypeSelect">
+                  <option value="tv">TV</option>
+                  <option value="movies">Movies</option>
+                  <option value="tv-3d">TV 3D</option>
+                  <option value="movies-3d">Movies 3D</option>
+                </select>
+              </label>
+              <label class="library-path-field">
+                Path
+                <span class="path-picker-control">
+                  <input id="libraryPathInput" type="text" placeholder="Choose a folder" readonly required>
+                  <button id="browseLibraryPath" class="secondary-button compact-button" type="button">Browse</button>
+                </span>
+              </label>
+              <button id="addLibraryButton" class="primary-button" type="submit">Add library</button>
+            </form>
+            <section id="folderPicker" class="folder-picker hidden" aria-live="polite">
+              <div class="folder-picker-heading">
+                <div>
+                  <p class="eyebrow">Folder</p>
+                  <strong id="folderPickerPath">Loading...</strong>
+                </div>
+                <button id="closeFolderPicker" class="secondary-button compact-button" type="button">Close</button>
+              </div>
+              <div id="folderPickerRoots" class="folder-roots"></div>
+              <div class="folder-picker-actions">
+                <button id="folderPickerParent" class="secondary-button compact-button" type="button">Up</button>
+                <button id="selectFolderPath" class="primary-button compact-button" type="button">Use this folder</button>
+              </div>
+              <div id="folderPickerList" class="folder-list"></div>
+            </section>
+            <p id="libraryManagerStatus" class="status"></p>
+            <div id="libraryManagerList" class="library-manager-list"></div>
+          </section>
+          <section id="adminDuplicatesPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Metadata</p>
+                <h2>Duplicate Files</h2>
+              </div>
+              <button id="refreshDuplicates" class="secondary-button compact-button" type="button">Refresh</button>
+            </div>
+            <p id="duplicatesStatus" class="status"></p>
+            <div id="duplicatesList" class="duplicate-list"></div>
+          </section>
+          <section id="adminSettingsPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Runtime</p>
+                <h2>App Settings</h2>
+              </div>
+            </div>
+            <form id="settingsForm" class="settings-form">
+              <fieldset>
+                <legend>General</legend>
+                <label>Log level<select id="settingsLogLevel"><option value="errors">Errors</option><option value="info">Info</option><option value="full">Full</option></select></label>
+                <label>Log retention days<input id="settingsLogRetentionDays" type="number" min="1" step="1"></label>
+                <label>Preferred audio language<input id="settingsPreferredAudio" type="text" autocomplete="off"></label>
+                <label><input id="settingsEnableGpu" type="checkbox"> Enable GPU encoding</label>
+              </fieldset>
+              <fieldset>
+                <legend>Metadata</legend>
+                <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable TMDb metadata</label>
+                <div id="metadataSettingsBody" class="settings-feature-body">
+                  <label>TMDb API key<input id="settingsTmdbApiKey" type="password" autocomplete="off"></label>
+                  <label>TMDb read access token<input id="settingsTmdbReadToken" type="password" autocomplete="off"></label>
+                  <label>Language<input id="settingsMetadataLanguage" type="text" autocomplete="off"></label>
+                  <label>Poster size<input id="settingsPosterSize" type="text" autocomplete="off"></label>
+                  <label>Thumbnail size<input id="settingsThumbnailSize" type="text" autocomplete="off"></label>
+                  <label>Poster languages<input id="settingsPosterLanguages" type="text" autocomplete="off"></label>
+                  <label>Request delay ms<input id="settingsMetadataDelay" type="number" min="0" step="50"></label>
+                  <label class="settings-toggle"><input id="settingsMetadataPreload" type="checkbox"> Preload metadata in background</label>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Subtitles</legend>
+                <label class="settings-toggle"><input id="settingsSubtitlesEnabled" type="checkbox"> Enable subtitle search</label>
+                <div id="subtitleSettingsBody" class="settings-feature-body">
+                  <label>Provider<input id="settingsSubtitleProvider" type="text" autocomplete="off"></label>
+                  <label>SubDL API key<input id="settingsSubdlApiKey" type="password" autocomplete="off"></label>
+                  <label>User agent<input id="settingsSubtitleUserAgent" type="text" autocomplete="off"></label>
+                  <label>Default language<input id="settingsSubtitleLanguage" type="text" autocomplete="off"></label>
+                  <label class="settings-toggle"><input id="settingsSubtitleSyncEnabled" type="checkbox"> Auto-sync downloaded subtitles</label>
+                  <div id="subtitleSyncSettingsBody" class="settings-feature-body compact-feature-body">
+                    <label>Max offset seconds<input id="settingsSubtitleMaxOffset" type="number" min="1" step="1"></label>
+                    <label>Sync timeout seconds<input id="settingsSubtitleTimeout" type="number" min="1" step="1"></label>
+                  </div>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Streaming</legend>
+                <label>HLS TTL seconds<input id="settingsHlsTtl" type="number" min="1" step="1"></label>
+                <label>Segment seconds<input id="settingsHlsSegment" type="number" min="1" step="1"></label>
+                <label>Segment wait timeout<input id="settingsHlsWait" type="number" min="1" step="1"></label>
+                <label><input id="settingsForceTranscode" type="checkbox"> Force compatible video transcode</label>
+                <label>On-deck TTL seconds<input id="settingsOnDeckTtl" type="number" min="1" step="1"></label>
+                <label>Watched threshold %<input id="settingsWatchedThreshold" type="number" min="1" max="100" step="1"></label>
+              </fieldset>
+              <fieldset>
+                <legend>Scanning and fallback</legend>
+                <label class="settings-toggle"><input id="settingsIndexEnabled" type="checkbox"> Periodic scans</label>
+                <div id="indexSettingsBody" class="settings-feature-body compact-feature-body">
+                  <label>Scan interval seconds<input id="settingsIndexInterval" type="number" min="1" step="1"></label>
+                  <label class="settings-toggle"><input id="settingsIndexStartup" type="checkbox"> Scan on startup</label>
+                </div>
+                <label class="settings-toggle"><input id="settingsFallbackEnabled" type="checkbox"> Fallback stream</label>
+                <div id="fallbackSettingsBody" class="settings-feature-body compact-feature-body">
+                  <label>Fallback segment seconds<input id="settingsFallbackSegment" type="number" min="1" step="1"></label>
+                </div>
+              </fieldset>
+              <div class="action-row compact-actions">
+                <button id="saveSettings" class="primary-button" type="submit">Save settings</button>
+              </div>
+            </form>
+            <p id="settingsStatus" class="status"></p>
+          </section>
+          <section id="adminHardwarePage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Hardware</p>
+                <h2>Hardware Usage</h2>
+              </div>
+            </div>
+            <div class="hardware-grid">
+              <div><p class="eyebrow">CPU</p><div class="meter"><span id="cpuMeter"></span></div><strong id="cpuText">0%</strong></div>
+              <div><p class="eyebrow">Memory</p><div class="meter"><span id="memoryMeter"></span></div><strong id="memoryText">0%</strong></div>
+              <div><p class="eyebrow">GPU</p><div class="meter"><span id="gpuMeter"></span></div><strong id="gpuText">0%</strong></div>
+              <div><p class="eyebrow">Network In</p><div class="meter"><span id="networkInMeter"></span></div><strong id="networkInText">0 B/s</strong></div>
+              <div><p class="eyebrow">Network Out</p><div class="meter"><span id="networkOutMeter"></span></div><strong id="networkOutText">0 B/s</strong></div>
+            </div>
+            <div class="hardware-charts">
+              <section class="hardware-chart-card">
+                <div>
+                  <p class="eyebrow">Last 5 minutes</p>
+                  <h3>CPU / Memory / GPU</h3>
+                </div>
+                <canvas id="usageChart" width="900" height="260"></canvas>
+              </section>
+              <section class="hardware-chart-card">
+                <div>
+                  <p class="eyebrow">Last 5 minutes</p>
+                  <h3>Network In / Out</h3>
+                </div>
+                <canvas id="networkChart" width="900" height="260"></canvas>
+              </section>
+            </div>
+          </section>
+          <section id="adminLogsPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Logs</p>
+                <h2>Live Log</h2>
+              </div>
+            </div>
+            <pre id="liveLog" class="log-view"></pre>
+          </section>
+          <section id="adminCurrentlyPlayingPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Activity</p>
+                <h2>Currently Playing</h2>
+              </div>
+            </div>
+            <div id="currentlyPlayingList" class="library-manager-list"></div>
+          </section>
+          <section id="adminHistoryPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">History</p>
+                <h2>User Watch History</h2>
+              </div>
+            </div>
+            <div id="userHistoryList" class="library-manager-list"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="loginOverlay" class="login-overlay">
+      <form id="loginForm" class="login-modal">
+        <div class="login-mark"></div>
+        <h1 id="loginTitle">Media Baker</h1>
+        <p id="loginPrompt">Sign in to browse your library.</p>
+        <input id="usernameInput" type="text" autocomplete="username" placeholder="Username" required>
+        <input id="secretInput" type="password" autocomplete="current-password" placeholder="Password" required>
+        <button class="primary-button" type="submit">Unlock</button>
+        <p id="loginError" class="error"></p>
+      </form>
+    </div>
+
+    <script src="/vendor/hls.js/hls.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

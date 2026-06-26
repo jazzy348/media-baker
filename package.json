@@ -1,0 +1,17 @@
+{
+  "name": "media-baker",
+  "version": "1.0.0",
+  "description": "Local media library indexer and HLS baking API.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "express": "^4.19.2",
+    "mysql2": "^3.11.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

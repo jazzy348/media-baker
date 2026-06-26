@@ -1,0 +1,16 @@
+services:
+  media-baker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: media-baker
+    ports:
+      - "5000:5000"
+    volumes:
+      - "./config.json:/config/config.json:ro"
+      - "./cache:/cache"
+      - "./logs:/logs"
+      - "./fallback:/fallback:ro"
+      # Change the left side to match your Docker host media paths.
+      - "/mnt/media:/media:ro"
+    restart: unless-stopped

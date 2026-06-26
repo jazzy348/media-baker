@@ -1,0 +1,372 @@
+const STATUS_IN_PROGRESS = "in_progress";
+const STATUS_WATCHED = "watched";
+const STATUS_REMOVED = "removed";
+
+class PlaybackProgressService {
+  constructor(config, store) {
+    this.config = config;
+    this.store = store;
+  }
+
+  async get(userId, mediaType, mediaId) {
+    const record = await this.store.get(userId, mediaType, mediaId);
+    return record ? toPublicProgress(record) : emptyProgress(mediaType, mediaId);
+  }
+
+  async recordSegmentRequest(userId, mediaType, mediaId, cacheKey, segment) {
+    if (!segment || !Number.isFinite(segment.startSeconds) || !Number.isFinite(segment.durationSeconds)) {
+      return null;
+    }
+
+    const durationSeconds = Math.max(Number(segment.mediaDurationSeconds) || 0, segment.startSeconds + segment.durationSeconds);
+    if (durationSeconds <= 0) {
+      return null;
+    }
+
+    const current = await this.store.get(userId, mediaType, mediaId);
+    if (current && current.status === STATUS_REMOVED) {
+      return current;
+    }
+
+    const threshold = watchedThreshold(this.config);
+    const watched = segment.startSeconds >= durationSeconds * (1 - threshold);
+    const nextRecord = {
+      ...current,
+      userId: userId || "global",
+      mediaType,
+      mediaId,
+      status: watched ? STATUS_WATCHED : STATUS_IN_PROGRESS,
+      positionSeconds: watched ? durationSeconds : Math.max(0, segment.startSeconds),
+      durationSeconds,
+      cacheKey,
+      watchedAt: watched ? new Date().toISOString() : current && current.watchedAt || null
+    };
+
+    const saved = await this.store.save(nextRecord);
+    return saved;
+  }
+
+  async markWatched(userId, mediaType, mediaId, durationSeconds = 0) {
+    const current = await this.store.get(userId, mediaType, mediaId);
+    const duration = Number(durationSeconds) || current && current.durationSeconds || 0;
+    return this.store.save({
+      ...current,
+      userId: userId || "global",
+      mediaType,
+      mediaId,
+      status: STATUS_WATCHED,
+      positionSeconds: duration,
+      durationSeconds: duration,
+      cacheKey: current && current.cacheKey || null,
+      watchedAt: new Date().toISOString()
+    });
+  }
+
+  async markRemoved(userId, mediaType, mediaId) {
+    const current = await this.store.get(userId, mediaType, mediaId);
+    return this.store.save({
+      ...current,
+      userId: userId || "global",
+      mediaType,
+      mediaId,
+      status: STATUS_REMOVED,
+      positionSeconds: current && current.positionSeconds || 0,
+      durationSeconds: current && current.durationSeconds || 0,
+      cacheKey: current && current.cacheKey || null,
+      watchedAt: current && current.watchedAt || null
+    });
+  }
+
+  async markUnwatched(userId, mediaType, mediaId) {
+    return this.store.save({
+      userId: userId || "global",
+      mediaType,
+      mediaId,
+      status: STATUS_REMOVED,
+      positionSeconds: 0,
+      durationSeconds: 0,
+      cacheKey: null,
+      watchedAt: null
+    });
+  }
+
+  async onDeck(mediaIndex, metadata, authToken, authParamName = "authToken", allowedLibraryKey = null, userId = "global") {
+    const records = await this.store.list(userId);
+    const recordsByKey = recordMap(records);
+    const cutoff = Date.now() - this.config.playback.onDeckTtlSeconds * 1000;
+    const itemsByKey = new Map();
+
+    for (const record of records) {
+      if (!recordAllowed(record, allowedLibraryKey)) {
+        continue;
+      }
+
+      const updatedAtMs = timeMs(record.updatedAt);
+      if (updatedAtMs < cutoff) {
+        continue;
+      }
+
+      if (record.status === STATUS_IN_PROGRESS && record.positionSeconds > 0) {
+        const mediaFile = mediaFileForRecord(mediaIndex, record);
+        if (mediaFile) {
+          itemsByKey.set(recordKey(record.mediaType, record.mediaId), await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "resume"));
+        }
+        continue;
+      }
+
+      if (record.status === STATUS_WATCHED) {
+        const mediaFile = mediaFileForRecord(mediaIndex, record);
+        const nextEpisode = mediaFile && mediaFile.showId
+          ? nextEpisodeFor(mediaIndex, record.mediaType, mediaFile)
+          : null;
+        if (!nextEpisode) {
+          continue;
+        }
+
+        const nextKey = recordKey(record.mediaType, nextEpisode.id);
+        const nextRecord = recordsByKey.get(nextKey);
+        if (nextRecord && (nextRecord.status === STATUS_WATCHED || nextRecord.status === STATUS_REMOVED || nextRecord.status === STATUS_IN_PROGRESS)) {
+          continue;
+        }
+
+        itemsByKey.set(nextKey, await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, {
+          mediaType: record.mediaType,
+          mediaId: nextEpisode.id,
+          status: "next",
+          positionSeconds: 0,
+          durationSeconds: 0,
+          updatedAt: record.updatedAt,
+          watchedAt: null
+        }, nextEpisode, "next"));
+      }
+    }
+
+    return [...itemsByKey.values()]
+      .sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
+  }
+
+  async history(mediaIndex, metadata, authToken, authParamName = "authToken", allowedLibraryKey = null, userId = "global") {
+    const records = await this.store.list(userId);
+    const items = [];
+    for (const record of records) {
+      if (!recordAllowed(record, allowedLibraryKey)) {
+        continue;
+      }
+
+      if (record.status !== STATUS_WATCHED && record.status !== STATUS_IN_PROGRESS) {
+        continue;
+      }
+
+      const mediaFile = mediaFileForRecord(mediaIndex, record);
+      if (!mediaFile) {
+        continue;
+      }
+
+      items.push(await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "history"));
+    }
+
+    return items.sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
+  }
+
+  async currentlyPlaying(mediaIndex, metadata, authToken, authParamName = "authToken", activeSeconds = 120) {
+    const cutoff = Date.now() - Math.max(15, Number(activeSeconds) || 120) * 1000;
+    const records = await this.store.list();
+    const items = [];
+
+    for (const record of records) {
+      if (record.status !== STATUS_IN_PROGRESS || timeMs(record.updatedAt) < cutoff) {
+        continue;
+      }
+
+      const mediaFile = mediaFileForRecord(mediaIndex, record);
+      if (!mediaFile) {
+        continue;
+      }
+
+      items.push({
+        ...await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "active"),
+        userId: record.userId || "global",
+        cacheKey: record.cacheKey || null,
+        activeAgoSeconds: Math.max(0, Math.round((Date.now() - timeMs(record.updatedAt)) / 1000))
+      });
+    }
+
+    return items.sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
+  }
+
+  async isCacheProtected(cacheKey) {
+    if (!cacheKey) {
+      return false;
+    }
+
+    const cutoff = Date.now() - this.config.playback.onDeckTtlSeconds * 1000;
+    const records = await this.store.list();
+    return records.some((record) => record.cacheKey === cacheKey
+      && record.status === STATUS_IN_PROGRESS
+      && record.positionSeconds > 0
+      && timeMs(record.updatedAt) >= cutoff);
+  }
+
+  async cacheReleaseBaseMs(cacheKey) {
+    if (!cacheKey) {
+      return 0;
+    }
+
+    const records = await this.store.list();
+    const retentionMs = this.config.playback.onDeckTtlSeconds * 1000;
+    let base = 0;
+    for (const record of records) {
+      if (record.cacheKey !== cacheKey) {
+        continue;
+      }
+
+      const updatedAtMs = timeMs(record.updatedAt);
+      if (record.status === STATUS_WATCHED || record.status === STATUS_REMOVED) {
+        base = Math.max(base, updatedAtMs);
+      } else if (record.status === STATUS_IN_PROGRESS) {
+        base = Math.max(base, updatedAtMs + retentionMs);
+      }
+    }
+
+    return base;
+  }
+
+  async cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason) {
+    const item = itemFromMediaFile(mediaIndex, record.mediaType, mediaFile);
+    const cached = metadata && metadata.getCachedForMedia
+      ? await metadata.getCachedForMedia(record.mediaType, metadataIdForMediaFile(mediaFile))
+      : null;
+    const title = cached && cached.available && cached.title ? cached.title : item.title;
+    return {
+      ...item,
+      title,
+      metadataTitle: cached && cached.available ? cached.title : null,
+      metadataAliases: cached && cached.available ? cached.aliases || [] : [],
+      posterUrl: cached && cached.posterFilename ? metadata.posterUrl(cached.posterFilename, authToken, authParamName) : item.posterUrl,
+      thumbnailUrl: item.showId && metadata ? metadata.thumbnailUrl(record.mediaType, item.id, authToken, authParamName) : item.thumbnailUrl,
+      progress: toPublicProgress(record),
+      onDeckReason: reason,
+      updatedAt: record.updatedAt || null
+    };
+  }
+}
+
+function itemFromMediaFile(mediaIndex, mediaType, mediaFile) {
+  const library = mediaIndex.libraryForKey(mediaType);
+  const category = library ? library.title : mediaType;
+  if (mediaFile.showId) {
+    return {
+      id: mediaFile.id,
+      mediaType,
+      category,
+      title: mediaFile.title || mediaFile.filename,
+      subtitle: `${mediaFile.showName} S${pad(mediaFile.season)}E${pad(mediaFile.episode)}`,
+      showId: mediaFile.showId,
+      showName: mediaFile.showName,
+      season: mediaFile.season,
+      episode: mediaFile.episode,
+      filePath: mediaFile.filePath
+    };
+  }
+
+  return {
+    id: mediaFile.id,
+    mediaType,
+    category,
+    title: mediaFile.title || mediaFile.filename,
+    subtitle: mediaFile.year ? String(mediaFile.year) : mediaFile.filename,
+    filePath: mediaFile.filePath
+  };
+}
+
+function mediaFileForRecord(mediaIndex, record) {
+  const library = mediaIndex.libraryForKey(record.mediaType);
+  if (!library) {
+    return null;
+  }
+
+  if (library.type === "tv") {
+    return mediaIndex.getEpisode(record.mediaId, library.key) || mediaIndex.getMovie(record.mediaId, library.key);
+  }
+
+  return mediaIndex.getMovie(record.mediaId, library.key);
+}
+
+function nextEpisodeFor(mediaIndex, mediaType, episode) {
+  const show = mediaIndex.getShow(episode.showId, mediaType);
+  if (!show) {
+    return null;
+  }
+
+  const episodes = show.seasons
+    .flatMap((season) => season.episodes)
+    .sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0) || a.filename.localeCompare(b.filename));
+  const index = episodes.findIndex((item) => item.id === episode.id);
+  return index >= 0 ? episodes[index + 1] || null : null;
+}
+
+function metadataIdForMediaFile(mediaFile) {
+  return mediaFile.showId ? mediaFile.id : mediaFile.id;
+}
+
+function toPublicProgress(record) {
+  const durationSeconds = Number(record.durationSeconds) || 0;
+  const positionSeconds = Number(record.positionSeconds) || 0;
+  return {
+    status: record.status,
+    positionSeconds,
+    durationSeconds,
+    percent: durationSeconds > 0 ? Math.min(100, Math.round((positionSeconds / durationSeconds) * 1000) / 10) : 0,
+    resumeSeconds: record.status === STATUS_IN_PROGRESS ? Math.max(0, Math.floor(positionSeconds)) : 0,
+    updatedAt: record.updatedAt || null,
+    watchedAt: record.watchedAt || null
+  };
+}
+
+function emptyProgress(mediaType, mediaId) {
+  return {
+    mediaType,
+    mediaId,
+    status: "none",
+    positionSeconds: 0,
+    durationSeconds: 0,
+    percent: 0,
+    resumeSeconds: 0,
+    updatedAt: null,
+    watchedAt: null
+  };
+}
+
+function watchedThreshold(config) {
+  const percent = Math.max(1, Math.min(Number(config.playback.watchedThresholdPercent) || 10, 95));
+  return percent / 100;
+}
+
+function recordMap(records) {
+  return new Map(records.map((record) => [recordKey(record.mediaType, record.mediaId), record]));
+}
+
+function recordAllowed(record, allowedLibraryKey) {
+  if (!allowedLibraryKey) {
+    return true;
+  }
+  if (Array.isArray(allowedLibraryKey)) {
+    return allowedLibraryKey.includes(record.mediaType);
+  }
+  return record.mediaType === allowedLibraryKey;
+}
+
+function recordKey(mediaType, mediaId) {
+  return `${mediaType}:${mediaId}`;
+}
+
+function timeMs(value) {
+  const parsed = value ? Date.parse(value) : 0;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function pad(value) {
+  return String(value || 0).padStart(2, "0");
+}
+
+module.exports = { PlaybackProgressService };
