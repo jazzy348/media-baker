@@ -169,7 +169,7 @@ Enable access in `docker-compose.yml`:
 
 ```yaml
 container_name: media-baker
-gpus: all (put under here ^)
+gpus: all #Put under here ^
 ```
 
 ### Intel And AMD
