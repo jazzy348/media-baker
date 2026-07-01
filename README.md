@@ -92,6 +92,9 @@ Use this guide for standalone Media Baker deployments with Node.js, Express, and
 
 On first launch, create the first admin account, then add libraries from `Admin > Libraries`.
 
+## Docker Deployment
+[Docker Setup Guide](README.docker.md)
+
 ## Configuration
 
 `config.json` contains settings required before the database, account system, and WebUI settings are available:
