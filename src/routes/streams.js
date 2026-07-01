@@ -38,19 +38,6 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, playbackTokens, 
         return next(httpError(404, "HLS file not found"));
       }
 
-      if (progress && req.playbackTokenPayload.mediaType && req.playbackTokenPayload.mediaId) {
-        const segmentProgress = await hls.segmentProgress(req.params.cacheKey, req.params.filename);
-        if (segmentProgress) {
-          await progress.recordSegmentRequest(
-            req.playbackTokenPayload.userId || "global",
-            req.playbackTokenPayload.mediaType,
-            req.playbackTokenPayload.mediaId,
-            req.params.cacheKey,
-            segmentProgress
-          );
-        }
-      }
-
       res.type(contentTypeFor(req.params.filename));
       res.sendFile(segment.filePath, (err) => {
         if (err) {
@@ -58,6 +45,20 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, playbackTokens, 
             return;
           }
           next(httpError(err.statusCode || 404, "HLS file not found"));
+          return;
+        }
+
+        if (progress && req.playbackTokenPayload.mediaType && req.playbackTokenPayload.mediaId) {
+          hls.segmentProgress(req.params.cacheKey, req.params.filename)
+            .then((segmentProgress) => segmentProgress && progress.recordSegmentDelivery(
+              req.playbackTokenPayload.userId || "global",
+              req.playbackTokenPayload.mediaType,
+              req.playbackTokenPayload.mediaId,
+              req.params.cacheKey,
+              req.playbackTokenPayload.jti,
+              segmentProgress
+            ))
+            .catch((progressErr) => logger.error(`[progress] segment delivery update failed message="${progressErr.message}"`, progressErr));
         }
       });
     } catch (err) {

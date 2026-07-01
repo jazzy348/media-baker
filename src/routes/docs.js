@@ -1,4 +1,5 @@
 const express = require("express");
+const packageJson = require("../../package.json");
 
 module.exports = function createDocsRoutes() {
   const router = express.Router();
@@ -20,7 +21,7 @@ function openApiSpec() {
     openapi: "3.0.3",
     info: {
       title: "Media Baker API",
-      version: "1.0.0",
+      version: packageJson.version,
       description: "API for indexing media libraries, managing users/libraries, fetching metadata, tracking playback, and serving HLS streams."
     },
     tags: [
@@ -29,6 +30,7 @@ function openApiSpec() {
       { name: "Catalog" },
       { name: "Libraries" },
       { name: "Playback Progress" },
+      { name: "YT-DLP" },
       { name: "Streams" },
       { name: "Health" }
     ],
@@ -93,7 +95,14 @@ function openApiSpec() {
         })
       },
       "/api/auth/me": {
-        get: operation("Auth", "Current account", "Returns the authenticated account.")
+        get: operation("Auth", "Current account", "Returns the authenticated account."),
+        put: operation("Auth", "Update current account", "Changes only the authenticated account's username or password and requires the current password.", true, {
+          requestBody: jsonBody(objectSchema({
+            username: { type: "string" },
+            currentPassword: { type: "string", format: "password" },
+            password: { type: "string", format: "password" }
+          }))
+        })
       },
       "/api/health": {
         get: operation("Health", "Health check", "Returns index counts, scan state, and FFmpeg availability.")
@@ -141,6 +150,30 @@ function openApiSpec() {
         get: operation("Admin", "Get runtime settings", "Requires settings-management permission."),
         put: operation("Admin", "Update runtime settings", "Applies supported settings without restarting.", true, {
           requestBody: jsonBody({ $ref: "#/components/schemas/SettingsRequest" })
+        })
+      },
+      "/api/admin/updates/status": {
+        get: operation("Admin", "Update status", "Checks the cached GitHub release status. Admin accounts only.")
+      },
+      "/api/admin/updates/check": {
+        post: operation("Admin", "Check for updates", "Forces a fresh GitHub release check. Admin accounts only.")
+      },
+      "/api/admin/updates/install": {
+        post: operation("Admin", "Install update", "Stages the latest newer release, replaces standalone application files, and restarts Media Baker. Admin accounts only.")
+      },
+      "/api/admin/settings/iptv/refresh": {
+        post: operation("Admin", "Reload IPTV sources", "Immediately reloads the saved M3U or HDHomeRun lineup and optional EPG.")
+      },
+      "/api/admin/settings/iptv/channel-matches": {
+        get: operation("Admin", "List IPTV channel matches", "Lists live channels, automatic matches, manual overrides, and EPG channel candidates.")
+      },
+      "/api/admin/settings/iptv/channel-matches/{channelId}": {
+        put: operation("Admin", "Update IPTV channel", "Sets the EPG match and per-channel deinterlace override. Use null and default to restore global behavior.", true, {
+          parameters: [pathParam("channelId")],
+          requestBody: jsonBody(objectSchema({
+            guideChannelId: { type: "string", nullable: true },
+            deinterlaceMode: { type: "string", enum: ["default", "off", "auto", "force", "smooth"] }
+          }))
         })
       },
       "/api/admin/hardware": {
@@ -228,6 +261,11 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/catalog/{mediaType}/{id}/metadata/season-poster": {
+        get: operation("Catalog", "Season poster", "Fetches and caches the matched TMDb season artwork, falling back to the show poster.", true, {
+          parameters: [pathParam("mediaType"), pathParam("id")]
+        })
+      },
       "/api/catalog/metadata/poster/{filename}": {
         get: operation("Catalog", "Cached poster file", "Serves a cached poster image.", true, {
           parameters: [pathParam("filename")]
@@ -279,6 +317,62 @@ function openApiSpec() {
       "/api/progress/{mediaType}/{id}/remove": {
         post: operation("Playback Progress", "Remove from On Deck", "Hides one item from On Deck.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]
+        })
+      },
+      "/api/ytdlp": {
+        get: operation("YT-DLP", "YT-DLP status", "Returns YT-DLP availability, download path, update state, and recent downloads.")
+      },
+      "/api/ytdlp/downloads": {
+        get: operation("YT-DLP", "List downloads", "Returns active and recent YT-DLP download progress records."),
+        post: operation("YT-DLP", "Start download", "Starts a URL download into the managed YT-DLP library.", true, {
+          requestBody: jsonBody(objectSchema({
+            url: { type: "string", example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
+          }))
+        })
+      },
+      "/api/iptv": {
+        get: operation("IPTV", "IPTV status", "Returns live-lineup readiness and channel matching counts.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }]
+        })
+      },
+      "/api/iptv/guide": {
+        get: operation("IPTV", "Live TV guide", "Returns M3U or HDHomeRun channels matched to programmes from the configured EPG. Cached sources refresh on the configured interval.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }],
+          parameters: [queryParam("start"), queryParam("hours", "integer")]
+        })
+      },
+      "/api/iptv/client-events": {
+        post: operation("IPTV", "Report client playback failure", "Records a fatal Live TV player error in the server log for diagnostics.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }],
+          requestBody: jsonBody(objectSchema({
+            channelId: { type: "string" },
+            channelName: { type: "string" },
+            event: { type: "string" },
+            details: { type: "object", additionalProperties: true }
+          }))
+        })
+      },
+      "/api/iptv/icons/{filename}": {
+        get: operation("IPTV", "Channel icon", "Serves an icon from the current IPTV lineup cache.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }],
+          parameters: [pathParam("filename")]
+        })
+      },
+      "/api/iptv/channels/{id}/master.m3u8": {
+        get: operation("IPTV", "Play live channel", "Starts or joins the buffered live HLS restream. Compatible H.264/AAC is copied; incompatible streams are transcoded.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }],
+          parameters: [pathParam("id")],
+          responses: {
+            200: {
+              description: "Live HLS playlist",
+              content: { "application/vnd.apple.mpegurl": { schema: { type: "string" } } }
+            }
+          }
+        })
+      },
+      "/api/fallback/master.m3u8": {
+        get: operation("Streams", "Play fallback stream", "Returns the pre-generated fallback HLS stream for authenticated web playback.", true, {
+          security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }]
         })
       },
       "/api/libraries": {

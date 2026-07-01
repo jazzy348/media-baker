@@ -1,6 +1,7 @@
 const express = require("express");
 const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
+const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
 module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, libraryService, indexScanScheduler }) {
   const router = express.Router();
@@ -30,7 +31,8 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
     try {
       const libraries = await libraryService.reorder(req.body && req.body.keys);
       config.libraries = libraries;
-      await saveIndexLibraryOrder(mediaIndex, libraries);
+      syncYtDlpLibrary(config);
+      await saveIndexLibraryOrder(mediaIndex, config.libraries);
       res.json({ libraries: withShareUrls(req, await libraryService.listWithShares()) });
     } catch (err) {
       next(err);
@@ -160,6 +162,7 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
 
 async function refreshLibraryConfig(config, libraryService, mediaIndex) {
   config.libraries = await libraryService.list();
+  syncYtDlpLibrary(config);
   await mediaIndex.syncLibrariesFromConfig();
 }
 
@@ -211,8 +214,12 @@ async function saveIndexLibraryOrder(mediaIndex, libraries) {
     key: library.key,
     title: library.title,
     type: library.type,
-    rawType: library.rawType,
+      rawType: library.rawType,
     threeD: Boolean(library.threeD),
+    managed: Boolean(library.managed),
+    noMetadata: Boolean(library.noMetadata),
+    noSubtitles: Boolean(library.noSubtitles),
+    localThumbnails: Boolean(library.localThumbnails),
     path: library.path
   }));
   await mediaIndex.indexStore.save(mediaIndex.index);

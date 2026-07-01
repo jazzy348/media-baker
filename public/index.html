@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="auth-pending">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Media Baker</title>
+    <style>html.auth-pending body { visibility: hidden; }</style>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -19,6 +20,9 @@
         <input id="searchInput" type="search" placeholder="Movies, shows, episodes">
       </label>
       <div class="topbar-actions">
+        <button id="liveTvButton" class="icon-button hidden" type="button" title="Live TV">Live TV</button>
+        <button id="downloadButton" class="icon-button hidden" type="button" title="Download URL">Download</button>
+        <button id="accountButton" class="icon-button hidden" type="button" title="Account settings">Account</button>
         <button id="adminPanelButton" class="icon-button" type="button" title="Admin panel">Admin</button>
         <button id="historyButton" class="icon-button" type="button" title="History">History</button>
         <button id="lockButton" class="icon-button" type="button" title="Change secret">Lock</button>
@@ -26,6 +30,17 @@
     </header>
 
     <section id="systemBanner" class="system-banner hidden" aria-live="polite"></section>
+    <section id="updateBanner" class="system-banner update-banner hidden" aria-live="polite">
+      <div>
+        <strong id="updateBannerTitle"></strong>
+        <p id="updateBannerMessage"></p>
+      </div>
+      <div class="update-banner-actions">
+        <a id="updateReleaseLink" class="secondary-button compact-button" href="#" target="_blank" rel="noopener noreferrer">View release</a>
+        <button id="installUpdateBanner" class="primary-button compact-button" type="button">Install update</button>
+        <button id="dismissUpdateBanner" class="close-button" type="button" title="Dismiss this update" aria-label="Dismiss this update">x</button>
+      </div>
+    </section>
 
     <main class="shell">
       <section id="homeToolbar" class="home-toolbar" aria-label="Home row mode">
@@ -45,6 +60,25 @@
           <span id="searchCount"></span>
         </div>
         <div id="searchGrid" class="grid"></div>
+      </section>
+      <section id="liveTvView" class="live-tv-view hidden">
+        <div class="live-tv-heading">
+          <div>
+            <p class="eyebrow">Television</p>
+            <h2>Live TV</h2>
+            <p id="liveTvStatus" class="status"></p>
+          </div>
+          <div class="live-tv-actions">
+            <button id="liveTvEarlier" class="secondary-button compact-button guide-arrow-button" type="button" title="Previous hour" aria-label="Previous hour">&#8592;</button>
+            <button id="liveTvNow" class="primary-button compact-button" type="button">Now</button>
+            <button id="liveTvLater" class="secondary-button compact-button guide-arrow-button" type="button" title="Next hour" aria-label="Next hour">&#8594;</button>
+          </div>
+        </div>
+        <label class="live-tv-filter">
+          Filter channels
+          <input id="liveTvFilter" type="search" placeholder="Channel name, number, or group" autocomplete="off">
+        </label>
+        <div id="liveTvGuide" class="live-tv-guide" aria-live="polite"></div>
       </section>
     </main>
 
@@ -209,6 +243,80 @@
       </div>
     </div>
 
+    <div id="downloadOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal download-modal">
+        <h2>Download URL</h2>
+        <form id="downloadForm" class="download-form">
+          <label>
+            URL
+            <input id="downloadUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
+          </label>
+          <div class="action-row">
+            <button id="startDownload" class="primary-button" type="submit">Download</button>
+            <button id="closeDownloadPanel" class="secondary-button" type="button">Close</button>
+          </div>
+        </form>
+        <p id="downloadStatus" class="status"></p>
+        <div id="downloadList" class="download-list"></div>
+      </div>
+    </div>
+
+    <div id="accountOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal account-settings-modal">
+        <h2>Account</h2>
+        <form id="selfAccountForm" class="self-account-form">
+          <label>Username<input id="selfAccountUsername" type="text" autocomplete="username" required></label>
+          <label>Current password<input id="selfAccountCurrentPassword" type="password" autocomplete="current-password" required></label>
+          <label>New password<input id="selfAccountNewPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label>
+          <label>Confirm new password<input id="selfAccountConfirmPassword" type="password" autocomplete="new-password"></label>
+          <div class="action-row">
+            <button id="saveSelfAccount" class="primary-button" type="submit">Save account</button>
+            <button id="closeAccountPanel" class="secondary-button" type="button">Close</button>
+          </div>
+        </form>
+        <p id="selfAccountStatus" class="status"></p>
+      </div>
+    </div>
+
+    <div id="iptvMatchOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal channel-match-modal">
+        <div class="channel-match-header">
+          <div>
+            <p class="eyebrow">Live TV</p>
+            <h2>Match EPG channels</h2>
+          </div>
+          <button id="closeIptvMatch" class="icon-button" type="button" aria-label="Close EPG matcher">&times;</button>
+        </div>
+        <div class="channel-match-grid">
+          <section class="channel-match-column">
+            <div class="channel-match-column-header">
+              <label>Filter live channels<input id="iptvChannelFilter" type="search" autocomplete="off" placeholder="Name or channel number"></label>
+              <span id="iptvChannelResults" class="channel-match-count"></span>
+            </div>
+            <select id="iptvChannelSelect" size="14" aria-label="Live channel"></select>
+          </section>
+          <section class="channel-match-column channel-match-guide-column">
+            <div class="channel-match-selection">
+              <div id="iptvSelectedChannel"></div>
+              <label class="channel-deinterlace-control">Deinterlacing<select id="iptvDeinterlaceMode"><option value="default">Use global setting</option><option value="auto">Auto</option><option value="off">Off</option><option value="force">Force</option><option value="smooth">Smooth 50/60p</option></select></label>
+            </div>
+            <div class="channel-match-column-header">
+              <label>Search EPG channels<input id="iptvGuideFilter" type="search" autocomplete="off" placeholder="Name or EPG ID"></label>
+              <span id="iptvGuideResults" class="channel-match-count"></span>
+            </div>
+            <select id="iptvGuideSelect" size="14" aria-label="EPG channel"></select>
+          </section>
+        </div>
+        <div class="channel-match-footer">
+          <p id="iptvMatchStatus" class="status"></p>
+          <div class="action-row">
+            <button id="clearIptvMatch" class="secondary-button" type="button">Use automatic</button>
+            <button id="saveIptvMatch" class="primary-button" type="button">Save channel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="adminPanelOverlay" class="choice-overlay admin-overlay hidden" aria-hidden="true">
       <div class="admin-panel-modal">
         <aside class="admin-sidebar">
@@ -368,6 +476,19 @@
                 <label>Preferred audio language<input id="settingsPreferredAudio" type="text" autocomplete="off"></label>
                 <label><input id="settingsEnableGpu" type="checkbox"> Enable GPU encoding</label>
               </fieldset>
+              <fieldset id="updatesSettingsFieldset">
+                <legend>Updates</legend>
+                <label class="settings-toggle"><input id="settingsUpdatesEnabled" type="checkbox"> Check GitHub for new releases</label>
+                <div id="updateSettingsBody" class="settings-feature-body compact-feature-body">
+                  <label>GitHub repository<input type="text" value="jazzy348/media-baker" readonly></label>
+                  <label>Check interval hours<input id="settingsUpdateIntervalHours" type="number" min="1" step="1"></label>
+                  <label class="settings-toggle"><input id="settingsIncludePrereleases" type="checkbox"> Include pre-releases</label>
+                  <label id="settingsAutoInstallLabel" class="settings-toggle"><input id="settingsAutoInstall" type="checkbox"> Install updates automatically</label>
+                  <button id="settingsCheckUpdates" class="secondary-button settings-action-button" type="button">Check now</button>
+                  <button id="settingsInstallUpdate" class="primary-button settings-action-button" type="button">Install update</button>
+                  <p id="settingsUpdateStatus" class="status"></p>
+                </div>
+              </fieldset>
               <fieldset>
                 <legend>Metadata</legend>
                 <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable TMDb metadata</label>
@@ -395,6 +516,31 @@
                     <label>Max offset seconds<input id="settingsSubtitleMaxOffset" type="number" min="1" step="1"></label>
                     <label>Sync timeout seconds<input id="settingsSubtitleTimeout" type="number" min="1" step="1"></label>
                   </div>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>YT-DLP</legend>
+                <label class="settings-toggle"><input id="settingsYtDlpEnabled" type="checkbox"> Enable YT-DLP downloads</label>
+                <div id="ytDlpSettingsBody" class="settings-feature-body">
+                  <label>Download path<input id="settingsYtDlpPath" type="text" autocomplete="off" placeholder="C:\MediaBaker\downloads"></label>
+                  <label>Library title<input id="settingsYtDlpTitle" type="text" autocomplete="off"></label>
+                  <label class="settings-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlist downloads</label>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>IPTV</legend>
+                <label class="settings-toggle"><input id="settingsIptvEnabled" type="checkbox"> Enable IPTV</label>
+                <div id="iptvSettingsBody" class="settings-feature-body">
+                  <label>Channel source<select id="settingsIptvSourceType"><option value="m3u">M3U playlist</option><option value="hdhomerun">HDHomeRun</option></select></label>
+                  <label id="settingsIptvPlaylistField">M3U playlist URL or path<input id="settingsIptvPlaylistUrl" type="text" autocomplete="off" placeholder="https://provider.example/playlist.m3u"></label>
+                  <label id="settingsIptvHdHomeRunField" class="hidden">HDHomeRun device address<input id="settingsIptvHdHomeRunUrl" type="text" autocomplete="off" placeholder="192.168.1.50 or http://hdhomerun.local"></label>
+                  <label><span id="settingsIptvGuideLabel">EPG URL or path</span><input id="settingsIptvGuideUrl" type="text" autocomplete="off" placeholder="https://provider.example/guide.xml"></label>
+                  <label>Source refresh hours<input id="settingsIptvRefreshHours" type="number" min="1" step="1"></label>
+                  <label>Live buffer seconds<input id="settingsIptvBufferSeconds" type="number" min="10" step="10"></label>
+                  <label>Live segment seconds<input id="settingsIptvSegmentSeconds" type="number" min="2" step="1"></label>
+                  <label>Deinterlacing<select id="settingsIptvDeinterlaceMode"><option value="auto">Auto</option><option value="off">Off</option><option value="force">Force</option><option value="smooth">Smooth 50/60p</option></select></label>
+                  <button id="settingsIptvReload" class="secondary-button settings-action-button" type="button">Reload channel sources</button>
+                  <button id="settingsIptvMatch" class="secondary-button settings-action-button" type="button">Match EPG channels</button>
                 </div>
               </fieldset>
               <fieldset>
@@ -486,7 +632,7 @@
       </div>
     </div>
 
-    <div id="loginOverlay" class="login-overlay">
+    <div id="loginOverlay" class="login-overlay hidden">
       <form id="loginForm" class="login-modal">
         <div class="login-mark"></div>
         <h1 id="loginTitle">Media Baker</h1>
@@ -499,6 +645,8 @@
     </div>
 
     <script src="/vendor/hls.js/hls.min.js"></script>
+    <script src="/js/api-client.js"></script>
+    <script src="/js/navigation.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

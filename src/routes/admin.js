@@ -3,8 +3,10 @@ const fs = require("fs/promises");
 const path = require("path");
 const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
+const { DEINTERLACE_MODES } = require("../utils/deinterlace");
+const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, playbackTokens }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, iptv, updates }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -17,7 +19,16 @@ module.exports = function createAdminRoutes({ accountService, appSettings, confi
 
   router.get("/accounts", requirePermission("canManageUsers"), async (req, res, next) => {
     try {
-      res.json({ accounts: await accountService.list() });
+      const allowedLibraryKeys = Array.isArray(req.allowedLibraryKeys) ? new Set(req.allowedLibraryKeys) : null;
+      res.json({
+        accounts: await accountService.list(),
+        libraries: config.libraries
+          .filter((library) => !allowedLibraryKeys || allowedLibraryKeys.has(library.key))
+          .map((library) => ({ key: library.key, title: library.title })),
+        features: {
+          iptv: Boolean(config.iptv && config.iptv.enabled)
+        }
+      });
     } catch (err) {
       next(err);
     }
@@ -112,7 +123,17 @@ module.exports = function createAdminRoutes({ accountService, appSettings, confi
 
   router.put("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
+      const previousYtDlp = JSON.stringify(config.ytdlp || {});
+      const previousIptv = JSON.stringify(config.iptv || {});
+      const previousUpdates = JSON.stringify(config.updates || {});
       const settings = await appSettings.save(req.body && req.body.settings || req.body || {});
+      syncYtDlpLibrary(config);
+      const ytdlpChanged = previousYtDlp !== JSON.stringify(config.ytdlp || {});
+      const iptvChanged = previousIptv !== JSON.stringify(config.iptv || {});
+      const updatesChanged = previousUpdates !== JSON.stringify(config.updates || {});
+      if (ytdlpChanged) {
+        await mediaIndex.syncLibrariesFromConfig();
+      }
       logger.configure(config.logging);
       if (ffmpeg && typeof ffmpeg.reloadConfig === "function") {
         ffmpeg.reloadConfig(config.ffmpeg);
@@ -130,7 +151,93 @@ module.exports = function createAdminRoutes({ accountService, appSettings, confi
       if (playbackTokens) {
         playbackTokens.ttlSeconds = config.hls.ttlSeconds;
       }
+      if (ytdlpChanged && ytdlp && typeof ytdlp.restart === "function") {
+        ytdlp.restart();
+      }
+      if (iptvChanged && iptv && typeof iptv.restart === "function") {
+        iptv.restart();
+      }
+      if (updatesChanged && updates && typeof updates.restart === "function") {
+        updates.restart();
+      }
+      if (ytdlpChanged && indexScanScheduler && typeof indexScanScheduler.run === "function") {
+        indexScanScheduler.run("settings-update").catch((scanErr) => {
+          logger.error(`[index-scan] settings update scan failed message="${scanErr.message}"`, scanErr);
+        });
+      }
       res.json({ settings });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/updates/status", requireAdmin, async (req, res, next) => {
+    try {
+      res.json(await updates.status());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/updates/check", requireAdmin, async (req, res, next) => {
+    try {
+      res.json(await updates.status({ force: true }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/updates/install", requireAdmin, async (req, res, next) => {
+    try {
+      res.status(202).json(await updates.installLatest());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/settings/iptv/refresh", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      if (!config.iptv.enabled) {
+        next(httpError(400, "IPTV is not enabled"));
+        return;
+      }
+      res.json({ status: await iptv.refresh() });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/settings/iptv/channel-matches", requirePermission("canManageSettings"), (req, res) => {
+    res.json(iptv.matchingData());
+  });
+
+  router.put("/settings/iptv/channel-matches/:channelId", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      const data = iptv.matchingData();
+      const channel = data.channels.find((entry) => entry.id === req.params.channelId);
+      const guideChannelId = req.body && req.body.guideChannelId
+        ? String(req.body.guideChannelId).trim()
+        : null;
+      const deinterlaceMode = String(req.body && req.body.deinterlaceMode || "default").trim().toLowerCase();
+      if (!channel) {
+        next(httpError(404, "IPTV channel not found"));
+        return;
+      }
+      if (guideChannelId && !data.guideChannels.some((entry) => entry.id === guideChannelId)) {
+        next(httpError(400, "EPG channel not found"));
+        return;
+      }
+      if (deinterlaceMode !== "default" && !DEINTERLACE_MODES.has(deinterlaceMode)) {
+        next(httpError(400, "Invalid deinterlace mode"));
+        return;
+      }
+
+      const previousMode = (config.iptv.channelDeinterlaceModes || {})[channel.id] || "default";
+      await saveIptvChannelSettings(appSettings, channel.id, guideChannelId, deinterlaceMode);
+      if (previousMode !== deinterlaceMode) {
+        iptv.resetChannel(channel.id);
+      }
+      res.json({ ok: true, data: iptv.applyConfiguredChannelMappings() });
     } catch (err) {
       next(err);
     }
@@ -438,9 +545,36 @@ function requirePermission(permission) {
   };
 }
 
+function requireAdmin(req, res, next) {
+  if (req.authMode === "admin" && req.user && req.user.permissions && req.user.permissions.isAdmin) {
+    next();
+    return;
+  }
+  next(httpError(403, "Admin access required"));
+}
+
 function canViewAdmin(req) {
   return req.authMode === "admin"
     || Boolean(req.user && req.user.permissions && req.user.permissions.canViewAdmin);
+}
+
+async function saveIptvChannelSettings(appSettings, channelId, guideChannelId, deinterlaceMode) {
+  const settings = await appSettings.get();
+  const channelMappings = { ...(settings.iptv.channelMappings || {}) };
+  const channelDeinterlaceModes = { ...(settings.iptv.channelDeinterlaceModes || {}) };
+  if (guideChannelId) {
+    channelMappings[channelId] = guideChannelId;
+  } else {
+    delete channelMappings[channelId];
+  }
+  if (deinterlaceMode === "default") {
+    delete channelDeinterlaceModes[channelId];
+  } else {
+    channelDeinterlaceModes[channelId] = deinterlaceMode;
+  }
+  settings.iptv.channelMappings = channelMappings;
+  settings.iptv.channelDeinterlaceModes = channelDeinterlaceModes;
+  await appSettings.save(settings);
 }
 
 function hasPermission(req, permission) {

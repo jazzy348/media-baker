@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { normalizeDeinterlaceMode, normalizeDeinterlaceModeMap } = require("./utils/deinterlace");
 
 const rootDir = path.resolve(__dirname, "..");
 const dockerMode = process.env.MEDIA_BAKER_DOCKER === "1";
@@ -32,7 +33,7 @@ const mysqlConfig = normalizeMysqlConfig(fileConfig.mysql);
 const seedLibraries = normalizeLibraries(fileConfig.libraries);
 
 module.exports = {
-  port: intValue(fileConfig.port, 3000),
+  port: intValue(fileConfig.port, 5000),
   auth: {
     playbackSecretPath: appPath(fileConfig.auth && fileConfig.auth.playbackSecretPath, "cache/playback-secret.json")
   },
@@ -45,6 +46,13 @@ module.exports = {
     level: normalizeLogLevel(fileConfig.logging && fileConfig.logging.level || fileConfig.logLevel),
     path: appPath(fileConfig.logging && fileConfig.logging.path, "cache/logs", "/logs"),
     retentionDays: intValue(fileConfig.logging && fileConfig.logging.retentionDays, 5)
+  },
+  updates: {
+    enabled: !fileConfig.updates || fileConfig.updates.enabled !== false,
+    checkIntervalSeconds: intValue(fileConfig.updates && fileConfig.updates.checkIntervalSeconds, 6 * 60 * 60),
+    includePrereleases: Boolean(fileConfig.updates && fileConfig.updates.includePrereleases),
+    autoInstall: Boolean(fileConfig.updates && fileConfig.updates.autoInstall),
+    workPath: appPath(fileConfig.updates && fileConfig.updates.workPath, "cache/updates")
   },
   indexScan: {
     enabled: !fileConfig.indexScan || fileConfig.indexScan.enabled !== false,
@@ -65,11 +73,33 @@ module.exports = {
     preloadOnStartup: fileConfig.metadata && typeof fileConfig.metadata.preloadOnStartup === "boolean" ? fileConfig.metadata.preloadOnStartup : true,
     requestDelayMs: intValue(fileConfig.metadata && fileConfig.metadata.requestDelayMs, 250)
   },
+  ytdlp: {
+    enabled: fileConfig.ytdlp && typeof fileConfig.ytdlp.enabled === "boolean" ? fileConfig.ytdlp.enabled : false,
+    libraryKey: "yt-dlp",
+    binaryPath: ytdlpExecutable(fileConfig.ytdlp && fileConfig.ytdlp.binaryPath),
+    downloadPath: appPath(fileConfig.ytdlp && fileConfig.ytdlp.downloadPath, "cache/yt-dlp", "/downloads"),
+    libraryTitle: fileConfig.ytdlp && fileConfig.ytdlp.libraryTitle || "YT-DLP",
+    allowPlaylists: fileConfig.ytdlp && typeof fileConfig.ytdlp.allowPlaylists === "boolean" ? fileConfig.ytdlp.allowPlaylists : false
+  },
+  iptv: {
+    enabled: fileConfig.iptv && typeof fileConfig.iptv.enabled === "boolean" ? fileConfig.iptv.enabled : false,
+    sourceType: fileConfig.iptv && fileConfig.iptv.sourceType === "hdhomerun" ? "hdhomerun" : "m3u",
+    playlistUrl: fileConfig.iptv && fileConfig.iptv.playlistUrl || "",
+    hdHomeRunUrl: fileConfig.iptv && fileConfig.iptv.hdHomeRunUrl || "",
+    guideUrl: fileConfig.iptv && fileConfig.iptv.guideUrl || "",
+    channelMappings: stringMapValue(fileConfig.iptv && fileConfig.iptv.channelMappings),
+    deinterlaceMode: normalizeDeinterlaceMode(fileConfig.iptv && fileConfig.iptv.deinterlaceMode, "auto"),
+    channelDeinterlaceModes: normalizeDeinterlaceModeMap(fileConfig.iptv && fileConfig.iptv.channelDeinterlaceModes),
+    refreshIntervalSeconds: intValue(fileConfig.iptv && fileConfig.iptv.refreshIntervalSeconds, 24 * 60 * 60),
+    bufferSeconds: intValue(fileConfig.iptv && fileConfig.iptv.bufferSeconds, 180),
+    segmentSeconds: intValue(fileConfig.iptv && fileConfig.iptv.segmentSeconds, 6),
+    cachePath: appPath(fileConfig.iptv && fileConfig.iptv.cachePath, "cache/iptv")
+  },
   subtitles: {
     enabled: fileConfig.subtitles && typeof fileConfig.subtitles.enabled === "boolean" ? fileConfig.subtitles.enabled : false,
     provider: fileConfig.subtitles && fileConfig.subtitles.provider || "subdl",
     subdlApiKey: fileConfig.subtitles && fileConfig.subtitles.subdlApiKey || "",
-    userAgent: fileConfig.subtitles && fileConfig.subtitles.userAgent || "MediaBaker v1.0",
+    userAgent: fileConfig.subtitles && fileConfig.subtitles.userAgent || "MediaBaker",
     defaultLanguage: fileConfig.subtitles && fileConfig.subtitles.defaultLanguage || "en",
     cachePath: appPath(fileConfig.subtitles && fileConfig.subtitles.cachePath, "cache/subtitles"),
     sync: {
@@ -127,6 +157,17 @@ function ffsubsyncExecutable() {
   return path.join(rootDir, "bin", "ffsubsync.exe");
 }
 
+function ytdlpExecutable(value) {
+  if (value) {
+    return appExecutable(value, "yt-dlp");
+  }
+  if (dockerMode || process.platform !== "win32") {
+    return "yt-dlp";
+  }
+
+  return path.join(rootDir, "bin", "yt-dlp.exe");
+}
+
 function defaultExecutable(name) {
   if (dockerMode || process.platform !== "win32") {
     return name;
@@ -169,6 +210,15 @@ function listValue(value, fallback) {
   }
 
   return fallback;
+}
+
+function stringMapValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, entry]) => [String(key).trim(), String(entry || "").trim()])
+    .filter(([key, entry]) => key && entry));
 }
 
 function normalizeMysqlConfig(value) {

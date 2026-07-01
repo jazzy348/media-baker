@@ -1,4 +1,6 @@
 const initialShareToken = new URLSearchParams(window.location.search).get("shareToken") || "";
+const navigation = window.MediaBakerNavigation;
+const apiClient = window.MediaBakerApi;
 
 const state = {
   token: initialShareToken ? "" : localStorage.getItem("streamToken") || "",
@@ -12,12 +14,30 @@ const state = {
   currentView: "home",
   homeMode: "recent",
   libraryView: null,
-  health: null
+  iptvEnabled: false,
+  iptvGuideStart: null,
+  iptvGuide: null,
+  iptvBufferSeconds: 180,
+  iptvSegmentSeconds: 6,
+  iptvGuidePinnedToNow: true,
+  iptvChannelMappings: {},
+  iptvChannelDeinterlaceModes: {},
+  iptvMatchData: null,
+  iptvGuideById: new Map(),
+  features: {
+    iptv: false,
+    ytdlp: false
+  },
+  health: null,
+  updateStatus: null,
+  dismissedUpdateVersion: null
 };
 
 const LIBRARY_PAGE_SIZE = 72;
+const LIVE_TV_PERMISSION_KEY = "@live-tv";
 
 const els = {
+  brandLink: document.querySelector(".brand"),
   loginOverlay: document.getElementById("loginOverlay"),
   loginForm: document.getElementById("loginForm"),
   loginTitle: document.getElementById("loginTitle"),
@@ -26,9 +46,18 @@ const els = {
   secretInput: document.getElementById("secretInput"),
   loginError: document.getElementById("loginError"),
   lockButton: document.getElementById("lockButton"),
+  accountButton: document.getElementById("accountButton"),
   historyButton: document.getElementById("historyButton"),
   adminPanelButton: document.getElementById("adminPanelButton"),
+  liveTvButton: document.getElementById("liveTvButton"),
+  downloadButton: document.getElementById("downloadButton"),
   systemBanner: document.getElementById("systemBanner"),
+  updateBanner: document.getElementById("updateBanner"),
+  updateBannerTitle: document.getElementById("updateBannerTitle"),
+  updateBannerMessage: document.getElementById("updateBannerMessage"),
+  updateReleaseLink: document.getElementById("updateReleaseLink"),
+  installUpdateBanner: document.getElementById("installUpdateBanner"),
+  dismissUpdateBanner: document.getElementById("dismissUpdateBanner"),
   homeToolbar: document.getElementById("homeToolbar"),
   homeModeTitle: document.getElementById("homeModeTitle"),
   recentMode: document.getElementById("recentMode"),
@@ -38,6 +67,13 @@ const els = {
   searchResults: document.getElementById("searchResults"),
   searchGrid: document.getElementById("searchGrid"),
   searchCount: document.getElementById("searchCount"),
+  liveTvView: document.getElementById("liveTvView"),
+  liveTvStatus: document.getElementById("liveTvStatus"),
+  liveTvGuide: document.getElementById("liveTvGuide"),
+  liveTvFilter: document.getElementById("liveTvFilter"),
+  liveTvEarlier: document.getElementById("liveTvEarlier"),
+  liveTvNow: document.getElementById("liveTvNow"),
+  liveTvLater: document.getElementById("liveTvLater"),
   detailsPanel: document.getElementById("detailsPanel"),
   closeDetails: document.getElementById("closeDetails"),
   detailsPoster: document.getElementById("detailsPoster"),
@@ -105,6 +141,35 @@ const els = {
   playerCategory: document.getElementById("playerCategory"),
   playerTitle: document.getElementById("playerTitle"),
   playerStatus: document.getElementById("playerStatus"),
+  downloadOverlay: document.getElementById("downloadOverlay"),
+  downloadForm: document.getElementById("downloadForm"),
+  downloadUrlInput: document.getElementById("downloadUrlInput"),
+  startDownload: document.getElementById("startDownload"),
+  closeDownloadPanel: document.getElementById("closeDownloadPanel"),
+  downloadStatus: document.getElementById("downloadStatus"),
+  downloadList: document.getElementById("downloadList"),
+  accountOverlay: document.getElementById("accountOverlay"),
+  selfAccountForm: document.getElementById("selfAccountForm"),
+  selfAccountUsername: document.getElementById("selfAccountUsername"),
+  selfAccountCurrentPassword: document.getElementById("selfAccountCurrentPassword"),
+  selfAccountNewPassword: document.getElementById("selfAccountNewPassword"),
+  selfAccountConfirmPassword: document.getElementById("selfAccountConfirmPassword"),
+  saveSelfAccount: document.getElementById("saveSelfAccount"),
+  closeAccountPanel: document.getElementById("closeAccountPanel"),
+  selfAccountStatus: document.getElementById("selfAccountStatus"),
+  iptvMatchOverlay: document.getElementById("iptvMatchOverlay"),
+  iptvChannelFilter: document.getElementById("iptvChannelFilter"),
+  iptvGuideFilter: document.getElementById("iptvGuideFilter"),
+  iptvChannelSelect: document.getElementById("iptvChannelSelect"),
+  iptvGuideSelect: document.getElementById("iptvGuideSelect"),
+  iptvChannelResults: document.getElementById("iptvChannelResults"),
+  iptvGuideResults: document.getElementById("iptvGuideResults"),
+  iptvSelectedChannel: document.getElementById("iptvSelectedChannel"),
+  iptvDeinterlaceMode: document.getElementById("iptvDeinterlaceMode"),
+  iptvMatchStatus: document.getElementById("iptvMatchStatus"),
+  saveIptvMatch: document.getElementById("saveIptvMatch"),
+  clearIptvMatch: document.getElementById("clearIptvMatch"),
+  closeIptvMatch: document.getElementById("closeIptvMatch"),
   libraryForm: document.getElementById("libraryForm"),
   libraryNameInput: document.getElementById("libraryNameInput"),
   libraryTypeSelect: document.getElementById("libraryTypeSelect"),
@@ -179,6 +244,16 @@ const els = {
   settingsLogRetentionDays: document.getElementById("settingsLogRetentionDays"),
   settingsPreferredAudio: document.getElementById("settingsPreferredAudio"),
   settingsEnableGpu: document.getElementById("settingsEnableGpu"),
+  settingsUpdatesEnabled: document.getElementById("settingsUpdatesEnabled"),
+  updatesSettingsFieldset: document.getElementById("updatesSettingsFieldset"),
+  updateSettingsBody: document.getElementById("updateSettingsBody"),
+  settingsUpdateIntervalHours: document.getElementById("settingsUpdateIntervalHours"),
+  settingsIncludePrereleases: document.getElementById("settingsIncludePrereleases"),
+  settingsAutoInstallLabel: document.getElementById("settingsAutoInstallLabel"),
+  settingsAutoInstall: document.getElementById("settingsAutoInstall"),
+  settingsCheckUpdates: document.getElementById("settingsCheckUpdates"),
+  settingsInstallUpdate: document.getElementById("settingsInstallUpdate"),
+  settingsUpdateStatus: document.getElementById("settingsUpdateStatus"),
   settingsMetadataEnabled: document.getElementById("settingsMetadataEnabled"),
   metadataSettingsBody: document.getElementById("metadataSettingsBody"),
   settingsTmdbApiKey: document.getElementById("settingsTmdbApiKey"),
@@ -199,6 +274,26 @@ const els = {
   subtitleSyncSettingsBody: document.getElementById("subtitleSyncSettingsBody"),
   settingsSubtitleMaxOffset: document.getElementById("settingsSubtitleMaxOffset"),
   settingsSubtitleTimeout: document.getElementById("settingsSubtitleTimeout"),
+  settingsYtDlpEnabled: document.getElementById("settingsYtDlpEnabled"),
+  ytDlpSettingsBody: document.getElementById("ytDlpSettingsBody"),
+  settingsYtDlpPath: document.getElementById("settingsYtDlpPath"),
+  settingsYtDlpTitle: document.getElementById("settingsYtDlpTitle"),
+  settingsYtDlpPlaylists: document.getElementById("settingsYtDlpPlaylists"),
+  settingsIptvEnabled: document.getElementById("settingsIptvEnabled"),
+  iptvSettingsBody: document.getElementById("iptvSettingsBody"),
+  settingsIptvSourceType: document.getElementById("settingsIptvSourceType"),
+  settingsIptvPlaylistField: document.getElementById("settingsIptvPlaylistField"),
+  settingsIptvPlaylistUrl: document.getElementById("settingsIptvPlaylistUrl"),
+  settingsIptvHdHomeRunField: document.getElementById("settingsIptvHdHomeRunField"),
+  settingsIptvHdHomeRunUrl: document.getElementById("settingsIptvHdHomeRunUrl"),
+  settingsIptvGuideLabel: document.getElementById("settingsIptvGuideLabel"),
+  settingsIptvGuideUrl: document.getElementById("settingsIptvGuideUrl"),
+  settingsIptvRefreshHours: document.getElementById("settingsIptvRefreshHours"),
+  settingsIptvBufferSeconds: document.getElementById("settingsIptvBufferSeconds"),
+  settingsIptvSegmentSeconds: document.getElementById("settingsIptvSegmentSeconds"),
+  settingsIptvDeinterlaceMode: document.getElementById("settingsIptvDeinterlaceMode"),
+  settingsIptvReload: document.getElementById("settingsIptvReload"),
+  settingsIptvMatch: document.getElementById("settingsIptvMatch"),
   settingsHlsTtl: document.getElementById("settingsHlsTtl"),
   settingsHlsSegment: document.getElementById("settingsHlsSegment"),
   settingsHlsWait: document.getElementById("settingsHlsWait"),
@@ -232,11 +327,22 @@ const els = {
 };
 
 let hlsPlayer = null;
+let nativePlayerErrorHandler = null;
 let libraryObserver = null;
 let progressRefreshPromise = null;
 let draggedLibraryKey = null;
 let adminRefreshTimer = null;
 let folderPickerPath = "";
+let downloadRefreshTimer = null;
+let downloadHomeRefreshPromise = null;
+let onDeckRefreshTimer = null;
+let onDeckRefreshPromise = null;
+let hasActiveDownloads = false;
+let liveTvRefreshTimer = null;
+let liveTvRefreshPromise = null;
+let liveTvRequestId = 0;
+let routeRenderDepth = 0;
+const downloadStatuses = new Map();
 
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -253,13 +359,16 @@ els.loginForm.addEventListener("submit", async (event) => {
     });
     state.token = result.token;
     state.user = result.user;
+    applyFeatures(result.features);
     state.shareToken = "";
     state.setupMode = false;
     localStorage.setItem("streamToken", state.token);
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
-    await loadHome();
+    await renderRoute(navigation.readRoute());
+    refreshIptvAvailability();
     refreshSystemHealthInBackground();
+    refreshUpdateStatusInBackground();
   } catch (err) {
     els.loginError.textContent = state.setupMode
       ? err.message || "Could not create the admin account."
@@ -267,7 +376,17 @@ els.loginForm.addEventListener("submit", async (event) => {
   }
 });
 
+els.brandLink.addEventListener("click", (event) => {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  event.preventDefault();
+  loadHome();
+});
+
 els.lockButton.addEventListener("click", () => {
+  hideLiveTvView();
+  closeAccountPanel();
   localStorage.removeItem("streamToken");
   state.token = "";
   state.user = null;
@@ -278,6 +397,27 @@ els.lockButton.addEventListener("click", () => {
   els.loginOverlay.classList.remove("hidden");
 });
 
+els.accountButton.addEventListener("click", openAccountPanel);
+els.closeAccountPanel.addEventListener("click", closeAccountPanel);
+els.selfAccountForm.addEventListener("submit", saveSelfAccount);
+els.accountOverlay.addEventListener("click", (event) => {
+  if (event.target === els.accountOverlay) {
+    closeAccountPanel();
+  }
+});
+els.downloadButton.addEventListener("click", openDownloadPanel);
+els.liveTvButton.addEventListener("click", () => openLiveTv(new Date(), true));
+els.liveTvEarlier.addEventListener("click", () => shiftLiveTvGuide(-1));
+els.liveTvNow.addEventListener("click", () => openLiveTv(new Date(), true));
+els.liveTvLater.addEventListener("click", () => shiftLiveTvGuide(1));
+els.liveTvFilter.addEventListener("input", filterLiveTvChannels);
+els.closeDownloadPanel.addEventListener("click", closeDownloadPanel);
+els.downloadForm.addEventListener("submit", startYtDlpDownload);
+els.downloadOverlay.addEventListener("click", (event) => {
+  if (event.target === els.downloadOverlay) {
+    closeDownloadPanel();
+  }
+});
 els.historyButton.addEventListener("click", openHistoryView);
 els.adminPanelButton.addEventListener("click", () => openAdminPanel("accounts"));
 els.closeAdminPanel.addEventListener("click", closeAdminPanel);
@@ -300,10 +440,33 @@ els.resetAccountForm.addEventListener("click", resetAccountForm);
 els.apiKeyForm.addEventListener("submit", createApiKey);
 els.copyApiKeySecret.addEventListener("click", copyNewApiKey);
 els.settingsForm.addEventListener("submit", saveSettings);
+els.settingsCheckUpdates.addEventListener("click", forceCheckForUpdates);
+els.settingsInstallUpdate.addEventListener("click", installAvailableUpdate);
+els.installUpdateBanner.addEventListener("click", installAvailableUpdate);
+els.dismissUpdateBanner.addEventListener("click", dismissUpdateBanner);
+els.settingsIptvReload.addEventListener("click", forceReloadIptvSources);
+els.settingsIptvMatch.addEventListener("click", openIptvMatcher);
+els.closeIptvMatch.addEventListener("click", closeIptvMatcher);
+els.saveIptvMatch.addEventListener("click", saveIptvChannelMatch);
+els.clearIptvMatch.addEventListener("click", clearIptvChannelMatch);
+els.iptvChannelFilter.addEventListener("input", debounce(renderIptvChannelOptions, 100));
+els.iptvGuideFilter.addEventListener("input", debounce(() => renderIptvGuideOptions(false), 100));
+els.iptvChannelSelect.addEventListener("change", () => renderIptvGuideOptions(true));
+els.iptvMatchOverlay.addEventListener("click", (event) => {
+  if (event.target === els.iptvMatchOverlay) {
+    closeIptvMatcher();
+  }
+});
 [
+  els.settingsUpdatesEnabled,
+  els.settingsIncludePrereleases,
+  els.settingsAutoInstall,
   els.settingsMetadataEnabled,
   els.settingsSubtitlesEnabled,
   els.settingsSubtitleSyncEnabled,
+  els.settingsYtDlpEnabled,
+  els.settingsIptvEnabled,
+  els.settingsIptvSourceType,
   els.settingsIndexEnabled,
   els.settingsFallbackEnabled
 ].forEach((element) => element.addEventListener("change", updateSettingsVisibility));
@@ -346,6 +509,9 @@ els.metadataMatchOverlay.addEventListener("click", (event) => {
 els.markWatched.addEventListener("click", markSelectedWatched);
 els.removeOnDeck.addEventListener("click", removeSelectedOnDeck);
 els.closePlayer.addEventListener("click", closePlayer);
+els.webPlayer.addEventListener("playing", startOnDeckPolling);
+els.webPlayer.addEventListener("pause", stopOnDeckPolling);
+els.webPlayer.addEventListener("ended", stopOnDeckPolling);
 els.playerOverlay.addEventListener("click", (event) => {
   if (event.target === els.playerOverlay) {
     closePlayer();
@@ -367,6 +533,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
     return;
   }
+  if (!els.iptvMatchOverlay.classList.contains("hidden")) {
+    closeIptvMatcher();
+    return;
+  }
   if (!els.adminPanelOverlay.classList.contains("hidden")) {
     closeAdminPanel();
     return;
@@ -375,25 +545,54 @@ document.addEventListener("keydown", (event) => {
     closePlayer();
     return;
   }
+  if (!els.downloadOverlay.classList.contains("hidden")) {
+    closeDownloadPanel();
+    return;
+  }
+  if (!els.accountOverlay.classList.contains("hidden")) {
+    closeAccountPanel();
+    return;
+  }
   if (els.detailsPanel.classList.contains("open")) {
     closeDetails();
   }
 });
 
+navigation.onChange((route) => {
+  if (!state.token && !state.shareToken) {
+    return;
+  }
+  renderRoute(route).catch(() => {
+    navigation.navigate("/", { replace: true });
+    loadHome();
+  });
+});
+
 boot();
 
 async function boot() {
-  const status = await publicApi("/api/auth/status");
+  let status;
+  try {
+    status = await publicApi("/api/auth/status");
+  } catch (err) {
+    els.loginError.textContent = err.message || "Media Baker could not contact the server.";
+    els.loginOverlay.classList.remove("hidden");
+    revealApp();
+    return;
+  }
   state.setupMode = Boolean(status.needsSetup);
+  applyFeatures(status.features);
   updateLoginMode();
   updateAdminControls();
   if (state.setupMode) {
     els.loginOverlay.classList.remove("hidden");
+    revealApp();
     return;
   }
 
   if (!state.token && !state.shareToken) {
     els.loginOverlay.classList.remove("hidden");
+    revealApp();
     return;
   }
 
@@ -401,11 +600,14 @@ async function boot() {
     if (state.token) {
       const me = await api("/api/auth/me");
       state.user = me.user;
+      applyFeatures(me.features);
     }
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
-    await loadHome();
+    await renderRoute(navigation.readRoute());
+    refreshIptvAvailability();
     refreshSystemHealthInBackground();
+    refreshUpdateStatusInBackground();
   } catch (err) {
     if (!state.shareToken) {
       localStorage.removeItem("streamToken");
@@ -415,6 +617,74 @@ async function boot() {
     state.shareToken = "";
     updateAdminControls();
     els.loginOverlay.classList.remove("hidden");
+  } finally {
+    revealApp();
+  }
+}
+
+function revealApp() {
+  document.documentElement.classList.remove("auth-pending");
+}
+
+function applyFeatures(features) {
+  state.features = {
+    iptv: Boolean(features && features.iptv),
+    ytdlp: Boolean(features && features.ytdlp)
+  };
+  state.iptvEnabled = state.features.iptv;
+  updateAdminControls();
+}
+
+async function renderRoute(route) {
+  routeRenderDepth += 1;
+  try {
+    if (route.name === "history" && !state.shareToken) {
+      await openHistoryView();
+      return;
+    }
+    if (route.name === "live-tv" && !state.shareToken) {
+      if (state.iptvEnabled && canAccessLiveTv()) {
+        await openLiveTv(route.start, route.pinnedToNow);
+        return;
+      }
+      navigation.navigate("/", { replace: true });
+    }
+    if (route.name === "library") {
+      await openLibraryView(route.libraryKey, route.title || readableRouteName(route.libraryKey));
+      return;
+    }
+    if (route.name === "show") {
+      await openShowView(route.libraryKey, route.showId);
+      return;
+    }
+    if (route.name === "season" && Number.isFinite(route.season)) {
+      await openSeasonView(route.libraryKey, route.showId, route.season);
+      return;
+    }
+    if (route.name === "search") {
+      els.searchInput.value = route.query;
+      await search();
+      return;
+    }
+
+    if (route.name === "not-found") {
+      navigation.navigate("/", { replace: true });
+    }
+    await loadHome(route.mode);
+  } finally {
+    routeRenderDepth -= 1;
+  }
+}
+
+function readableRouteName(value) {
+  return String(value || "Library")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function recordRoute(path, options = {}) {
+  if (routeRenderDepth === 0) {
+    navigation.navigate(path, options);
   }
 }
 
@@ -428,7 +698,9 @@ function updateLoginMode() {
 
 async function loadHome(mode = state.homeMode) {
   stopLibraryLoading();
+  hideLiveTvView();
   state.homeMode = mode === "random" ? "random" : "recent";
+  recordRoute(navigation.homePath(state.homeMode));
   updateHomeModeControls();
   const data = await api(`/api/catalog/home?mode=${encodeURIComponent(state.homeMode)}`);
   state.homeData = data;
@@ -439,19 +711,77 @@ async function loadHome(mode = state.homeMode) {
   els.homeRows.classList.remove("hidden");
   els.homeRows.innerHTML = "";
   const onDeck = await api("/api/progress/on-deck");
-  if (onDeck.items && onDeck.items.length > 0) {
-    const section = rowSection("On Deck", onDeck.items.length, onDeck.items);
-    section.dataset.rowKind = "onDeck";
-    els.homeRows.appendChild(section);
-  }
+  renderOnDeckRow(onDeck.items || []);
   for (const row of data.rows) {
     els.homeRows.appendChild(rowSection(row.title, row.total || row.items.length, row.items, row.key));
   }
 }
 
+function renderOnDeckRow(items) {
+  const existing = els.homeRows.querySelector('[data-row-kind="onDeck"]');
+  if (items.length === 0) {
+    existing?.remove();
+    return;
+  }
+
+  const section = rowSection("On Deck", items.length, items);
+  section.dataset.rowKind = "onDeck";
+  if (existing) {
+    existing.replaceWith(section);
+  } else {
+    els.homeRows.prepend(section);
+  }
+}
+
+async function refreshOnDeckRow({ force = false } = {}) {
+  if (state.currentView !== "home" || !state.token) {
+    return;
+  }
+  if (onDeckRefreshPromise) {
+    if (!force) {
+      return onDeckRefreshPromise;
+    }
+    await onDeckRefreshPromise.catch(() => {});
+    if (state.currentView !== "home" || !state.token) {
+      return;
+    }
+  }
+
+  onDeckRefreshPromise = api("/api/progress/on-deck")
+    .then((onDeck) => {
+      if (state.currentView === "home") {
+        renderOnDeckRow(onDeck.items || []);
+      }
+    })
+    .finally(() => {
+      onDeckRefreshPromise = null;
+    });
+  return onDeckRefreshPromise;
+}
+
+function startOnDeckPolling() {
+  if (onDeckRefreshTimer) {
+    return;
+  }
+  refreshOnDeckRow().catch(() => {});
+  onDeckRefreshTimer = window.setInterval(() => {
+    refreshOnDeckRow().catch(() => {});
+  }, 10_000);
+}
+
+function stopOnDeckPolling() {
+  if (!onDeckRefreshTimer) {
+    return;
+  }
+  window.clearInterval(onDeckRefreshTimer);
+  onDeckRefreshTimer = null;
+  refreshOnDeckRow().catch(() => {});
+}
+
 async function refreshSystemHealth() {
   state.health = await api("/api/health");
   renderSystemBanner();
+  updateAdminControls();
   updatePlaybackControls();
   return state.health;
 }
@@ -463,6 +793,98 @@ function refreshSystemHealthInBackground() {
     els.systemBanner.innerHTML = "";
     updatePlaybackControls();
   });
+}
+
+async function refreshUpdateStatus(force = false) {
+  if (!isAdminMode()) {
+    state.updateStatus = null;
+    renderUpdateBanner();
+    renderSettingsUpdateStatus();
+    return null;
+  }
+
+  try {
+    state.updateStatus = await api(
+      force ? "/api/admin/updates/check" : "/api/admin/updates/status",
+      state.token,
+      force ? { method: "POST" } : {}
+    );
+  } catch (err) {
+    state.updateStatus = {
+      enabled: true,
+      currentVersion: "unknown",
+      error: err.message || "Update check failed"
+    };
+  }
+  renderUpdateBanner();
+  renderSettingsUpdateStatus();
+  return state.updateStatus;
+}
+
+function refreshUpdateStatusInBackground() {
+  refreshUpdateStatus().catch(() => {});
+}
+
+function renderUpdateBanner() {
+  const status = state.updateStatus;
+  const latest = status && status.latest;
+  const visible = Boolean(
+    isAdminMode()
+    && status
+    && status.enabled
+    && status.updateAvailable
+    && latest
+    && state.dismissedUpdateVersion !== latest.version
+  );
+  els.updateBanner.classList.toggle("hidden", !visible);
+  if (!visible) {
+    return;
+  }
+
+  els.updateBannerTitle.textContent = `Media Baker ${latest.version} is available`;
+  els.updateBannerMessage.textContent = `You are running ${status.currentVersion}.${latest.publishedAt ? ` Released ${formatDate(latest.publishedAt)}.` : ""}`;
+  els.updateReleaseLink.href = latest.url;
+  els.installUpdateBanner.classList.toggle("hidden", !status.autoUpdateSupported);
+}
+
+function dismissUpdateBanner() {
+  const latest = state.updateStatus && state.updateStatus.latest;
+  if (latest) {
+    state.dismissedUpdateVersion = latest.version;
+  }
+  renderUpdateBanner();
+}
+
+function renderSettingsUpdateStatus() {
+  const status = state.updateStatus;
+  const canInstall = Boolean(status && status.autoUpdateSupported && status.updateAvailable && status.latest);
+  els.settingsInstallUpdate.disabled = !canInstall;
+  els.settingsInstallUpdate.classList.toggle("hidden", !canInstall);
+  els.settingsAutoInstallLabel.classList.toggle("hidden", Boolean(status && !status.autoUpdateSupported));
+  els.settingsAutoInstall.disabled = Boolean(status && !status.autoUpdateSupported);
+  if (!status) {
+    els.settingsUpdateStatus.textContent = "";
+    return;
+  }
+  if (!status.enabled) {
+    els.settingsUpdateStatus.textContent = "Release checks are disabled.";
+    return;
+  }
+  if (status.error) {
+    els.settingsUpdateStatus.textContent = `Last check failed: ${status.error}`;
+    return;
+  }
+  if (status.install && status.install.phase === "failed") {
+    els.settingsUpdateStatus.textContent = `Update failed: ${status.install.error}`;
+    return;
+  }
+  if (!status.latest) {
+    els.settingsUpdateStatus.textContent = `No published releases found. Current version: ${status.currentVersion}.`;
+    return;
+  }
+  els.settingsUpdateStatus.textContent = status.updateAvailable
+    ? `Version ${status.latest.version} is available. Current version: ${status.currentVersion}.`
+    : `Media Baker ${status.currentVersion} is current.`;
 }
 
 function renderSystemBanner() {
@@ -505,8 +927,10 @@ function updateHomeModeControls() {
 
 async function search() {
   stopLibraryLoading();
+  hideLiveTvView();
   const query = els.searchInput.value.trim();
   if (!query) {
+    recordRoute(navigation.homePath(state.homeMode), { replace: state.currentView === "search" });
     els.searchResults.classList.add("hidden");
     els.homeToolbar.classList.remove("hidden");
     els.homeRows.classList.remove("hidden");
@@ -516,6 +940,7 @@ async function search() {
     return;
   }
 
+  recordRoute(navigation.searchPath(query), { replace: state.currentView === "search" });
   els.homeRows.classList.add("hidden");
   els.homeToolbar.classList.add("hidden");
   state.currentView = "search";
@@ -534,20 +959,29 @@ async function search() {
   data.results.forEach((item) => els.searchGrid.appendChild(card(item)));
 }
 
-function card(item) {
+function card(item, options = {}) {
+  const episode = isEpisodeItem(item);
+  const showEpisodeThumbnail = episode && options.episodeArtwork === "thumbnail";
+  const imageUrl = episode
+    ? showEpisodeThumbnail
+      ? item.thumbnailUrl || item.seasonPosterUrl || item.posterUrl
+      : item.seasonPosterUrl || item.posterUrl
+    : imageUrlForItem(item);
+  const selectedItem = episode && !showEpisodeThumbnail
+    ? { ...item, thumbnailUrl: null, posterUrl: imageUrl || item.posterUrl, preferredArtworkUrl: imageUrl || null }
+    : item;
   const button = document.createElement("button");
   button.className = "card";
   button.type = "button";
   button.dataset.mediaKey = mediaKey(item);
   button.innerHTML = `
     <div class="poster">${initials(item.title)}</div>
-    ${progressBarHtml(item.progress)}
+    <div class="card-progress-slot">${progressBarHtml(item.progress)}</div>
     <div class="card-title">${escapeHtml(item.title)}</div>
     <div class="card-subtitle">${escapeHtml(item.subtitle || item.category)}</div>
   `;
   const poster = button.querySelector(".poster");
-  poster.classList.toggle("thumbnail-art", Boolean(item.thumbnailUrl));
-  const imageUrl = imageUrlForItem(item);
+  poster.classList.toggle("thumbnail-art", Boolean(showEpisodeThumbnail && item.thumbnailUrl));
   if (imageUrl) {
     setPosterImage(poster, imageUrl);
   }
@@ -557,7 +991,7 @@ function card(item) {
       return;
     }
 
-    openDetails(item);
+    openDetails(selectedItem);
   });
   return button;
 }
@@ -671,7 +1105,7 @@ async function openDetails(item) {
   updatePlaybackControls();
 }
 
-function rowSection(title, count, items, libraryKey) {
+function rowSection(title, count, items, libraryKey, options = {}) {
   const section = document.createElement("section");
   section.className = "row";
   section.innerHTML = `
@@ -689,7 +1123,7 @@ function rowSection(title, count, items, libraryKey) {
     viewAll.addEventListener("click", () => openLibraryView(libraryKey, title));
   }
   const rail = section.querySelector(".rail");
-  items.forEach((item) => rail.appendChild(card(item)));
+  items.forEach((item) => rail.appendChild(card(item, options)));
   return section;
 }
 
@@ -727,6 +1161,7 @@ function hierarchyButton(label, onClick) {
 
 async function openSeasonView(mediaType, showId, seasonNumber) {
   stopLibraryLoading();
+  recordRoute(navigation.seasonPath(mediaType, showId, seasonNumber));
   const [show, season] = await Promise.all([
     api(`${tvBasePath(mediaType)}/${showId}`),
     api(`${tvBasePath(mediaType)}/${showId}/seasons/${seasonNumber}`)
@@ -739,7 +1174,7 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
     actions: [
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       { label: "Show", onClick: () => openShowView(mediaType, showId) },
-      { label: "Home", onClick: loadHome }
+      { label: "Home", onClick: () => loadHome() }
     ],
     content: seasonGrid(mediaType, show, season)
   });
@@ -747,12 +1182,19 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
 
 async function openShowView(mediaType, showId) {
   stopLibraryLoading();
+  recordRoute(navigation.showPath(mediaType, showId));
   const show = await api(`${tvBasePath(mediaType)}/${showId}`);
   state.currentView = "show";
   closeDetails();
   const fragment = document.createDocumentFragment();
   for (const season of show.seasons) {
-    fragment.appendChild(rowSection(season.name || `Season ${pad(season.season)}`, `${season.episodes.length} episodes`, season.episodes.map((episode) => episodeItem(mediaType, show, episode))));
+    fragment.appendChild(rowSection(
+      season.name || `Season ${pad(season.season)}`,
+      `${season.episodes.length} episodes`,
+      season.episodes.map((episode) => episodeItem(mediaType, show, episode)),
+      null,
+      { episodeArtwork: "thumbnail" }
+    ));
   }
   showContentView({
     title: show.name,
@@ -760,7 +1202,7 @@ async function openShowView(mediaType, showId) {
     actions: [
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       { label: "Random episode", onClick: () => openRandomEpisode(mediaType, show) },
-      { label: "Home", onClick: loadHome }
+      { label: "Home", onClick: () => loadHome() }
     ],
     content: fragment
   });
@@ -777,6 +1219,7 @@ function openRandomEpisode(mediaType, show) {
 }
 
 function showContentView({ title, subtitle, actions, content }) {
+  hideLiveTvView();
   els.searchInput.value = "";
   els.searchResults.classList.add("hidden");
   els.homeToolbar.classList.add("hidden");
@@ -804,6 +1247,7 @@ function showContentView({ title, subtitle, actions, content }) {
 async function openLibraryView(libraryKey, title) {
   stopLibraryLoading();
   closeDetails();
+  recordRoute(navigation.libraryPath(libraryKey), { state: { title } });
 
   const section = document.createElement("section");
   section.className = "library-results";
@@ -819,7 +1263,7 @@ async function openLibraryView(libraryKey, title) {
   const view = showContentView({
     title,
     subtitle: "Loading...",
-    actions: [{ label: "Home", onClick: loadHome }],
+    actions: [{ label: "Home", onClick: () => loadHome() }],
     content: section
   });
 
@@ -837,7 +1281,8 @@ async function openLibraryView(libraryKey, title) {
     status,
     sentinel,
     requestId: 0,
-    subtitle: view.header.querySelector(".eyebrow")
+    subtitle: view.header.querySelector(".eyebrow"),
+    heading: view.header.querySelector("h2")
   };
 
   libraryObserver = new IntersectionObserver((entries) => {
@@ -914,6 +1359,7 @@ function resetLibraryPage() {
 async function openHistoryView() {
   stopLibraryLoading();
   closeDetails();
+  recordRoute("/history");
   const data = await api("/api/progress/history");
   const section = document.createElement("section");
   section.className = "library-results";
@@ -934,8 +1380,270 @@ async function openHistoryView() {
   showContentView({
     title: "History",
     subtitle: `${data.items ? data.items.length : 0} items`,
-    actions: [{ label: "Home", onClick: loadHome }],
+    actions: [{ label: "Home", onClick: () => loadHome() }],
     content: section
+  });
+}
+
+async function refreshIptvAvailability() {
+  if (!state.token || state.shareToken || !canAccessLiveTv()) {
+    state.iptvEnabled = false;
+    updateAdminControls();
+    return;
+  }
+
+  try {
+    const status = await api("/api/iptv");
+    state.iptvEnabled = Boolean(status.enabled);
+    state.iptvBufferSeconds = Number(status.bufferSeconds) || 180;
+    state.iptvSegmentSeconds = Number(status.segmentSeconds) || 6;
+  } catch (err) {
+    state.iptvEnabled = false;
+  }
+  updateAdminControls();
+}
+
+async function openLiveTv(start = new Date(), pinnedToNow = true) {
+  if (!state.iptvEnabled || !canAccessLiveTv()) {
+    return;
+  }
+
+  stopLibraryLoading();
+  closeDetails();
+  state.iptvGuideStart = roundedGuideStart(new Date(start));
+  state.iptvGuidePinnedToNow = pinnedToNow;
+  recordRoute(navigation.liveTvPath(state.iptvGuideStart, pinnedToNow));
+  state.currentView = "iptv";
+  document.body.classList.add("live-tv-page");
+  els.searchInput.value = "";
+  els.searchResults.classList.add("hidden");
+  els.homeToolbar.classList.add("hidden");
+  els.homeRows.classList.add("hidden");
+  els.liveTvView.classList.remove("hidden");
+  await refreshLiveTvGuide({ showLoading: true });
+  startLiveTvAutoRefresh();
+}
+
+async function refreshLiveTvGuide(options = {}) {
+  if (state.currentView !== "iptv") {
+    return;
+  }
+  if (state.iptvGuidePinnedToNow) {
+    state.iptvGuideStart = roundedGuideStart(new Date());
+  }
+  const guideStart = state.iptvGuideStart || roundedGuideStart(new Date());
+  const requestId = ++liveTvRequestId;
+  const previousScroll = options.preserveScroll ? liveTvScrollPosition() : null;
+  if (options.showLoading) {
+    els.liveTvStatus.textContent = "Loading guide...";
+    els.liveTvGuide.innerHTML = "";
+  }
+  try {
+    const guide = await api(`/api/iptv/guide?start=${encodeURIComponent(guideStart.toISOString())}&hours=6`);
+    if (requestId !== liveTvRequestId || state.currentView !== "iptv") {
+      return;
+    }
+    state.iptvGuide = guide;
+    state.iptvBufferSeconds = Number(guide.bufferSeconds) || 180;
+    state.iptvSegmentSeconds = Number(guide.segmentSeconds) || 6;
+    filterLiveTvChannels();
+    restoreLiveTvScroll(previousScroll);
+  } catch (err) {
+    els.liveTvStatus.textContent = err.message || "The TV guide could not be loaded.";
+  }
+}
+
+function shiftLiveTvGuide(hours) {
+  const start = state.iptvGuideStart || roundedGuideStart(new Date());
+  openLiveTv(new Date(start.getTime() + hours * 60 * 60 * 1000), false);
+}
+
+function hideLiveTvView() {
+  stopLiveTvAutoRefresh();
+  liveTvRequestId += 1;
+  document.body.classList.remove("live-tv-page");
+  els.liveTvView.classList.add("hidden");
+}
+
+function startLiveTvAutoRefresh() {
+  stopLiveTvAutoRefresh();
+  liveTvRefreshTimer = setInterval(() => {
+    if (liveTvRefreshPromise) {
+      return;
+    }
+    liveTvRefreshPromise = refreshLiveTvGuide({ preserveScroll: true })
+      .catch(() => {})
+      .finally(() => {
+        liveTvRefreshPromise = null;
+      });
+  }, 60 * 1000);
+}
+
+function stopLiveTvAutoRefresh() {
+  if (liveTvRefreshTimer) {
+    clearInterval(liveTvRefreshTimer);
+    liveTvRefreshTimer = null;
+  }
+}
+
+function liveTvScrollPosition() {
+  const guide = els.liveTvGuide.querySelector(".guide-scroll");
+  return guide ? { left: guide.scrollLeft, top: guide.scrollTop } : null;
+}
+
+function restoreLiveTvScroll(position) {
+  if (!position) {
+    return;
+  }
+  const guide = els.liveTvGuide.querySelector(".guide-scroll");
+  if (guide) {
+    guide.scrollLeft = position.left;
+    guide.scrollTop = position.top;
+  }
+}
+
+function filterLiveTvChannels() {
+  if (!state.iptvGuide) {
+    return;
+  }
+  const query = normalizeFilterText(els.liveTvFilter.value);
+  const channels = query
+    ? state.iptvGuide.channels.filter((channel) => normalizeFilterText(`${channel.name} ${channel.number || ""} ${channel.group || ""}`).includes(query))
+    : state.iptvGuide.channels;
+  renderLiveTvGuide({
+    ...state.iptvGuide,
+    channels,
+    filterApplied: Boolean(query)
+  });
+  const countText = query ? `${channels.length} of ${state.iptvGuide.channelCount} channels` : `${state.iptvGuide.channelCount} channels`;
+  els.liveTvStatus.textContent = state.iptvGuide.refreshedAt
+    ? `${countText} - guide refreshed ${formatDate(state.iptvGuide.refreshedAt)}`
+    : countText;
+}
+
+function normalizeFilterText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function renderLiveTvGuide(guide) {
+  const startMs = Date.parse(guide.start);
+  const endMs = Date.parse(guide.end);
+  const durationMs = Math.max(1, endMs - startMs);
+  const width = Math.max(960, Math.round(durationMs / 60000) * 4);
+  const shell = document.createElement("div");
+  shell.className = "guide-scroll";
+  shell.style.setProperty("--guide-min-width", `${width}px`);
+
+  const timeRow = document.createElement("div");
+  timeRow.className = "guide-row guide-time-row";
+  timeRow.innerHTML = `<div class="guide-channel-cell guide-time-corner">Channel</div><div class="guide-track guide-time-track">${guideTimeTicks(startMs, endMs)}</div>`;
+  shell.appendChild(timeRow);
+
+  for (const channel of guide.channels || []) {
+    const row = document.createElement("div");
+    row.className = "guide-row";
+    const channelCell = document.createElement("button");
+    channelCell.className = "guide-channel-cell";
+    channelCell.type = "button";
+    channelCell.innerHTML = `
+      ${channel.logo ? `<img src="${escapeHtml(channel.logo)}" alt="">` : `<span class="guide-channel-initials">${escapeHtml(initials(channel.name))}</span>`}
+      <span><strong>${escapeHtml(channel.name)}</strong>${channel.number ? `<small>${escapeHtml(channel.number)}</small>` : ""}</span>
+    `;
+    channelCell.addEventListener("click", () => playIptvChannel(channel));
+
+    const track = document.createElement("div");
+    track.className = "guide-track";
+    track.innerHTML = guideProgrammeBlocks(channel, startMs, endMs, durationMs);
+    track.querySelectorAll("[data-programme-index]").forEach((button) => {
+      const programme = channel.programmes[Number(button.dataset.programmeIndex)];
+      button.addEventListener("click", () => playIptvChannel(channel, programme));
+    });
+    addGuideNowLine(track, startMs, endMs);
+    row.append(channelCell, track);
+    shell.appendChild(row);
+  }
+
+  if (!guide.channels || guide.channels.length === 0) {
+    shell.innerHTML = `<p class="guide-empty">${guide.filterApplied ? "No channels match this filter." : "No channels were found in the configured source."}</p>`;
+  }
+  els.liveTvGuide.replaceChildren(shell);
+}
+
+function guideTimeTicks(startMs, endMs) {
+  const ticks = [];
+  const firstTick = Math.ceil(startMs / (30 * 60 * 1000)) * 30 * 60 * 1000;
+  for (let at = firstTick; at < endMs; at += 30 * 60 * 1000) {
+    const left = ((at - startMs) / (endMs - startMs)) * 100;
+    ticks.push(`<span style="left:${left}%">${escapeHtml(new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span>`);
+  }
+  return ticks.join("");
+}
+
+function guideProgrammeBlocks(channel, startMs, endMs, durationMs) {
+  if (!channel.programmes || channel.programmes.length === 0) {
+    return '<button class="guide-programme guide-programme-empty" type="button" data-programme-index="-1" style="left:0;width:100%"><strong>No guide data</strong><span>Play channel</span></button>';
+  }
+
+  return channel.programmes.map((programme, index) => {
+    const programmeStart = Math.max(startMs, Date.parse(programme.start));
+    const programmeEnd = Math.min(endMs, Date.parse(programme.stop));
+    const left = ((programmeStart - startMs) / durationMs) * 100;
+    const width = Math.max(0.8, ((programmeEnd - programmeStart) / durationMs) * 100);
+    const current = Date.now() >= Date.parse(programme.start) && Date.now() < Date.parse(programme.stop);
+    return `
+      <button class="guide-programme${current ? " current" : ""}" type="button" data-programme-index="${index}" style="left:${left}%;width:${width}%" title="${escapeHtml(programme.description || programme.title)}">
+        <strong>${escapeHtml(programme.title)}</strong>
+        <span>${escapeHtml(new Date(programme.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}${programme.category ? ` - ${escapeHtml(programme.category)}` : ""}</span>
+      </button>
+    `;
+  }).join("");
+}
+
+function addGuideNowLine(track, startMs, endMs) {
+  const now = Date.now();
+  if (now < startMs || now >= endMs) {
+    return;
+  }
+  const line = document.createElement("span");
+  line.className = "guide-now-line";
+  line.style.left = `${((now - startMs) / (endMs - startMs)) * 100}%`;
+  track.appendChild(line);
+}
+
+function roundedGuideStart(date) {
+  const rounded = new Date(date);
+  rounded.setMinutes(0, 0, 0);
+  return rounded;
+}
+
+function playIptvChannel(channel, programme = null) {
+  const auth = authQuery();
+  const url = new URL(`/api/iptv/channels/${encodeURIComponent(channel.id)}/master.m3u8`, window.location.origin);
+  url.searchParams.set(auth.name, auth.value);
+  const bufferSeconds = Math.max(10, Number(state.iptvBufferSeconds) || 180);
+  const segmentSeconds = Math.max(2, Number(state.iptvSegmentSeconds) || 6);
+  const liveSyncSegments = Math.max(2, Math.ceil(Math.min(12, bufferSeconds) / segmentSeconds));
+  const liveMaxLatencySegments = Math.max(liveSyncSegments + 4, Math.ceil(Math.max(30, bufferSeconds) / segmentSeconds));
+  openWebPlayer(url, {
+    category: channel.group || "Live TV",
+    title: programme && programme.title ? `${channel.name} - ${programme.title}` : channel.name,
+    errorMessage: "The live channel could not be played.",
+    fallbackUrl: fallbackWebPlayerUrl(),
+    live: true,
+    onPlaybackError: (details) => reportIptvPlaybackError(channel, details),
+    hlsOptions: {
+      lowLatencyMode: false,
+      manifestLoadingTimeOut: 30000,
+      manifestLoadingMaxRetry: 6,
+      manifestLoadingRetryDelay: 1000,
+      levelLoadingMaxRetry: 6,
+      fragLoadingMaxRetry: 6,
+      backBufferLength: Math.max(60, bufferSeconds),
+      maxBufferLength: Math.max(30, bufferSeconds),
+      maxMaxBufferLength: Math.max(120, bufferSeconds * 2),
+      liveSyncDurationCount: liveSyncSegments,
+      liveMaxLatencyDurationCount: liveMaxLatencySegments
+    }
   });
 }
 
@@ -946,12 +1654,15 @@ async function openAdminPanel(page = "accounts") {
 
   els.adminPanelOverlay.classList.remove("hidden");
   els.adminPanelOverlay.setAttribute("aria-hidden", "false");
+  document.body.classList.add("admin-panel-open");
   showAdminPage(page);
 }
 
 function closeAdminPanel() {
+  closeIptvMatcher();
   els.adminPanelOverlay.classList.add("hidden");
   els.adminPanelOverlay.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("admin-panel-open");
   stopAdminRefresh();
 }
 
@@ -1056,16 +1767,17 @@ async function loadAccounts() {
   }
 
   try {
-    const [accounts, health] = await Promise.all([
-      api("/api/admin/accounts"),
-      api("/api/health")
-    ]);
-    fillSelect(els.accountLibrariesSelect, health.libraries.map((library) => ({
+    const data = await api("/api/admin/accounts");
+    const libraries = (data.libraries || []).map((library) => ({
       id: library.key,
       label: library.title
-    })));
+    }));
+    if (data.features && data.features.iptv) {
+      libraries.unshift({ id: LIVE_TV_PERMISSION_KEY, label: "Live TV" });
+    }
+    fillSelect(els.accountLibrariesSelect, libraries);
     els.accountList.innerHTML = "";
-    (accounts.accounts || []).forEach((account) => els.accountList.appendChild(accountCard(account)));
+    (data.accounts || []).forEach((account) => els.accountList.appendChild(accountCard(account)));
     if (!els.accountStatus.textContent) {
       setAccountFormMode(null);
     }
@@ -1435,6 +2147,7 @@ async function loadSettings() {
     const data = await api("/api/admin/settings");
     fillSettingsForm(data.settings || {});
     updateSettingsVisibility();
+    await refreshUpdateStatus();
     els.settingsStatus.textContent = "";
   } catch (err) {
     els.settingsStatus.textContent = err.message || "Failed to load settings.";
@@ -1452,11 +2165,18 @@ function fillSettingsForm(settings) {
   const fallbackStream = settings.fallbackStream || {};
   const ffmpeg = settings.ffmpeg || {};
   const streaming = settings.streaming || {};
+  const ytdlp = settings.ytdlp || {};
+  const iptv = settings.iptv || {};
+  const updates = settings.updates || {};
 
   els.settingsLogLevel.value = logging.level || "info";
   els.settingsLogRetentionDays.value = logging.retentionDays ?? 5;
   els.settingsPreferredAudio.value = streaming.preferredAudioLanguage || "english";
   els.settingsEnableGpu.checked = ffmpeg.enableGpu !== false;
+  els.settingsUpdatesEnabled.checked = updates.enabled !== false;
+  els.settingsUpdateIntervalHours.value = Math.max(1, Math.round((updates.checkIntervalSeconds ?? 21600) / 3600));
+  els.settingsIncludePrereleases.checked = Boolean(updates.includePrereleases);
+  els.settingsAutoInstall.checked = Boolean(updates.autoInstall);
   els.settingsMetadataEnabled.checked = Boolean(metadata.enabled);
   els.settingsTmdbApiKey.value = metadata.tmdbApiKey || "";
   els.settingsTmdbReadToken.value = metadata.tmdbReadAccessToken || "";
@@ -1469,11 +2189,26 @@ function fillSettingsForm(settings) {
   els.settingsSubtitlesEnabled.checked = Boolean(subtitles.enabled);
   els.settingsSubtitleProvider.value = subtitles.provider || "subdl";
   els.settingsSubdlApiKey.value = subtitles.subdlApiKey || "";
-  els.settingsSubtitleUserAgent.value = subtitles.userAgent || "MediaBaker v1.0";
+  els.settingsSubtitleUserAgent.value = subtitles.userAgent || "MediaBaker";
   els.settingsSubtitleLanguage.value = subtitles.defaultLanguage || "en";
   els.settingsSubtitleSyncEnabled.checked = sync.enabled !== false;
   els.settingsSubtitleMaxOffset.value = sync.maxOffsetSeconds ?? 900;
   els.settingsSubtitleTimeout.value = sync.timeoutSeconds ?? 900;
+  els.settingsYtDlpEnabled.checked = Boolean(ytdlp.enabled);
+  els.settingsYtDlpPath.value = ytdlp.downloadPath || "cache/yt-dlp";
+  els.settingsYtDlpTitle.value = ytdlp.libraryTitle || "YT-DLP";
+  els.settingsYtDlpPlaylists.checked = Boolean(ytdlp.allowPlaylists);
+  els.settingsIptvEnabled.checked = Boolean(iptv.enabled);
+  els.settingsIptvSourceType.value = iptv.sourceType === "hdhomerun" ? "hdhomerun" : "m3u";
+  els.settingsIptvPlaylistUrl.value = iptv.playlistUrl || "";
+  els.settingsIptvHdHomeRunUrl.value = iptv.hdHomeRunUrl || "";
+  els.settingsIptvGuideUrl.value = iptv.guideUrl || "";
+  state.iptvChannelMappings = { ...(iptv.channelMappings || {}) };
+  state.iptvChannelDeinterlaceModes = { ...(iptv.channelDeinterlaceModes || {}) };
+  els.settingsIptvRefreshHours.value = Math.max(1, Math.round((iptv.refreshIntervalSeconds ?? 86400) / 3600));
+  els.settingsIptvBufferSeconds.value = iptv.bufferSeconds ?? 180;
+  els.settingsIptvSegmentSeconds.value = iptv.segmentSeconds ?? 6;
+  els.settingsIptvDeinterlaceMode.value = ["off", "auto", "force", "smooth"].includes(iptv.deinterlaceMode) ? iptv.deinterlaceMode : "auto";
   els.settingsHlsTtl.value = hls.ttlSeconds ?? 86400;
   els.settingsHlsSegment.value = hls.segmentSeconds ?? 6;
   els.settingsHlsWait.value = hls.segmentWaitTimeoutSeconds ?? 90;
@@ -1498,8 +2233,14 @@ async function saveSettings(event) {
       body: JSON.stringify({ settings: settingsFromForm() })
     });
     fillSettingsForm(result.settings || {});
+    applyFeatures({
+      iptv: Boolean(result.settings && result.settings.iptv && result.settings.iptv.enabled),
+      ytdlp: Boolean(result.settings && result.settings.ytdlp && result.settings.ytdlp.enabled)
+    });
     updateSettingsVisibility();
+    await refreshIptvAvailability();
     await refreshSystemHealth();
+    await refreshUpdateStatus();
     els.settingsStatus.textContent = "Settings saved.";
   } catch (err) {
     els.settingsStatus.textContent = err.message || "Failed to save settings.";
@@ -1508,11 +2249,315 @@ async function saveSettings(event) {
   }
 }
 
+async function forceCheckForUpdates() {
+  els.settingsCheckUpdates.disabled = true;
+  els.settingsUpdateStatus.textContent = "Checking GitHub releases...";
+  try {
+    await refreshUpdateStatus(true);
+  } finally {
+    els.settingsCheckUpdates.disabled = false;
+  }
+}
+
+async function installAvailableUpdate() {
+  const status = state.updateStatus;
+  if (!status || !status.latest || !status.updateAvailable || !status.autoUpdateSupported) {
+    return;
+  }
+  if (!window.confirm(`Install Media Baker ${status.latest.version}? Active streams will stop while the server restarts.`)) {
+    return;
+  }
+
+  els.settingsInstallUpdate.disabled = true;
+  els.installUpdateBanner.disabled = true;
+  els.settingsUpdateStatus.textContent = `Downloading and preparing Media Baker ${status.latest.version}...`;
+  try {
+    await api("/api/admin/updates/install", state.token, { method: "POST" });
+    els.settingsUpdateStatus.textContent = "Update prepared. Waiting for Media Baker to restart...";
+    await waitForUpdatedServer(status.latest.version);
+  } catch (err) {
+    els.settingsUpdateStatus.textContent = err.message || "Failed to install the update.";
+    els.settingsInstallUpdate.disabled = false;
+    els.installUpdateBanner.disabled = false;
+  }
+}
+
+async function waitForUpdatedServer(version) {
+  const deadline = Date.now() + 3 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    try {
+      const status = await api("/api/admin/updates/status");
+      if (status.currentVersion === version) {
+        window.location.reload();
+        return;
+      }
+    } catch (err) {
+      // The server is expected to be briefly unavailable while files are replaced.
+    }
+  }
+  throw new Error("Media Baker did not return after the update. Check cache/updates/update.log.");
+}
+
+async function forceReloadIptvSources() {
+  els.settingsIptvReload.disabled = true;
+  els.settingsStatus.textContent = "Reloading the saved channel sources...";
+  try {
+    const result = await api("/api/admin/settings/iptv/refresh", state.token, { method: "POST" });
+    const status = result.status || {};
+    els.settingsStatus.textContent = `IPTV sources reloaded. ${status.channelCount || 0} channels found.`;
+    await refreshIptvAvailability();
+    if (state.currentView === "iptv") {
+      await refreshLiveTvGuide({ preserveScroll: true });
+    }
+  } catch (err) {
+    els.settingsStatus.textContent = err.message || "Failed to reload IPTV sources.";
+  } finally {
+    els.settingsIptvReload.disabled = false;
+  }
+}
+
+async function openIptvMatcher() {
+  els.iptvMatchOverlay.classList.remove("hidden");
+  els.iptvMatchOverlay.setAttribute("aria-hidden", "false");
+  els.iptvChannelFilter.value = "";
+  els.iptvGuideFilter.value = "";
+  els.iptvChannelSelect.innerHTML = "";
+  els.iptvGuideSelect.innerHTML = "";
+  els.iptvMatchStatus.textContent = "Loading channel matches...";
+  setIptvMatcherBusy(true);
+  try {
+    state.iptvMatchData = await api("/api/admin/settings/iptv/channel-matches");
+    prepareIptvMatchData();
+    syncIptvChannelMappings();
+    renderIptvChannelOptions();
+  } catch (err) {
+    state.iptvMatchData = null;
+    els.iptvMatchStatus.textContent = err.message || "Failed to load IPTV channel matches.";
+  } finally {
+    setIptvMatcherBusy(false);
+  }
+}
+
+function closeIptvMatcher() {
+  els.iptvMatchOverlay.classList.add("hidden");
+  els.iptvMatchOverlay.setAttribute("aria-hidden", "true");
+}
+
+function renderIptvChannelOptions() {
+  if (!state.iptvMatchData) {
+    return;
+  }
+  const previous = els.iptvChannelSelect.value;
+  const query = normalizeFilterText(els.iptvChannelFilter.value);
+  const channels = state.iptvMatchData.channels.filter((channel) => !query
+    || channel.searchText.includes(query));
+  const visibleChannels = channels.slice(0, 180);
+  const selectedChannel = previous && channels.find((channel) => channel.id === previous);
+  if (selectedChannel && !visibleChannels.some((channel) => channel.id === previous)) {
+    visibleChannels.unshift(selectedChannel);
+  }
+  els.iptvChannelSelect.replaceChildren(...visibleChannels.map((channel) => {
+    const option = document.createElement("option");
+    option.value = channel.id;
+    const matchType = channel.manualGuideChannelId ? "manual" : channel.guideChannelId ? "automatic" : "unmatched";
+    option.textContent = `${channel.number ? `${channel.number} - ` : ""}${channel.name} [${matchType}]`;
+    return option;
+  }));
+  els.iptvChannelResults.textContent = resultCountText(channels.length, visibleChannels.length);
+  if (visibleChannels.some((channel) => channel.id === previous)) {
+    els.iptvChannelSelect.value = previous;
+  } else if (visibleChannels.length > 0) {
+    const firstUnmatched = visibleChannels.find((channel) => !channel.guideChannelId);
+    els.iptvChannelSelect.value = (firstUnmatched || visibleChannels[0]).id;
+  }
+  renderIptvGuideOptions(true);
+}
+
+function renderIptvGuideOptions(resetSelection = false) {
+  const data = state.iptvMatchData;
+  const channel = selectedIptvChannel();
+  if (!data || !channel) {
+    els.iptvGuideSelect.innerHTML = "";
+    els.iptvSelectedChannel.textContent = "";
+    els.iptvGuideResults.textContent = "";
+    els.iptvMatchStatus.textContent = data && data.channels.length ? "No live channels match the filter." : "No live channels are loaded.";
+    return;
+  }
+
+  const previous = resetSelection ? channel.manualGuideChannelId || "" : els.iptvGuideSelect.value;
+  const query = normalizeFilterText(els.iptvGuideFilter.value);
+  const matchingGuideChannels = data.guideChannels.filter((guideChannel) => !query || guideChannel.searchText.includes(query));
+  const suggestions = channel.guideSuggestions
+    .map((suggestion) => ({ ...suggestion, channel: state.iptvGuideById.get(suggestion.id) }))
+    .filter((suggestion) => suggestion.channel && (!query || suggestion.channel.searchText.includes(query)));
+  const suggestionIds = new Set(suggestions.map((suggestion) => suggestion.id));
+  const guideChannels = matchingGuideChannels.filter((guideChannel) => !suggestionIds.has(guideChannel.id)).slice(0, 140);
+  const selectedCandidate = previous ? state.iptvGuideById.get(previous) : null;
+  if (selectedCandidate && !suggestionIds.has(previous) && !guideChannels.some((guideChannel) => guideChannel.id === previous)) {
+    guideChannels.unshift(selectedCandidate);
+  }
+
+  const automatic = document.createElement("option");
+  automatic.value = "";
+  automatic.textContent = `Automatic: ${guideChannelName(channel.automaticGuideChannelId) || "unmatched"}`;
+  const suggestionGroup = document.createElement("optgroup");
+  suggestionGroup.label = "Best suggestions";
+  const suggestionOptions = suggestions.map((suggestion) => {
+    const option = document.createElement("option");
+    option.value = suggestion.channel.id;
+    option.textContent = `${suggestion.channel.name} (${Math.round(suggestion.score * 100)}%) [${suggestion.channel.id}]`;
+    return option;
+  });
+  suggestionGroup.replaceChildren(...suggestionOptions);
+  const allGroup = document.createElement("optgroup");
+  allGroup.label = query ? "Search results" : "EPG channels";
+  const guideOptions = guideChannels.map((guideChannel) => {
+    const option = document.createElement("option");
+    option.value = guideChannel.id;
+    option.textContent = `${guideChannel.name} [${guideChannel.id}]`;
+    return option;
+  });
+  allGroup.replaceChildren(...guideOptions);
+  els.iptvGuideSelect.replaceChildren(
+    automatic,
+    ...(suggestionOptions.length ? [suggestionGroup] : []),
+    ...(guideOptions.length ? [allGroup] : [])
+  );
+  const renderedIds = new Set([...suggestionOptions, ...guideOptions].map((option) => option.value));
+  els.iptvGuideSelect.value = renderedIds.has(previous) ? previous : "";
+  els.iptvGuideResults.textContent = resultCountText(matchingGuideChannels.length, suggestions.length + guideChannels.length);
+  els.iptvSelectedChannel.innerHTML = `<strong>${escapeHtml(`${channel.number ? `${channel.number} - ` : ""}${channel.name}`)}</strong><span>${escapeHtml(automaticMatchDescription(channel))}</span>`;
+  const globalOption = els.iptvDeinterlaceMode.querySelector('option[value="default"]');
+  if (globalOption) {
+    globalOption.textContent = `Use global setting (${deinterlaceModeLabel(data.defaultDeinterlaceMode)})`;
+  }
+  els.iptvDeinterlaceMode.value = ["default", "off", "auto", "force", "smooth"].includes(channel.deinterlaceMode)
+    ? channel.deinterlaceMode
+    : "default";
+  els.saveIptvMatch.disabled = false;
+  els.clearIptvMatch.disabled = !channel.manualGuideChannelId;
+  els.iptvMatchStatus.textContent = channel.manualGuideChannelId
+    ? `Manual match: ${guideChannelName(channel.manualGuideChannelId) || channel.manualGuideChannelId}`
+    : `Using automatic match: ${guideChannelName(channel.automaticGuideChannelId) || "unmatched"}`;
+}
+
+async function saveIptvChannelMatch() {
+  const channel = selectedIptvChannel();
+  if (!channel) {
+    return;
+  }
+  await updateIptvChannelMatch(channel.id, els.iptvGuideSelect.value || null, "Channel settings saved.");
+}
+
+async function clearIptvChannelMatch() {
+  const channel = selectedIptvChannel();
+  if (!channel) {
+    return;
+  }
+  await updateIptvChannelMatch(channel.id, null, "Automatic channel matching restored.");
+}
+
+async function updateIptvChannelMatch(channelId, guideChannelId, successMessage) {
+  setIptvMatcherBusy(true);
+  els.iptvMatchStatus.textContent = "Saving channel settings...";
+  try {
+    const result = await api(`/api/admin/settings/iptv/channel-matches/${encodeURIComponent(channelId)}`, state.token, {
+      method: "PUT",
+      body: JSON.stringify({
+        guideChannelId,
+        deinterlaceMode: els.iptvDeinterlaceMode.value
+      })
+    });
+    state.iptvMatchData = result.data;
+    prepareIptvMatchData();
+    syncIptvChannelMappings();
+    els.iptvChannelSelect.value = channelId;
+    renderIptvChannelOptions();
+    els.iptvMatchStatus.textContent = successMessage;
+  } catch (err) {
+    els.iptvMatchStatus.textContent = err.message || "Failed to save the channel settings.";
+  } finally {
+    setIptvMatcherBusy(false);
+  }
+}
+
+function selectedIptvChannel() {
+  return state.iptvMatchData && state.iptvMatchData.channels.find((channel) => channel.id === els.iptvChannelSelect.value) || null;
+}
+
+function guideChannelName(id) {
+  const channel = state.iptvGuideById.get(id);
+  return channel && channel.name || "";
+}
+
+function prepareIptvMatchData() {
+  const data = state.iptvMatchData;
+  if (!data) {
+    state.iptvGuideById = new Map();
+    return;
+  }
+  for (const channel of data.channels) {
+    channel.searchText = normalizeFilterText(`${channel.number || ""} ${channel.name}`);
+    channel.guideSuggestions = Array.isArray(channel.guideSuggestions) ? channel.guideSuggestions : [];
+  }
+  for (const guideChannel of data.guideChannels) {
+    guideChannel.searchText = normalizeFilterText(`${guideChannel.name} ${guideChannel.names.join(" ")} ${guideChannel.id}`);
+  }
+  state.iptvGuideById = new Map(data.guideChannels.map((channel) => [channel.id, channel]));
+}
+
+function automaticMatchDescription(channel) {
+  const name = guideChannelName(channel.automaticGuideChannelId);
+  if (!name) {
+    return "No confident automatic EPG match";
+  }
+  const confidence = Number.isFinite(channel.automaticMatchScore)
+    ? `, ${Math.round(channel.automaticMatchScore * 100)}% confidence`
+    : "";
+  return `Automatic ${channel.automaticMatchMethod || ""} match: ${name}${confidence}`;
+}
+
+function resultCountText(total, visible) {
+  return visible < total ? `${visible} of ${total}` : `${total} result${total === 1 ? "" : "s"}`;
+}
+
+function deinterlaceModeLabel(mode) {
+  return {
+    off: "Off",
+    auto: "Auto",
+    force: "Force",
+    smooth: "Smooth 50/60p"
+  }[mode] || "Auto";
+}
+
+function syncIptvChannelMappings() {
+  const channels = state.iptvMatchData && state.iptvMatchData.channels || [];
+  state.iptvChannelMappings = Object.fromEntries(channels
+    .filter((channel) => channel.manualGuideChannelId)
+    .map((channel) => [channel.id, channel.manualGuideChannelId]));
+  state.iptvChannelDeinterlaceModes = Object.fromEntries(channels
+    .filter((channel) => channel.deinterlaceMode && channel.deinterlaceMode !== "default")
+    .map((channel) => [channel.id, channel.deinterlaceMode]));
+}
+
+function setIptvMatcherBusy(busy) {
+  const channel = selectedIptvChannel();
+  els.saveIptvMatch.disabled = busy || !channel;
+  els.clearIptvMatch.disabled = busy || !channel || !channel.manualGuideChannelId;
+}
+
 function settingsFromForm() {
   return {
     logging: {
       level: els.settingsLogLevel.value,
       retentionDays: intInput(els.settingsLogRetentionDays, 5)
+    },
+    updates: {
+      enabled: els.settingsUpdatesEnabled.checked,
+      checkIntervalSeconds: intInput(els.settingsUpdateIntervalHours, 6) * 3600,
+      includePrereleases: els.settingsIncludePrereleases.checked,
+      autoInstall: els.settingsAutoInstall.checked
     },
     indexScan: {
       enabled: els.settingsIndexEnabled.checked,
@@ -1543,6 +2588,25 @@ function settingsFromForm() {
         timeoutSeconds: intInput(els.settingsSubtitleTimeout, 900)
       }
     },
+    ytdlp: {
+      enabled: els.settingsYtDlpEnabled.checked,
+      downloadPath: els.settingsYtDlpPath.value.trim(),
+      libraryTitle: els.settingsYtDlpTitle.value.trim() || "YT-DLP",
+      allowPlaylists: els.settingsYtDlpPlaylists.checked
+    },
+    iptv: {
+      enabled: els.settingsIptvEnabled.checked,
+      sourceType: els.settingsIptvSourceType.value === "hdhomerun" ? "hdhomerun" : "m3u",
+      playlistUrl: els.settingsIptvPlaylistUrl.value.trim(),
+      hdHomeRunUrl: els.settingsIptvHdHomeRunUrl.value.trim(),
+      guideUrl: els.settingsIptvGuideUrl.value.trim(),
+      channelMappings: { ...state.iptvChannelMappings },
+      deinterlaceMode: els.settingsIptvDeinterlaceMode.value,
+      channelDeinterlaceModes: { ...state.iptvChannelDeinterlaceModes },
+      refreshIntervalSeconds: intInput(els.settingsIptvRefreshHours, 24) * 3600,
+      bufferSeconds: intInput(els.settingsIptvBufferSeconds, 180, 10),
+      segmentSeconds: intInput(els.settingsIptvSegmentSeconds, 6, 2)
+    },
     playback: {
       onDeckTtlSeconds: intInput(els.settingsOnDeckTtl, 1209600),
       watchedThresholdPercent: intInput(els.settingsWatchedThreshold, 10)
@@ -1567,9 +2631,17 @@ function settingsFromForm() {
 }
 
 function updateSettingsVisibility() {
+  els.updatesSettingsFieldset.classList.toggle("hidden", !isAdminMode());
+  setFeatureVisible(els.updateSettingsBody, els.settingsUpdatesEnabled.checked);
   setFeatureVisible(els.metadataSettingsBody, els.settingsMetadataEnabled.checked);
   setFeatureVisible(els.subtitleSettingsBody, els.settingsSubtitlesEnabled.checked);
   setFeatureVisible(els.subtitleSyncSettingsBody, els.settingsSubtitlesEnabled.checked && els.settingsSubtitleSyncEnabled.checked);
+  setFeatureVisible(els.ytDlpSettingsBody, els.settingsYtDlpEnabled.checked);
+  setFeatureVisible(els.iptvSettingsBody, els.settingsIptvEnabled.checked);
+  const hdHomeRun = els.settingsIptvSourceType.value === "hdhomerun";
+  setFeatureVisible(els.settingsIptvPlaylistField, !hdHomeRun);
+  setFeatureVisible(els.settingsIptvHdHomeRunField, hdHomeRun);
+  els.settingsIptvGuideLabel.textContent = hdHomeRun ? "EPG URL or path (optional)" : "EPG URL or path";
   setFeatureVisible(els.indexSettingsBody, els.settingsIndexEnabled.checked);
   setFeatureVisible(els.fallbackSettingsBody, els.settingsFallbackEnabled.checked);
 }
@@ -1584,6 +2656,201 @@ function setFeatureVisible(element, visible) {
 function intInput(input, fallback, minimum = 1) {
   const value = Number.parseInt(input.value, 10);
   return Number.isFinite(value) && value >= minimum ? value : fallback;
+}
+
+function openAccountPanel() {
+  if (!state.user || state.shareToken) {
+    return;
+  }
+  els.selfAccountUsername.value = state.user.username || "";
+  els.selfAccountCurrentPassword.value = "";
+  els.selfAccountNewPassword.value = "";
+  els.selfAccountConfirmPassword.value = "";
+  els.selfAccountStatus.textContent = "";
+  els.accountOverlay.classList.remove("hidden");
+  els.accountOverlay.setAttribute("aria-hidden", "false");
+}
+
+function closeAccountPanel() {
+  els.accountOverlay.classList.add("hidden");
+  els.accountOverlay.setAttribute("aria-hidden", "true");
+  els.selfAccountCurrentPassword.value = "";
+  els.selfAccountNewPassword.value = "";
+  els.selfAccountConfirmPassword.value = "";
+}
+
+async function saveSelfAccount(event) {
+  event.preventDefault();
+  const username = els.selfAccountUsername.value.trim();
+  const currentPassword = els.selfAccountCurrentPassword.value;
+  const password = els.selfAccountNewPassword.value;
+  if (!username || !currentPassword) {
+    els.selfAccountStatus.textContent = "Username and current password are required.";
+    return;
+  }
+  if (password !== els.selfAccountConfirmPassword.value) {
+    els.selfAccountStatus.textContent = "The new passwords do not match.";
+    return;
+  }
+
+  els.saveSelfAccount.disabled = true;
+  els.selfAccountStatus.textContent = "Saving account...";
+  try {
+    const result = await api("/api/auth/me", state.token, {
+      method: "PUT",
+      body: JSON.stringify({ username, currentPassword, password })
+    });
+    state.user = result.user;
+    els.selfAccountCurrentPassword.value = "";
+    els.selfAccountNewPassword.value = "";
+    els.selfAccountConfirmPassword.value = "";
+    updateAdminControls();
+    els.selfAccountStatus.textContent = "Account updated.";
+  } catch (err) {
+    els.selfAccountStatus.textContent = err.message || "Failed to update account.";
+  } finally {
+    els.saveSelfAccount.disabled = false;
+  }
+}
+
+async function openDownloadPanel() {
+  els.downloadOverlay.classList.remove("hidden");
+  els.downloadOverlay.setAttribute("aria-hidden", "false");
+  els.downloadStatus.textContent = "";
+  await refreshYtDlpDownloads();
+  startDownloadRefresh();
+}
+
+function closeDownloadPanel() {
+  els.downloadOverlay.classList.add("hidden");
+  els.downloadOverlay.setAttribute("aria-hidden", "true");
+  if (!hasActiveDownloads) {
+    stopDownloadRefresh();
+  }
+}
+
+async function startYtDlpDownload(event) {
+  event.preventDefault();
+  const url = els.downloadUrlInput.value.trim();
+  if (!url) {
+    return;
+  }
+
+  els.startDownload.disabled = true;
+  els.downloadStatus.textContent = "Starting download...";
+  try {
+    const result = await api("/api/ytdlp/downloads", state.token, {
+      method: "POST",
+      body: JSON.stringify({ url })
+    });
+    if (result.download && result.download.id) {
+      downloadStatuses.set(result.download.id, result.download.status);
+    }
+    els.downloadUrlInput.value = "";
+    els.downloadStatus.textContent = "Download started.";
+    await refreshYtDlpDownloads();
+    startDownloadRefresh();
+  } catch (err) {
+    els.downloadStatus.textContent = err.message || "Failed to start download.";
+  } finally {
+    els.startDownload.disabled = false;
+  }
+}
+
+function startDownloadRefresh() {
+  if (downloadRefreshTimer) {
+    return;
+  }
+  downloadRefreshTimer = setInterval(() => {
+    refreshYtDlpDownloads().catch(() => {});
+  }, 1500);
+  if (typeof downloadRefreshTimer.unref === "function") {
+    downloadRefreshTimer.unref();
+  }
+}
+
+function stopDownloadRefresh() {
+  if (downloadRefreshTimer) {
+    clearInterval(downloadRefreshTimer);
+    downloadRefreshTimer = null;
+  }
+}
+
+async function refreshYtDlpDownloads() {
+  const data = await api("/api/ytdlp/downloads");
+  const downloads = data.downloads || [];
+  handleYtDlpDownloadUpdates(downloads);
+  renderYtDlpDownloads(downloads);
+}
+
+function handleYtDlpDownloadUpdates(downloads) {
+  let newlyComplete = false;
+  for (const download of downloads) {
+    const previous = downloadStatuses.get(download.id);
+    if (previous && previous !== "complete" && download.status === "complete") {
+      newlyComplete = true;
+    }
+    downloadStatuses.set(download.id, download.status);
+  }
+
+  if (newlyComplete) {
+    refreshHomeAfterDownload();
+  }
+
+  hasActiveDownloads = downloads.some((download) => ["starting", "downloading", "indexing"].includes(download.status));
+  if (hasActiveDownloads) {
+    startDownloadRefresh();
+    return;
+  }
+
+  if (els.downloadOverlay.classList.contains("hidden")) {
+    stopDownloadRefresh();
+  }
+}
+
+function refreshHomeAfterDownload() {
+  if (state.currentView !== "home" || downloadHomeRefreshPromise) {
+    return;
+  }
+
+  downloadHomeRefreshPromise = loadHome(state.homeMode)
+    .catch(() => {})
+    .finally(() => {
+      downloadHomeRefreshPromise = null;
+    });
+}
+
+function renderYtDlpDownloads(downloads) {
+  els.downloadList.innerHTML = "";
+  if (downloads.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "status";
+    empty.textContent = "No downloads yet.";
+    els.downloadList.appendChild(empty);
+    return;
+  }
+
+  downloads
+    .sort((a, b) => Date.parse(b.startedAt || 0) - Date.parse(a.startedAt || 0))
+    .forEach((download) => {
+      const row = document.createElement("section");
+      row.className = `download-card download-${download.status}`;
+      const percent = Math.max(0, Math.min(100, Number(download.percent) || 0));
+      row.innerHTML = `
+        <div class="download-heading">
+          <strong title="${escapeHtml(download.filename || download.url)}">${escapeHtml(download.filename || download.url)}</strong>
+          <span>${escapeHtml(download.status)}</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${percent}%"></span></div>
+        <div class="download-meta">
+          <span>${escapeHtml(`${percent.toFixed(percent % 1 ? 1 : 0)}%`)}</span>
+          <span>${escapeHtml(download.speed || "")}</span>
+          <span>${escapeHtml(download.eta ? `ETA ${download.eta}` : "")}</span>
+        </div>
+        <p class="status">${escapeHtml(download.error || download.message || "")}</p>
+      `;
+      els.downloadList.appendChild(row);
+    });
 }
 
 async function deleteAccount(account) {
@@ -2211,6 +3478,8 @@ async function loadNextLibraryPage() {
     view.total = data.total;
     view.offset = data.nextOffset;
     view.hasMore = data.hasMore;
+    view.title = data.title || view.title;
+    view.heading.textContent = view.title;
     view.subtitle.textContent = `${data.total} items`;
     data.items.forEach((item) => view.grid.appendChild(card(item)));
 
@@ -2246,7 +3515,8 @@ function seasonGrid(mediaType, show, season) {
   section.className = "search-results";
   const grid = document.createElement("div");
   grid.className = "grid";
-  season.episodes.map((episode) => episodeItem(mediaType, show, episode)).forEach((item) => grid.appendChild(card(item)));
+  season.episodes.map((episode) => episodeItem(mediaType, show, episode))
+    .forEach((item) => grid.appendChild(card(item, { episodeArtwork: "thumbnail" })));
   section.appendChild(grid);
   return section;
 }
@@ -2589,7 +3859,9 @@ function applyMetadataResult(result) {
     posterUrl: result.posterUrl || null
   };
 
-  if (result.posterUrl && !state.selected.thumbnailUrl) {
+  if (state.selected.preferredArtworkUrl && !state.selected.thumbnailUrl) {
+    setPosterImage(els.detailsPoster, state.selected.preferredArtworkUrl);
+  } else if (result.posterUrl && !state.selected.thumbnailUrl) {
     setPosterImage(els.detailsPoster, result.posterUrl);
   } else if (!state.selected.thumbnailUrl) {
     els.detailsPoster.classList.remove("with-image");
@@ -2642,7 +3914,24 @@ function updateManagementActions(progress) {
 }
 
 function updateAdminControls() {
+  els.accountButton.classList.toggle("hidden", !state.user || Boolean(state.shareToken));
+  els.accountButton.title = state.user ? `Account settings for ${state.user.username}` : "Account settings";
   els.adminPanelButton.classList.toggle("hidden", !hasPermission("canViewAdmin"));
+  els.liveTvButton.classList.toggle("hidden", !state.token || Boolean(state.shareToken) || !state.iptvEnabled || !canAccessLiveTv());
+  const ytdlp = state.health && state.health.binaries && state.health.binaries.ytdlp;
+  const ytdlpUnavailable = Boolean(state.features.ytdlp && ytdlp && !ytdlp.ok);
+  els.downloadButton.classList.toggle("hidden", !state.token || Boolean(state.shareToken) || !state.features.ytdlp);
+  els.downloadButton.disabled = ytdlpUnavailable;
+  els.downloadButton.title = ytdlpUnavailable ? "YT-DLP is enabled but not available on the server." : "Download URL";
+  renderUpdateBanner();
+}
+
+function canAccessLiveTv() {
+  if (!state.user || state.shareToken) {
+    return false;
+  }
+  const permissions = state.user.permissions || {};
+  return Boolean(permissions.isAdmin || (permissions.libraries || []).includes(LIVE_TV_PERMISSION_KEY));
 }
 
 function updateDetailsAdminControls() {
@@ -2990,10 +4279,28 @@ async function playStream() {
     return;
   }
 
+  await openWebPlayer(url, {
+    category: state.selected.category || "",
+    title: state.selected.title || "Playback",
+    resumeSeconds,
+    errorMessage: "Playback failed. Try pre-generating HLS or check the stream logs.",
+    fallbackUrl: fallbackWebPlayerUrl(),
+    hlsOptions: {
+      lowLatencyMode: false,
+      backBufferLength: 90
+    }
+  });
+}
+
+async function openWebPlayer(url, options = {}) {
   closePlayer();
-  els.playerCategory.textContent = state.selected.category || "";
-  els.playerTitle.textContent = state.selected.title || "Playback";
+  const resumeSeconds = Math.max(0, Number(options.resumeSeconds) || 0);
+  const fallbackUrl = options.fallbackUrl ? options.fallbackUrl.toString() : "";
+  let fallbackStarted = false;
+  els.playerCategory.textContent = options.category || "";
+  els.playerTitle.textContent = options.title || "Playback";
   els.playerStatus.textContent = "Preparing stream...";
+  els.playerOverlay.classList.toggle("live-player", Boolean(options.live));
   els.playerOverlay.classList.remove("hidden");
   els.playerOverlay.setAttribute("aria-hidden", "false");
 
@@ -3002,8 +4309,37 @@ async function playStream() {
   video.autoplay = true;
   video.playsInline = true;
 
+  const startFallback = () => {
+    if (!fallbackUrl || fallbackStarted) {
+      return false;
+    }
+    fallbackStarted = true;
+    els.playerStatus.textContent = "The requested stream failed. Playing the fallback stream.";
+    return true;
+  };
+
   try {
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    const hlsJsSupported = Boolean(window.Hls && window.Hls.isSupported());
+    if (!hlsJsSupported && video.canPlayType("application/vnd.apple.mpegurl")) {
+      nativePlayerErrorHandler = () => {
+        if (!fallbackStarted) {
+          options.onPlaybackError?.({
+            source: "native-hls",
+            message: video.error && video.error.message || "Native HLS playback error"
+          });
+        }
+        if (startFallback()) {
+          video.src = fallbackUrl;
+          video.play().catch(() => {
+            els.playerStatus.textContent = "The fallback stream could not be played.";
+          });
+          return;
+        }
+        els.playerStatus.textContent = fallbackStarted
+          ? "The fallback stream could not be played."
+          : options.errorMessage || "Playback failed.";
+      };
+      video.addEventListener("error", nativePlayerErrorHandler);
       video.src = url.toString();
       await seekNativeVideo(video, resumeSeconds);
       await video.play();
@@ -3011,51 +4347,108 @@ async function playStream() {
       return;
     }
 
-    if (!window.Hls || !window.Hls.isSupported()) {
+    if (!hlsJsSupported) {
       els.playerStatus.textContent = "This browser cannot play HLS.";
       return;
     }
 
-    hlsPlayer = new window.Hls({
-      lowLatencyMode: false,
-      backBufferLength: 90
-    });
-    hlsPlayer.on(window.Hls.Events.ERROR, (event, data) => {
-      if (data && data.fatal) {
-        els.playerStatus.textContent = "Playback failed. Try pre-generating HLS or check the stream logs.";
-      }
-    });
-    hlsPlayer.on(window.Hls.Events.MANIFEST_PARSED, async () => {
-      try {
-        if (resumeSeconds > 0) {
-          video.currentTime = resumeSeconds;
+    const startHls = (source, isFallback = false) => {
+      const player = new window.Hls(isFallback ? {} : options.hlsOptions || {});
+      let liveRecoveryAttempts = 0;
+      hlsPlayer = player;
+      player.on(window.Hls.Events.ERROR, (event, data) => {
+        if (!data || !data.fatal) {
+          return;
         }
-        await video.play();
-        els.playerStatus.textContent = "";
-      } catch (err) {
-        els.playerStatus.textContent = "Press play to start playback.";
-      }
-    });
-    hlsPlayer.loadSource(url.toString());
-    hlsPlayer.attachMedia(video);
+        if (!isFallback) {
+          options.onPlaybackError?.({
+            source: "hls.js",
+            type: data.type || "",
+            details: data.details || "",
+            reason: data.reason || "",
+            responseCode: data.response && data.response.code || null
+          });
+        }
+        if (!isFallback && options.live && liveRecoveryAttempts < 3) {
+          if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+            liveRecoveryAttempts += 1;
+            els.playerStatus.textContent = "Reconnecting live stream...";
+            player.startLoad(-1);
+            return;
+          }
+          if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+            liveRecoveryAttempts += 1;
+            els.playerStatus.textContent = "Recovering live playback...";
+            player.recoverMediaError();
+            return;
+          }
+        }
+        if (!isFallback && startFallback()) {
+          player.destroy();
+          if (hlsPlayer === player) {
+            hlsPlayer = null;
+          }
+          startHls(fallbackUrl, true);
+          return;
+        }
+        els.playerStatus.textContent = isFallback
+          ? "The fallback stream could not be played."
+          : options.errorMessage || "Playback failed.";
+      });
+      player.on(window.Hls.Events.FRAG_BUFFERED, () => {
+        liveRecoveryAttempts = 0;
+        if (!isFallback) {
+          els.playerStatus.textContent = "";
+        }
+      });
+      player.on(window.Hls.Events.MANIFEST_PARSED, async () => {
+        try {
+          if (!isFallback && resumeSeconds > 0) {
+            video.currentTime = resumeSeconds;
+          }
+          await video.play();
+          if (!isFallback) {
+            els.playerStatus.textContent = "";
+          }
+        } catch (err) {
+          els.playerStatus.textContent = "Press play to start playback.";
+        }
+      });
+      player.loadSource(source);
+      player.attachMedia(video);
+    };
+    startHls(url.toString());
   } catch (err) {
-    els.playerStatus.textContent = "Playback failed to start.";
+    if (startFallback()) {
+      video.src = fallbackUrl;
+      video.play().catch(() => {
+        els.playerStatus.textContent = "The fallback stream could not be played.";
+      });
+    } else {
+      els.playerStatus.textContent = options.errorMessage || "Playback failed to start.";
+    }
   }
 }
 
 function closePlayer() {
+  stopOnDeckPolling();
   if (hlsPlayer) {
     hlsPlayer.destroy();
     hlsPlayer = null;
   }
 
   if (els.webPlayer) {
+    if (nativePlayerErrorHandler) {
+      els.webPlayer.removeEventListener("error", nativePlayerErrorHandler);
+      nativePlayerErrorHandler = null;
+    }
     els.webPlayer.pause();
     els.webPlayer.removeAttribute("src");
     els.webPlayer.load();
   }
 
   els.playerOverlay.classList.add("hidden");
+  els.playerOverlay.classList.remove("live-player");
   els.playerOverlay.setAttribute("aria-hidden", "true");
   els.playerStatus.textContent = "";
 }
@@ -3203,6 +4596,8 @@ async function markSelectedWatched() {
     };
     renderDetailsProgress(result.progress);
     updateManagementActions(result.progress);
+    removeOnDeckCard(state.selected);
+    await refreshOnDeckRow({ force: true }).catch(() => {});
     els.copyStatus.textContent = "Marked watched.";
   } catch (err) {
     els.copyStatus.textContent = "Failed to mark watched.";
@@ -3230,6 +4625,7 @@ async function removeSelectedOnDeck() {
     renderDetailsProgress(result.progress);
     updateManagementActions(result.progress);
     removeOnDeckCard(state.selected);
+    await refreshOnDeckRow({ force: true }).catch(() => {});
     els.copyStatus.textContent = "Removed from On Deck.";
   } catch (err) {
     els.copyStatus.textContent = "Failed to remove from On Deck.";
@@ -3279,46 +4675,15 @@ async function api(path, token = state.token, options = {}) {
     headers["X-Share-Token"] = state.shareToken;
   }
 
-  const response = await fetch(path, {
-    method: options.method || "GET",
+  return apiClient.requestJson(path, {
+    ...options,
     headers,
     body: options.body
   });
-
-  if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
-  }
-
-  return response.json();
 }
 
 async function publicApi(path, options = {}) {
-  const response = await fetch(path, {
-    method: options.method || "GET",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: options.body
-  });
-
-  if (!response.ok) {
-    throw new Error(await responseErrorMessage(response));
-  }
-
-  return response.json();
-}
-
-async function responseErrorMessage(response) {
-  try {
-    const data = await response.json();
-    if (data && data.error) {
-      return String(data.error);
-    }
-  } catch (err) {
-    // Ignore parse errors and fall back to the status text below.
-  }
-
-  return response.statusText || `Request failed: ${response.status}`;
+  return apiClient.requestJson(path, options);
 }
 
 function authQuery() {
@@ -3327,6 +4692,27 @@ function authQuery() {
   }
 
   return { name: "authToken", value: state.token };
+}
+
+function fallbackWebPlayerUrl() {
+  const auth = authQuery();
+  const url = new URL("/api/fallback/master.m3u8", window.location.origin);
+  if (auth.value) {
+    url.searchParams.set(auth.name, auth.value);
+  }
+  return url;
+}
+
+function reportIptvPlaybackError(channel, details) {
+  api("/api/iptv/client-events", state.token, {
+    method: "POST",
+    body: JSON.stringify({
+      channelId: channel.id,
+      channelName: channel.name,
+      event: "playback-error",
+      details
+    })
+  }).catch(() => {});
 }
 
 function formatDate(value) {

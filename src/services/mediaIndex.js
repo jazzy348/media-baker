@@ -21,6 +21,10 @@ class MediaIndex {
         type: library.type,
         rawType: library.rawType,
         threeD: Boolean(library.threeD),
+        managed: Boolean(library.managed),
+        noMetadata: Boolean(library.noMetadata),
+        noSubtitles: Boolean(library.noSubtitles),
+        localThumbnails: Boolean(library.localThumbnails),
         path: library.path
       }))
     };

@@ -18,6 +18,9 @@ const { AppSettingsService } = require("./services/appSettingsService");
 const { HardwareService } = require("./services/hardwareService");
 const { loadOrCreatePlaybackSecret } = require("./services/playbackSecret");
 const { PlaybackTokenService } = require("./services/playbackTokens");
+const { YtDlpService, syncYtDlpLibrary } = require("./services/ytdlpService");
+const { IptvService } = require("./services/iptvService");
+const { UpdateService } = require("./services/updateService");
 const { createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
@@ -26,6 +29,9 @@ const createCatalogRoutes = require("./routes/catalog");
 const createProgressRoutes = require("./routes/progress");
 const createLibraryRoutes = require("./routes/libraries");
 const createStreamRoutes = require("./routes/streams");
+const createYtDlpRoutes = require("./routes/ytdlp");
+const createIptvRoutes = require("./routes/iptv");
+const createFallbackRoutes = require("./routes/fallback");
 const createDocsRoutes = require("./routes/docs");
 const logger = require("./utils/logger");
 
@@ -34,7 +40,6 @@ async function createApp() {
 
   app.use(express.json());
   app.use(express.static(path.resolve(__dirname, "..", "public")));
-  app.use("/vendor/hls.js", express.static(path.resolve(__dirname, "..", "node_modules", "hls.js", "dist")));
 
   const libraryService = new LibraryService(config);
   config.libraries = await libraryService.list();
@@ -44,6 +49,7 @@ async function createApp() {
   const appSettings = new AppSettingsService(config);
   await appSettings.init();
   await appSettings.applyToConfig();
+  syncYtDlpLibrary(config);
   logger.configure(config.logging);
 
   const indexStore = createIndexStore(config);
@@ -68,6 +74,12 @@ async function createApp() {
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
   const playbackTokens = new PlaybackTokenService(playbackSecret, config.hls.ttlSeconds);
+  const ytdlp = new YtDlpService(config);
+  const iptv = new IptvService(config, ffmpeg);
+  const updates = new UpdateService(config);
+  ytdlp.setCompletionHandler(async () => {
+    await mediaIndex.reindexLibrary(config.ytdlp.libraryKey || "yt-dlp");
+  });
 
   app.locals.services = {
     config,
@@ -86,14 +98,22 @@ async function createApp() {
     accountService,
     appSettings,
     hardware,
-    playbackTokens
+    playbackTokens,
+    ytdlp,
+    iptv,
+    updates
   };
   metadata.startBackgroundPreload(mediaIndex);
   indexScanScheduler.start();
+  ytdlp.start();
+  iptv.start();
+  updates.start();
 
   app.use("/api/streams", createStreamAuthMiddleware(playbackTokens), createStreamRoutes(app.locals.services));
   app.use("/api/auth", createAuthRoutes(app.locals.services));
   app.use("/api/docs", createDocsRoutes());
+  app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
+  app.get(/^\/libraries\/[^/]+(?:\/shows\/[^/]+(?:\/seasons\/[^/]+)?)?\/?$/, serveWebApp);
   app.use(createAuthMiddleware(accountService, libraryService));
 
   app.use("/api/admin", createAdminRoutes(app.locals.services));
@@ -101,6 +121,9 @@ async function createApp() {
   app.use("/api/catalog", createCatalogRoutes(app.locals.services));
   app.use("/api/progress", createProgressRoutes(app.locals.services));
   app.use("/api/libraries", createLibraryRoutes(app.locals.services));
+  app.use("/api/ytdlp", createYtDlpRoutes(app.locals.services));
+  app.use("/api/iptv", createIptvRoutes(app.locals.services));
+  app.use("/api/fallback", createFallbackRoutes(app.locals.services));
 
   app.use(async (req, res, next) => {
     if (shouldServeFallbackStream(req, fallbackStream)) {
@@ -140,6 +163,14 @@ async function createApp() {
   });
 
   return app;
+}
+
+function serveWebApp(req, res, next) {
+  if (!isBrowserRequest(req)) {
+    next();
+    return;
+  }
+  res.sendFile(path.resolve(__dirname, "..", "public", "index.html"));
 }
 
 function shouldServeFallbackStream(req, fallbackStream) {

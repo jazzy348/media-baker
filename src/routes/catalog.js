@@ -189,9 +189,47 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
     }
   });
 
+  router.get("/:mediaType/:id/metadata/season-poster", async (req, res, next) => {
+    try {
+      assertMediaAccess(req, req.params.mediaType);
+      const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
+      const result = await metadata.ensureSeasonPosterForMedia(req.params.mediaType, mediaFile);
+      if (!result.available || !result.filePath) {
+        next(httpError(404, result.reason || "Season poster not found"));
+        return;
+      }
+
+      res.set("Cache-Control", "private, max-age=86400");
+      res.type(contentTypeForImage(result.filePath));
+      res.sendFile(result.filePath, (err) => {
+        if (err) {
+          next(httpError(err.statusCode || 404, "Season poster not found"));
+        }
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/:mediaType/:id/metadata", async (req, res, next) => {
     try {
       assertMediaAccess(req, req.params.mediaType);
+      if (librarySkipsMetadata(mediaIndex, req.params.mediaType)) {
+        const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
+        res.json({
+          available: false,
+          cached: false,
+          provider: "local",
+          providerId: null,
+          title: mediaFile.title || mediaFile.filename,
+          aliases: [],
+          releaseYear: mediaFile.year || null,
+          overview: "",
+          posterFilename: null,
+          posterUrl: null
+        });
+        return;
+      }
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const result = await metadata.getForMedia(req.params.mediaType, mediaFile);
       res.json({
@@ -289,6 +327,11 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
   router.get("/:mediaType/:id/subtitles/search", async (req, res, next) => {
     try {
       assertMediaAccess(req, req.params.mediaType);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      if (library && library.noSubtitles) {
+        res.json({ enabled: false, provider: null, candidates: [] });
+        return;
+      }
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const cachedMetadata = metadata && metadata.getCachedForMedia
         ? await metadata.getCachedForMedia(req.params.mediaType, mediaFile.id)
@@ -356,6 +399,7 @@ function itemsForCategory(mediaIndex, category) {
       title: movie.title,
       subtitle: movie.year ? String(movie.year) : movie.filename,
       filePath: movie.filePath,
+      localThumbnail: Boolean(category.localThumbnails),
       addedAtMs: movie.addedAtMs || movie.mtimeMs || 0,
       searchText: "",
       fallbackSearchText: movie.title
@@ -374,6 +418,7 @@ function itemsForCategory(mediaIndex, category) {
     season: episode.season,
     episode: episode.episode,
     filePath: episode.filePath,
+    localThumbnail: Boolean(category.localThumbnails),
     addedAtMs: episode.addedAtMs || episode.mtimeMs || 0,
     searchText: episodeNumberSearchText(episode),
     fallbackSearchText: ""
@@ -385,6 +430,7 @@ function itemsForCategory(mediaIndex, category) {
     title: movie.title,
     subtitle: movie.year ? String(movie.year) : movie.filename,
     filePath: movie.filePath,
+    localThumbnail: Boolean(category.localThumbnails),
     addedAtMs: movie.addedAtMs || movie.mtimeMs || 0,
     searchText: "",
     fallbackSearchText: movie.title
@@ -428,6 +474,7 @@ function libraryItemsForCategory(mediaIndex, category) {
       metadataId: firstEpisode ? firstEpisode.id : null,
       metadataIds: episodes.map((episode) => episode.id),
       addedAtMs,
+      localThumbnail: Boolean(category.localThumbnails),
       searchText: "",
       fallbackSearchText: show.name
     };
@@ -439,6 +486,7 @@ function libraryItemsForCategory(mediaIndex, category) {
     title: movie.title,
     subtitle: movie.year ? String(movie.year) : movie.filename,
     filePath: movie.filePath,
+    localThumbnail: Boolean(category.localThumbnails),
     addedAtMs: movie.addedAtMs || movie.mtimeMs || 0,
     searchText: "",
     fallbackSearchText: movie.title
@@ -658,7 +706,8 @@ async function withCachedMetadata(items, metadata, authContextValue) {
     return items;
   }
 
-  const refs = items.flatMap((item) => metadataIdsForItem(item).map((id) => ({
+  const metadataItems = items.filter((item) => !item.localThumbnail);
+  const refs = metadataItems.flatMap((item) => metadataIdsForItem(item).map((id) => ({
     mediaType: item.mediaType,
     id
   })));
@@ -666,17 +715,35 @@ async function withCachedMetadata(items, metadata, authContextValue) {
   const auth = typeof authContextValue === "object"
     ? authContextValue
     : { token: authContextValue, paramName: "authToken" };
+  const thumbnailOnlyItems = items.filter((item) => item.localThumbnail);
+  if (thumbnailOnlyItems.length > 0 && metadataItems.length === 0) {
+    return thumbnailOnlyItems.map((item) => ({
+      ...item,
+      thumbnailUrl: thumbnailUrlForItem(item, auth)
+    }));
+  }
   return items.map((item) => {
-    const thumbnailUrl = isEpisodeCatalogItem(item)
+    if (item.localThumbnail) {
+      return {
+        ...item,
+        thumbnailUrl: thumbnailUrlForItem(item, auth)
+      };
+    }
+    const episodeItem = isEpisodeCatalogItem(item);
+    const thumbnailUrl = episodeItem
       ? metadata.thumbnailUrl(item.mediaType, item.id, auth.token, auth.paramName)
       : item.thumbnailUrl;
+    const seasonPosterUrl = episodeItem
+      ? metadata.seasonPosterUrl(item.mediaType, item.id, auth.token, auth.paramName)
+      : null;
     const cached = metadataIdsForItem(item)
       .map((id) => cachedByKey.get(`${item.mediaType}:${id}`))
       .find((record) => record && record.available);
     if (!cached || !cached.available) {
       return {
         ...item,
-        thumbnailUrl
+        thumbnailUrl,
+        seasonPosterUrl
       };
     }
 
@@ -688,6 +755,7 @@ async function withCachedMetadata(items, metadata, authContextValue) {
       metadataAliases: cached.aliases || [],
       posterUrl: cached.posterFilename ? metadata.posterUrl(cached.posterFilename, auth.token, auth.paramName) : item.posterUrl,
       thumbnailUrl,
+      seasonPosterUrl,
       searchText: uniqueText([
         item.searchText
       ]).join(" ")
@@ -759,7 +827,10 @@ function categoriesForRequest(config, req) {
       mediaType: library.key,
       title: library.title,
       collection: library.key,
-      kind: library.type === "tv" ? "episode" : "movie"
+      kind: library.type === "tv" ? "episode" : "movie",
+      localThumbnails: Boolean(library.localThumbnails),
+      noMetadata: Boolean(library.noMetadata),
+      noSubtitles: Boolean(library.noSubtitles)
     }));
 }
 
@@ -784,6 +855,11 @@ function requireMetadataManagement(req) {
   if (req.authMode !== "admin" && !permissions.canManageMetadata) {
     throw httpError(403, "Metadata management access required");
   }
+}
+
+function librarySkipsMetadata(mediaIndex, mediaType) {
+  const library = mediaIndex.libraryForKey(mediaType);
+  return Boolean(library && library.noMetadata);
 }
 
 async function resolveMetadataTarget(mediaIndex, mediaType, id) {
@@ -864,6 +940,12 @@ function authContext(req) {
     token: req.authToken,
     paramName: req.authParamName || "authToken"
   };
+}
+
+function thumbnailUrlForItem(item, auth) {
+  const url = new URL(`/api/catalog/${encodeURIComponent(item.mediaType)}/${encodeURIComponent(item.id)}/metadata/thumbnail`, "http://localhost");
+  url.searchParams.set(auth.paramName, auth.token);
+  return `${url.pathname}${url.search}`;
 }
 
 function contentTypeForPoster(filePath) {

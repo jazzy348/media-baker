@@ -91,6 +91,28 @@ class FFmpegService {
     return result;
   }
 
+  async probeStream(source, timeoutMs = 3500) {
+    logger.info(`[ffprobe] probing live stream source="${redactSource(source)}"`);
+    const networkArgs = /^https?:\/\//i.test(source)
+      ? ["-rw_timeout", String(Math.max(1000, timeoutMs - 500) * 1000)]
+      : [];
+    const args = [
+      "-v",
+      "error",
+      "-analyzeduration",
+      "1M",
+      "-probesize",
+      "1M",
+      ...networkArgs,
+      "-print_format",
+      "json",
+      "-show_streams",
+      source
+    ];
+    const stdout = await this.exec(this.ffprobePath, args, { timeoutMs });
+    return JSON.parse(stdout);
+  }
+
   async generateThumbnail(filePath, outputPath, options = {}) {
     const seekSeconds = await this.thumbnailSeekSeconds(filePath);
     const scaleWidth = Number.parseInt(options.width, 10) || 640;
@@ -404,6 +426,18 @@ function summarizeProcessError(message) {
     .filter(Boolean)
     .slice(0, 3)
     .join(" | ");
+}
+
+function redactSource(source) {
+  try {
+    const url = new URL(source);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    return url.toString();
+  } catch (err) {
+    return String(source || "");
+  }
 }
 
 module.exports = { FFmpegService };

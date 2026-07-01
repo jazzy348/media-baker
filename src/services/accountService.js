@@ -270,6 +270,11 @@ class AccountService {
     };
   }
 
+  async verifyAccountPassword(id, password) {
+    const account = await this.findById(id);
+    return Boolean(account && await verifyPassword(String(password || ""), account.passwordSalt, account.passwordHash));
+  }
+
   async createApiKey(userId, input = {}) {
     await this.init();
     const account = await this.findById(userId);

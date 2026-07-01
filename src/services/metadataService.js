@@ -18,6 +18,8 @@ class MetadataService {
     this.missingRecheckInFlight = null;
     this.lastMissingRecheck = null;
     this.thumbnailInFlight = new Map();
+    this.seasonPosterInFlight = new Map();
+    this.seasonPosterUnavailable = new Set();
   }
 
   async getForMedia(mediaType, mediaFile) {
@@ -233,6 +235,10 @@ class MetadataService {
 
   thumbnailUrl(mediaType, mediaId, token, paramName = "authToken") {
     return `/api/catalog/${encodeURIComponent(mediaType)}/${encodeURIComponent(mediaId)}/metadata/thumbnail?${encodeURIComponent(paramName)}=${encodeURIComponent(token)}`;
+  }
+
+  seasonPosterUrl(mediaType, mediaId, token, paramName = "authToken") {
+    return `/api/catalog/${encodeURIComponent(mediaType)}/${encodeURIComponent(mediaId)}/metadata/season-poster?${encodeURIComponent(paramName)}=${encodeURIComponent(token)}`;
   }
 
   startBackgroundPreload(mediaIndex) {
@@ -453,7 +459,7 @@ class MetadataService {
   }
 
   async ensureThumbnailForMedia(mediaType, mediaFile) {
-    if (!isEpisodeFile(mediaFile)) {
+    if (!isEpisodeFile(mediaFile) && !isLocalThumbnailLibrary(this.appConfig, mediaType)) {
       return { available: false, reason: "Thumbnails are only generated for TV episodes." };
     }
 
@@ -468,6 +474,71 @@ class MetadataService {
       });
     this.thumbnailInFlight.set(key, task);
     return task;
+  }
+
+  async ensureSeasonPosterForMedia(mediaType, mediaFile) {
+    if (!isEpisodeFile(mediaFile)) {
+      return { available: false, reason: "Season posters are only available for TV episodes." };
+    }
+
+    let record = await this.store.get(mediaType, mediaFile.id);
+    if (!record && metadataUnavailableReason(this.config) === null) {
+      await this.getForMedia(mediaType, mediaFile);
+      record = await this.store.get(mediaType, mediaFile.id);
+    }
+    if (!record || !record.found || !record.providerId) {
+      return { available: false, reason: "Matched show metadata is unavailable." };
+    }
+
+    const season = Number.parseInt(mediaFile.season, 10);
+    if (!Number.isFinite(season)) {
+      return { available: false, reason: "Season number is unavailable." };
+    }
+
+    const key = `${record.providerId}:${season}`;
+    const filename = seasonPosterFilenameFor(record.providerId, season, this.config.posterSize);
+    const filePath = this.posterFilePath(filename);
+    if (filePath && await fileExists(filePath)) {
+      return { available: true, filePath, filename, source: "season" };
+    }
+    if (this.seasonPosterInFlight.has(key)) {
+      return this.seasonPosterInFlight.get(key);
+    }
+
+    const task = this.resolveSeasonPoster(record, season, filename)
+      .finally(() => this.seasonPosterInFlight.delete(key));
+    this.seasonPosterInFlight.set(key, task);
+    return task;
+  }
+
+  async resolveSeasonPoster(record, season, filename) {
+    const key = `${record.providerId}:${season}`;
+    if (!this.seasonPosterUnavailable.has(key) && metadataUnavailableReason(this.config) === null) {
+      try {
+        const params = new URLSearchParams({ language: this.config.language });
+        const data = await this.fetchJson(`${TMDB_API_BASE}/tv/${encodeURIComponent(record.providerId)}/season/${season}?${params.toString()}`);
+        if (data && data.poster_path) {
+          await this.cachePosterFile(data.poster_path, filename);
+          return {
+            available: true,
+            filePath: this.posterFilePath(filename),
+            filename,
+            source: "season"
+          };
+        }
+        this.seasonPosterUnavailable.add(key);
+      } catch (err) {
+        this.seasonPosterUnavailable.add(key);
+        logger.full(`[metadata] season poster lookup failed mediaType=${record.mediaType} id=${record.mediaId} providerId=${record.providerId} season=${season} message="${err.message}"`);
+      }
+    }
+
+    const fallback = record.posterFilename ? record : await this.ensurePosterForRecord(record);
+    const fallbackPath = fallback.posterFilename && await this.ensurePosterFile(fallback.posterFilename);
+    if (fallbackPath) {
+      return { available: true, filePath: fallbackPath, filename: fallback.posterFilename, source: "show" };
+    }
+    return { available: false, reason: "Season and show posters are unavailable." };
   }
 
   async resolveThumbnailForMedia(mediaType, mediaFile) {
@@ -909,6 +980,11 @@ function kindForMediaType(config, mediaType) {
   return library && library.type === "movies" ? "movie" : library && library.type === "tv" ? "tv" : null;
 }
 
+function isLocalThumbnailLibrary(config, mediaType) {
+  const library = (config.libraries || []).find((entry) => entry.key === mediaType);
+  return Boolean(library && library.localThumbnails);
+}
+
 function selectPoster(posters, preferredLanguages) {
   if (posters.length === 0) {
     return null;
@@ -936,6 +1012,9 @@ function metadataQueryKey(query) {
 
 function listIndexedMediaFiles(index) {
   return (index.libraries || []).flatMap((library) => (
+    library.noMetadata
+      ? []
+      :
     library.type === "movies"
       ? movieFiles(index[library.key], library.key)
       : [...movieFiles(index[library.key], library.key), ...episodeFiles(index[library.key], library.key)]
@@ -1286,6 +1365,10 @@ function withApiKey(url, apiKey) {
 function posterFilenameFor(kind, providerId, posterSize, posterPath) {
   const extension = path.extname(posterPath) || ".jpg";
   return safePosterFilename(`tmdb-${kind}-${providerId || createId(posterPath)}-${posterSize}${extension}`);
+}
+
+function seasonPosterFilenameFor(providerId, season, posterSize) {
+  return safePosterFilename(`tmdb-tv-${providerId}-season-${pad(season)}-${posterSize}.jpg`);
 }
 
 function thumbnailFilenameFor(kind, providerId, thumbnailSize, thumbnailPath, mediaFile) {

@@ -1,74 +1,87 @@
 # Media Baker Docker Setup
 
-Use this guide for Docker deployments. The image installs Linux `ffmpeg`, `ffprobe`, and `ffsubsync`; do not configure Windows `.exe` paths in Docker.
+Use this guide for Docker deployments. The image includes Node.js, Linux FFmpeg and FFprobe, ffsubsync, yt-dlp, Intel and Mesa VAAPI drivers, and the Media Baker WebUI.
 
 ## Features
 
-- WebUI with accounts, permissions, API keys, share URLs, and per-user watch state.
-- Dynamic library management from the admin panel.
-- TV, movie, anime, 3D, loose-file, and Plex-style folder scanning.
-- Lazy library browsing, fuzzy catalog search, On Deck, watch history, and currently-playing admin view.
-- HLS generation with cache reuse, one-transcode-per-file locking, pre-generation, and fallback error stream.
-- Audio/subtitle selection, subtitle burn-in, downloaded subtitle search, and optional subtitle sync.
-- Quality presets for original, medium, and low playback.
-- 5.1 options including preserve, stereo mixdown, and Stabby Cinema 5.1 channel remap.
-- ProTV/VRChat URL support including resume time and 3D mode parameters.
-- Optional TMDb metadata, poster cache, episode thumbnails, manual matching, and manual poster URLs.
-- Optional MySQL storage for index, settings, accounts, sessions, metadata, and playback progress.
-- JSON storage fallback when MySQL is disabled.
-- Runtime settings in the admin panel for metadata, subtitles, HLS, scans, logging, GPU, and fallback stream.
-- Daily rotating log files with configurable retention.
-- Swagger/OpenAPI docs at `/api/docs`.
+- WebUI with accounts, permissions, API keys, share URLs, self-service account settings, and per-user watch state.
+- Dynamic library creation, removal, ordering, folder browsing, and background re-indexing from the admin panel.
+- TV, movie, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
+- Recently added and randomized home rows, lazy library browsing, metadata-first search, show/season views, and random episode selection.
+- On Deck, next-episode handling, watch history, resume playback, and currently-playing admin view.
+- Browser playback and copyable HLS URLs for external players.
+- HLS cache reuse, one-transcode-per-file locking, pre-generation, quality presets, and fallback error stream.
+- Audio/subtitle selection, subtitle burn-in, SubDL search, subtitle sync, preserved 5.1, stereo mixdown, and Stabby Cinema 5.1 remapping.
+- ProTV and VRChat URL support including resume time and stereoscopic 3D mode parameters.
+- TMDb metadata, aliases, poster cache, season artwork, episode thumbnails, manual matching, poster editing, and duplicate detection.
+- YT-DLP downloads with progress, automatic indexing, and generated thumbnails.
+- M3U and HDHomeRun Live TV with EPG refresh/matching, cached logos, deinterlacing, and rolling HLS.
+- MySQL storage or local JSON fallback for indexes, settings, accounts, sessions, metadata, and playback progress.
+- Admin settings, hardware/network graphs, currently playing, live logs, history, and rotating log files.
+- Admin-only GitHub release notifications and optional automatic source updates.
+- Swagger/OpenAPI documentation at `/api/docs`.
 
 ## Fixed Container Paths
 
 Docker mode is enabled with `MEDIA_BAKER_DOCKER=1`.
 
-These paths are fixed inside the container:
+| Container path | Purpose |
+| --- | --- |
+| `/config/config.json` | Startup configuration |
+| `/cache` | JSON data, metadata, HLS, thumbnails, subtitles, playback state, and source updates |
+| `/cache/app/current` | Automatically installed application source |
+| `/logs` | Daily log files |
+| `/downloads` | YT-DLP output |
+| `/fallback/404.mp4` | Optional fallback source |
+| `/media/...` | Mounted media libraries |
 
-- `/config/config.json`
-- `/cache`
-- `/logs`
-- `/fallback/404.mp4`
-- `/media/...` for mounted media folders
-
-Use the WebUI for runtime settings and library management. In Docker, `config.json` only needs startup settings such as `port` and optional MySQL credentials.
+Use the WebUI for runtime settings and library management. `config.json` only contains the port and optional MySQL credentials.
 
 ## Setup
 
-1. Create folders and config:
+1. Create folders and configuration.
+
+   Windows PowerShell:
 
    ```powershell
-   New-Item -ItemType Directory -Force cache, fallback, logs
+   New-Item -ItemType Directory -Force cache, fallback, logs, downloads
    Copy-Item config.example.json config.json
    ```
 
-2. Put your fallback video here:
+   Linux:
 
-   ```text
-   fallback/404.mp4
+   ```bash
+   mkdir -p cache fallback logs downloads
+   cp config.example.json config.json
    ```
+
+2. Put the optional fallback video at `fallback/404.mp4`.
 
 3. Edit `config.json`:
 
    ```json
    {
      "port": 5000,
-     "mysql": false
+     "mysql": {
+       "enabled": false,
+       "host": "localhost",
+       "port": 3306,
+       "user": "media_baker",
+       "password": "",
+       "database": "media_baker",
+       "connectionLimit": 5
+     }
    }
    ```
 
-   MySQL is optional. If enabled, create the database first and put the credentials in `config.json`.
-
-   Runtime settings such as metadata, subtitles, HLS, fallback stream, GPU encoding, scans, and logging are changed in `Admin > Settings` after startup.
-
-4. Edit `docker-compose.yml` media mounts:
+4. Edit media mounts in `docker-compose.yml`:
 
    ```yaml
    volumes:
      - "./config.json:/config/config.json:ro"
      - "./cache:/cache"
      - "./logs:/logs"
+     - "./downloads:/downloads"
      - "./fallback:/fallback:ro"
      - "/mnt/media/TV Shows:/media/tv:ro"
      - "/mnt/media/Movies:/media/movies:ro"
@@ -80,19 +93,13 @@ Use the WebUI for runtime settings and library management. In Docker, `config.js
    docker compose up -d --build
    ```
 
-6. Open:
-
-   ```text
-   http://localhost:5000
-   ```
+6. Open `http://localhost:5000`.
 
 On first launch, create the first admin account, then add libraries using container paths such as `/media/tv` and `/media/movies`.
 
 ## SMB And NAS Media
 
-Mount SMB/NAS shares on the Docker host, then bind-mount the mounted folder into the container.
-
-Linux example:
+Mount SMB/NAS shares on the Docker host, then bind-mount the mounted folder:
 
 ```yaml
 volumes:
@@ -116,23 +123,21 @@ volumes:
       o: "username=media-user,password=media-password,vers=3.0,ro"
 ```
 
-On Windows Docker Desktop, prefer local paths such as:
+Protect share credentials. On Windows Docker Desktop, use local paths such as:
 
 ```yaml
 - "D:/Media/Movies:/media/movies:ro"
 ```
 
-Mapped drive letters such as `Z:` are usually not visible inside Docker.
+Mapped drive letters such as `Z:` are normally unavailable inside Docker.
 
 ## GPU Encoding
 
-Enable GPU encoding in `Admin > Settings`.
+Enable GPU encoding in `Admin > Settings`. Media Baker detects supported H.264 hardware encoders at startup, caches the selected profile, and falls back to `libx264`.
 
-The Docker image already includes Linux `ffmpeg`, `ffprobe`, `ffsubsync`, Intel VAAPI drivers, Mesa VAAPI drivers, and `vainfo`.
+### NVIDIA
 
-NVIDIA is different: the NVIDIA Container Toolkit must be installed on the Docker host because it configures Docker to pass the host GPU devices and driver libraries into containers. It cannot be baked into this app image in a useful way.
-
-Ubuntu/Debian host example:
+Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the Docker host:
 
 ```bash
 sudo apt-get update
@@ -151,20 +156,52 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-Then enable GPU access in `docker-compose.yml`:
+Enable access in `docker-compose.yml`:
 
 ```yaml
 gpus: all
 ```
 
-For Intel QSV or VAAPI on Linux hosts, pass `/dev/dri` into the container:
+### Intel And AMD
+
+Pass `/dev/dri` into the container:
 
 ```yaml
 devices:
   - /dev/dri:/dev/dri
 ```
 
-The app tests available FFmpeg H.264 hardware encoders and caches the selected profile. If no hardware encoder works, it falls back to CPU.
+The image includes Intel and Mesa VAAPI drivers and `vainfo`.
+
+## YT-DLP
+
+Enable YT-DLP in `Admin > Settings`, choose the `/downloads` path or another mounted container folder, and use the Download button in the WebUI. Completed files are indexed automatically and receive generated thumbnails.
+
+## Live TV
+
+Enable IPTV in `Admin > Settings` and choose an M3U source or HDHomeRun device. Add an XMLTV EPG URL or mounted guide file when programme data is required.
+
+- Source refresh interval and startup buffer are configurable.
+- EPG matching is automatic with manual channel overrides.
+- Channel logos are cached locally.
+- Incompatible streams are transcoded to H.264/AAC.
+- Global and per-channel deinterlacing modes are available.
+- Live HLS uses shared memory when available and stops inactive FFmpeg processes.
+
+The supplied Compose file reserves 512 MB of shared memory.
+
+## Updates
+
+Configure release checks, prereleases, and automatic installation in `Admin > Settings > Updates`. Only admins see release notifications.
+
+The supervisor installs source releases under `/cache/app/current`, stops its server child, and starts the new version. The `/cache` mount preserves source updates across container recreation. Active streams stop during an update.
+
+Rebuild the image when a release changes Node.js, FFmpeg, system packages, the supervisor, or Docker configuration:
+
+```powershell
+git pull
+docker compose up -d --build
+```
 
 ## Useful Commands
 
@@ -205,3 +242,7 @@ Raw OpenAPI JSON:
 ```text
 http://localhost:5000/api/docs/openapi.json
 ```
+
+## Backup
+
+Back up `config.json`, `cache/`, `logs/`, `downloads/`, and the MySQL database when enabled.

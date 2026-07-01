@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
+const { normalizeDeinterlaceMode, normalizeDeinterlaceModeMap } = require("../utils/deinterlace");
 
 const SETTINGS_KEY = "runtime";
 const VALID_LOG_LEVELS = new Set(["errors", "error", "info", "full"]);
@@ -9,6 +10,12 @@ const DEFAULT_RUNTIME_SETTINGS = {
   logging: {
     level: "info",
     retentionDays: 5
+  },
+  updates: {
+    enabled: true,
+    checkIntervalSeconds: 6 * 60 * 60,
+    includePrereleases: false,
+    autoInstall: false
   },
   indexScan: {
     enabled: true,
@@ -27,11 +34,30 @@ const DEFAULT_RUNTIME_SETTINGS = {
     preloadOnStartup: true,
     requestDelayMs: 250
   },
+  ytdlp: {
+    enabled: false,
+    downloadPath: "cache/yt-dlp",
+    libraryTitle: "YT-DLP",
+    allowPlaylists: false
+  },
+  iptv: {
+    enabled: false,
+    sourceType: "m3u",
+    playlistUrl: "",
+    hdHomeRunUrl: "",
+    guideUrl: "",
+    channelMappings: {},
+    deinterlaceMode: "auto",
+    channelDeinterlaceModes: {},
+    refreshIntervalSeconds: 24 * 60 * 60,
+    bufferSeconds: 180,
+    segmentSeconds: 6
+  },
   subtitles: {
     enabled: false,
     provider: "subdl",
     subdlApiKey: "",
-    userAgent: "MediaBaker v1.0",
+    userAgent: "MediaBaker",
     defaultLanguage: "en",
     sync: {
       enabled: true,
@@ -163,6 +189,12 @@ function runtimeSettingsFromConfig(config) {
       level: config.logging && config.logging.level,
       retentionDays: config.logging && config.logging.retentionDays
     },
+    updates: {
+      enabled: config.updates && config.updates.enabled,
+      checkIntervalSeconds: config.updates && config.updates.checkIntervalSeconds,
+      includePrereleases: config.updates && config.updates.includePrereleases,
+      autoInstall: config.updates && config.updates.autoInstall
+    },
     indexScan: {
       enabled: config.indexScan && config.indexScan.enabled,
       intervalSeconds: config.indexScan && config.indexScan.intervalSeconds,
@@ -179,6 +211,25 @@ function runtimeSettingsFromConfig(config) {
       posterLanguages: config.metadata && config.metadata.posterLanguages,
       preloadOnStartup: config.metadata && config.metadata.preloadOnStartup,
       requestDelayMs: config.metadata && config.metadata.requestDelayMs
+    },
+    ytdlp: {
+      enabled: config.ytdlp && config.ytdlp.enabled,
+      downloadPath: config.ytdlp && config.ytdlp.downloadPath,
+      libraryTitle: config.ytdlp && config.ytdlp.libraryTitle,
+      allowPlaylists: config.ytdlp && config.ytdlp.allowPlaylists
+    },
+    iptv: {
+      enabled: config.iptv && config.iptv.enabled,
+      sourceType: config.iptv && config.iptv.sourceType,
+      playlistUrl: config.iptv && config.iptv.playlistUrl,
+      hdHomeRunUrl: config.iptv && config.iptv.hdHomeRunUrl,
+      guideUrl: config.iptv && config.iptv.guideUrl,
+      channelMappings: config.iptv && config.iptv.channelMappings,
+      deinterlaceMode: config.iptv && config.iptv.deinterlaceMode,
+      channelDeinterlaceModes: config.iptv && config.iptv.channelDeinterlaceModes,
+      refreshIntervalSeconds: config.iptv && config.iptv.refreshIntervalSeconds,
+      bufferSeconds: config.iptv && config.iptv.bufferSeconds,
+      segmentSeconds: config.iptv && config.iptv.segmentSeconds
     },
     subtitles: {
       enabled: config.subtitles && config.subtitles.enabled,
@@ -219,8 +270,24 @@ function applyRuntimeSettings(config, settings) {
   const normalized = normalizeRuntimeSettings(settings);
   config.logging.level = normalized.logging.level;
   config.logging.retentionDays = normalized.logging.retentionDays;
+  const updateWorkPath = config.updates && config.updates.workPath;
+  Object.assign(config.updates, normalized.updates);
+  if (updateWorkPath) {
+    config.updates.workPath = updateWorkPath;
+  }
   Object.assign(config.indexScan, normalized.indexScan);
   Object.assign(config.metadata, normalized.metadata);
+  const ytdlpBinaryPath = config.ytdlp && config.ytdlp.binaryPath;
+  Object.assign(config.ytdlp, normalized.ytdlp);
+  if (ytdlpBinaryPath) {
+    config.ytdlp.binaryPath = ytdlpBinaryPath;
+  }
+  config.ytdlp.downloadPath = path.resolve(config.ytdlp.downloadPath);
+  const iptvCachePath = config.iptv && config.iptv.cachePath;
+  Object.assign(config.iptv, normalized.iptv);
+  if (iptvCachePath) {
+    config.iptv.cachePath = iptvCachePath;
+  }
   const ffsubsyncPath = config.subtitles.sync && config.subtitles.sync.ffsubsyncPath;
   Object.assign(config.subtitles, normalized.subtitles);
   Object.assign(config.subtitles.sync, normalized.subtitles.sync);
@@ -242,6 +309,12 @@ function normalizeRuntimeSettings(input = {}) {
       level: normalizeLogLevel(merged.logging.level),
       retentionDays: intValue(merged.logging.retentionDays, DEFAULT_RUNTIME_SETTINGS.logging.retentionDays)
     },
+    updates: {
+      enabled: boolValue(merged.updates.enabled, DEFAULT_RUNTIME_SETTINGS.updates.enabled),
+      checkIntervalSeconds: intValue(merged.updates.checkIntervalSeconds, DEFAULT_RUNTIME_SETTINGS.updates.checkIntervalSeconds, 60 * 60),
+      includePrereleases: boolValue(merged.updates.includePrereleases, DEFAULT_RUNTIME_SETTINGS.updates.includePrereleases),
+      autoInstall: boolValue(merged.updates.autoInstall, DEFAULT_RUNTIME_SETTINGS.updates.autoInstall)
+    },
     indexScan: {
       enabled: boolValue(merged.indexScan.enabled, DEFAULT_RUNTIME_SETTINGS.indexScan.enabled),
       intervalSeconds: intValue(merged.indexScan.intervalSeconds, DEFAULT_RUNTIME_SETTINGS.indexScan.intervalSeconds),
@@ -258,6 +331,25 @@ function normalizeRuntimeSettings(input = {}) {
       posterLanguages: listValue(merged.metadata.posterLanguages, DEFAULT_RUNTIME_SETTINGS.metadata.posterLanguages),
       preloadOnStartup: boolValue(merged.metadata.preloadOnStartup, DEFAULT_RUNTIME_SETTINGS.metadata.preloadOnStartup),
       requestDelayMs: intValue(merged.metadata.requestDelayMs, DEFAULT_RUNTIME_SETTINGS.metadata.requestDelayMs, 0)
+    },
+    ytdlp: {
+      enabled: boolValue(merged.ytdlp.enabled, DEFAULT_RUNTIME_SETTINGS.ytdlp.enabled),
+      downloadPath: stringValue(merged.ytdlp.downloadPath, DEFAULT_RUNTIME_SETTINGS.ytdlp.downloadPath),
+      libraryTitle: stringValue(merged.ytdlp.libraryTitle, DEFAULT_RUNTIME_SETTINGS.ytdlp.libraryTitle),
+      allowPlaylists: boolValue(merged.ytdlp.allowPlaylists, DEFAULT_RUNTIME_SETTINGS.ytdlp.allowPlaylists)
+    },
+    iptv: {
+      enabled: boolValue(merged.iptv.enabled, DEFAULT_RUNTIME_SETTINGS.iptv.enabled),
+      sourceType: merged.iptv.sourceType === "hdhomerun" ? "hdhomerun" : "m3u",
+      playlistUrl: stringValue(merged.iptv.playlistUrl, ""),
+      hdHomeRunUrl: stringValue(merged.iptv.hdHomeRunUrl, ""),
+      guideUrl: stringValue(merged.iptv.guideUrl, ""),
+      channelMappings: stringMapValue(merged.iptv.channelMappings),
+      deinterlaceMode: normalizeDeinterlaceMode(merged.iptv.deinterlaceMode, DEFAULT_RUNTIME_SETTINGS.iptv.deinterlaceMode),
+      channelDeinterlaceModes: normalizeDeinterlaceModeMap(merged.iptv.channelDeinterlaceModes),
+      refreshIntervalSeconds: intValue(merged.iptv.refreshIntervalSeconds, DEFAULT_RUNTIME_SETTINGS.iptv.refreshIntervalSeconds),
+      bufferSeconds: intValue(merged.iptv.bufferSeconds, DEFAULT_RUNTIME_SETTINGS.iptv.bufferSeconds, 10),
+      segmentSeconds: intValue(merged.iptv.segmentSeconds, DEFAULT_RUNTIME_SETTINGS.iptv.segmentSeconds, 2)
     },
     subtitles: {
       enabled: boolValue(merged.subtitles.enabled, DEFAULT_RUNTIME_SETTINGS.subtitles.enabled),
@@ -337,6 +429,15 @@ function listValue(value, fallback) {
   }
 
   return [...fallback];
+}
+
+function stringMapValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(value)
+    .map(([key, entry]) => [String(key).trim(), String(entry || "").trim()])
+    .filter(([key, entry]) => key && entry));
 }
 
 function parseJson(value, fallback) {

@@ -7,7 +7,8 @@ const { qualityOptionsForProbe } = require("./qualityProfiles");
 async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
   const probe = await ffmpeg.probe(mediaFile.filePath);
   const streams = probe.streams || [];
-  const fetchedSubtitles = options.subtitles
+  const subtitlesEnabled = !options.library || !options.library.noSubtitles;
+  const fetchedSubtitles = subtitlesEnabled && options.subtitles
     ? await options.subtitles.cachedOptions(options.mediaType, mediaFile.id)
     : [];
 
@@ -15,7 +16,7 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
     filePath: mediaFile.filePath,
     proTv3d: detectProTv3d(mediaFile, options.library),
     subtitleSearch: {
-      enabled: Boolean(options.subtitles && options.subtitles.config.enabled),
+      enabled: Boolean(subtitlesEnabled && options.subtitles && options.subtitles.config.enabled),
       provider: options.subtitles ? options.subtitles.config.provider : null
     },
     quality: qualityOptionsForProbe(probe),

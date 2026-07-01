@@ -19,7 +19,7 @@ RUN apt-get update \
     vainfo \
   && python3 -m venv /opt/ffsubsync \
   && /opt/ffsubsync/bin/pip install --no-cache-dir --upgrade pip \
-  && /opt/ffsubsync/bin/pip install --no-cache-dir ffsubsync \
+  && /opt/ffsubsync/bin/pip install --no-cache-dir ffsubsync yt-dlp \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
@@ -29,12 +29,12 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY public ./public
 
-RUN mkdir -p /config /cache /fallback /logs \
-  && chown -R node:node /app /config /cache /fallback /logs
+RUN mkdir -p /config /cache /fallback /logs /downloads \
+  && chown -R node:node /app /config /cache /fallback /logs /downloads /opt/ffsubsync
 
 EXPOSE 5000
 
-VOLUME ["/cache", "/fallback", "/logs"]
+VOLUME ["/cache", "/fallback", "/logs", "/downloads"]
 
 ENTRYPOINT ["tini", "--"]
-CMD ["node", "src/server.js"]
+CMD ["node", "src/supervisor.js"]

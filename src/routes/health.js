@@ -1,6 +1,6 @@
 const express = require("express");
 
-module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, ffmpeg, indexScanScheduler, subtitles }) {
+module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, ffmpeg, indexScanScheduler, subtitles, ytdlp }) {
   const router = express.Router();
 
   router.get("/", async (req, res, next) => {
@@ -9,12 +9,15 @@ module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, f
       const subtitleTools = subtitles && typeof subtitles.validateTools === "function"
         ? await subtitles.validateTools()
         : { required: false, ok: true };
+      const ytdlpTools = ytdlp && config.ytdlp && config.ytdlp.enabled
+        ? await ytdlp.validate()
+        : { enabled: false, ok: true };
       const playbackReady = Boolean(binaries.ffmpeg.ok && binaries.ffprobe.ok);
       const libraries = config.libraries.filter((library) => canAccessLibrary(req, library.key));
       res.json({
         ok: playbackReady && subtitleTools.ok,
         playbackReady,
-        warnings: healthWarnings(binaries, subtitleTools),
+        warnings: healthWarnings(binaries, subtitleTools, ytdlpTools),
         libraries,
         indexStore: indexStore.type,
         index: {
@@ -24,7 +27,8 @@ module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, f
         indexScan: indexScanScheduler.getStatus(),
         binaries: {
           ...binaries,
-          subtitles: subtitleTools
+          subtitles: subtitleTools,
+          ytdlp: ytdlpTools
         }
       });
     } catch (err) {
@@ -61,7 +65,7 @@ function canAccessLibrary(req, libraryKey) {
   return true;
 }
 
-function healthWarnings(binaries, subtitleTools) {
+function healthWarnings(binaries, subtitleTools, ytdlpTools) {
   const warnings = [];
   if (!binaries.ffmpeg || !binaries.ffmpeg.ok) {
     warnings.push({
@@ -82,6 +86,13 @@ function healthWarnings(binaries, subtitleTools) {
       code: "ffsubsync_missing",
       severity: "warning",
       message: `Subtitle auto-sync is enabled, but ffsubsync is not available at "${subtitleTools.ffsubsync && subtitleTools.ffsubsync.path || "ffsubsync"}".`
+    });
+  }
+  if (ytdlpTools && ytdlpTools.enabled && !ytdlpTools.ok) {
+    warnings.push({
+      code: "ytdlp_missing",
+      severity: "warning",
+      message: `YT-DLP is enabled, but yt-dlp is not available at "${ytdlpTools.path || "yt-dlp"}". Downloads are disabled until it is installed.`
     });
   }
 

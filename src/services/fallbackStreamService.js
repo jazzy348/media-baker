@@ -117,7 +117,7 @@ class FallbackStreamService {
     res.status(200);
     res.type("application/vnd.apple.mpegurl");
     res.set("Cache-Control", "no-store");
-    res.send(this.rewritePlaylist(playlist, req.path));
+    res.send(this.rewritePlaylist(playlist, req.path, req.authParamName, req.authToken));
   }
 
   async serveSegment(segment, res) {
@@ -139,9 +139,12 @@ class FallbackStreamService {
     res.sendFile(filePath);
   }
 
-  rewritePlaylist(playlist, requestPath) {
+  rewritePlaylist(playlist, requestPath, authParamName = "", authToken = "") {
     const basePath = path.posix.dirname(requestPath.replace(/\\/g, "/"));
     const prefix = basePath === "/" ? "" : basePath;
+    const authQuery = authParamName && authToken
+      ? `?${encodeURIComponent(authParamName)}=${encodeURIComponent(authToken)}`
+      : "";
 
     return playlist
       .split(/\r?\n/)
@@ -152,7 +155,7 @@ class FallbackStreamService {
 
         const segment = path.posix.basename(line.trim());
         const disguised = segment.replace(/^segment_/, SEGMENT_PREFIX);
-        return `${prefix}/${disguised}`;
+        return `${prefix}/${disguised}${authQuery}`;
       })
       .join("\n");
   }
