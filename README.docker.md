@@ -39,7 +39,16 @@ Use the WebUI for runtime settings and library management. `config.json` only co
 
 ## Setup
 
-1. Create folders and configuration.
+0. Pull the repo.
+   Windows Powershell and linux
+   
+   ```powershell and linux
+   git clone git clone https://github.com/jazzy348/media-baker.git
+   cd media-baker
+   ```
+   
+
+2. Create folders and configuration.
 
    Windows PowerShell:
 
@@ -55,9 +64,9 @@ Use the WebUI for runtime settings and library management. `config.json` only co
    cp config.example.json config.json
    ```
 
-2. Put the optional fallback video at `fallback/404.mp4`.
+3. Put the optional fallback video at `fallback/404.mp4`.
 
-3. Edit `config.json`:
+4. Edit `config.json`:
 
    ```json
    {
@@ -74,7 +83,7 @@ Use the WebUI for runtime settings and library management. `config.json` only co
    }
    ```
 
-4. Edit media mounts in `docker-compose.yml`:
+5. Edit media mounts in `docker-compose.yml`:
 
    ```yaml
    volumes:
@@ -87,13 +96,13 @@ Use the WebUI for runtime settings and library management. `config.json` only co
      - "/mnt/media/Movies:/media/movies:ro"
    ```
 
-5. Build and start:
+6. Build and start:
 
    ```powershell
    docker compose up -d --build
    ```
 
-6. Open `http://localhost:5000`.
+7. Open `http://localhost:5000`.
 
 On first launch, create the first admin account, then add libraries using container paths such as `/media/tv` and `/media/movies`.
 
@@ -159,7 +168,8 @@ sudo systemctl restart docker
 Enable access in `docker-compose.yml`:
 
 ```yaml
-gpus: all
+container_name: media-baker
+gpus: all #Put under here ^
 ```
 
 ### Intel And AMD
