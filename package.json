@@ -1,6 +1,6 @@
 {
   "name": "media-baker",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Local media library indexer and HLS baking API.",
   "main": "src/server.js",
   "scripts": {
