@@ -144,9 +144,11 @@ Mapped drive letters such as `Z:` are normally unavailable inside Docker.
 
 Enable GPU encoding in `Admin > Settings`. Media Baker detects supported H.264 hardware encoders at startup, caches the selected profile, and falls back to `libx264`.
 
+The image includes the userspace components for modern and legacy Intel VAAPI, Intel QSV, and AMD VAAPI. The supplied `docker-compose.yml` contains commented GPU passthrough blocks so the appropriate one can be enabled for the Docker host.
+
 ### NVIDIA
 
-Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the Docker host:
+NVIDIA driver libraries must match the host driver, so the NVIDIA Container Toolkit injects them into the container at runtime. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the Docker host:
 
 ```bash
 sudo apt-get update
@@ -181,7 +183,7 @@ devices:
   - /dev/dri:/dev/dri
 ```
 
-The image includes Intel and Mesa VAAPI drivers and `vainfo`.
+The image already includes Intel QSV/VAAPI and AMD VAAPI userspace drivers plus `vainfo`; the host device still needs to be passed through as shown above.
 
 ## YT-DLP
 
