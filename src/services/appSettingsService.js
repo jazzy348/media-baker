@@ -22,6 +22,13 @@ const DEFAULT_RUNTIME_SETTINGS = {
     intervalSeconds: 15 * 60,
     runOnStartup: false
   },
+  backup: {
+    enabled: false,
+    directory: "cache/backups",
+    time: "03:00",
+    days: [0, 1, 2, 3, 4, 5, 6],
+    retentionCount: 7
+  },
   metadata: {
     enabled: false,
     provider: "tmdb",
@@ -131,7 +138,9 @@ class AppSettingsService {
 
   async save(input) {
     await this.init();
-    const settings = normalizeRuntimeSettings(input);
+    const current = await this.read();
+    const base = current ? deepMerge(runtimeSettingsFromConfig(this.config), current) : runtimeSettingsFromConfig(this.config);
+    const settings = normalizeRuntimeSettings(deepMerge(base, input || {}));
     await this.write(settings);
     applyRuntimeSettings(this.config, settings);
     return settings;
@@ -199,6 +208,13 @@ function runtimeSettingsFromConfig(config) {
       enabled: config.indexScan && config.indexScan.enabled,
       intervalSeconds: config.indexScan && config.indexScan.intervalSeconds,
       runOnStartup: config.indexScan && config.indexScan.runOnStartup
+    },
+    backup: {
+      enabled: config.backup && config.backup.enabled,
+      directory: config.backup && config.backup.directory,
+      time: config.backup && config.backup.time,
+      days: config.backup && config.backup.days,
+      retentionCount: config.backup && config.backup.retentionCount
     },
     metadata: {
       enabled: config.metadata && config.metadata.enabled,
@@ -276,6 +292,8 @@ function applyRuntimeSettings(config, settings) {
     config.updates.workPath = updateWorkPath;
   }
   Object.assign(config.indexScan, normalized.indexScan);
+  Object.assign(config.backup, normalized.backup);
+  config.backup.directory = path.resolve(config.backup.directory);
   Object.assign(config.metadata, normalized.metadata);
   const ytdlpBinaryPath = config.ytdlp && config.ytdlp.binaryPath;
   Object.assign(config.ytdlp, normalized.ytdlp);
@@ -319,6 +337,13 @@ function normalizeRuntimeSettings(input = {}) {
       enabled: boolValue(merged.indexScan.enabled, DEFAULT_RUNTIME_SETTINGS.indexScan.enabled),
       intervalSeconds: intValue(merged.indexScan.intervalSeconds, DEFAULT_RUNTIME_SETTINGS.indexScan.intervalSeconds),
       runOnStartup: boolValue(merged.indexScan.runOnStartup, DEFAULT_RUNTIME_SETTINGS.indexScan.runOnStartup)
+    },
+    backup: {
+      enabled: boolValue(merged.backup.enabled, DEFAULT_RUNTIME_SETTINGS.backup.enabled),
+      directory: stringValue(merged.backup.directory, DEFAULT_RUNTIME_SETTINGS.backup.directory),
+      time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(merged.backup.time || "")) ? String(merged.backup.time) : DEFAULT_RUNTIME_SETTINGS.backup.time,
+      days: dayListValue(merged.backup.days, DEFAULT_RUNTIME_SETTINGS.backup.days),
+      retentionCount: intValue(merged.backup.retentionCount, DEFAULT_RUNTIME_SETTINGS.backup.retentionCount)
     },
     metadata: {
       enabled: boolValue(merged.metadata.enabled, DEFAULT_RUNTIME_SETTINGS.metadata.enabled),
@@ -438,6 +463,12 @@ function stringMapValue(value) {
   return Object.fromEntries(Object.entries(value)
     .map(([key, entry]) => [String(key).trim(), String(entry || "").trim()])
     .filter(([key, entry]) => key && entry));
+}
+
+function dayListValue(value, fallback) {
+  if (!Array.isArray(value)) return [...fallback];
+  const days = [...new Set(value.map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))];
+  return days.length > 0 ? days : [...fallback];
 }
 
 function parseJson(value, fallback) {

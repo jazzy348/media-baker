@@ -6,18 +6,18 @@ Use this guide for Docker deployments. The image includes Node.js, Linux FFmpeg 
 
 - WebUI with accounts, permissions, API keys, share URLs, self-service account settings, and per-user watch state.
 - Dynamic library creation, removal, ordering, folder browsing, and background re-indexing from the admin panel.
-- TV, movie, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
+- TV, movie, music, image, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
 - Recently added and randomized home rows, lazy library browsing, metadata-first search, show/season views, and random episode selection.
 - On Deck, next-episode handling, watch history, resume playback, and currently-playing admin view.
-- Browser playback and copyable HLS URLs for external players.
+- Browser playback and copyable HLS URLs for external players, with automatic next-episode and next-track playback, a movable themed music player, and minimizable floating video.
 - HLS cache reuse, one-transcode-per-file locking, pre-generation, quality presets, and fallback error stream.
 - Audio/subtitle selection, subtitle burn-in, SubDL search, subtitle sync, preserved 5.1, stereo mixdown, and Stabby Cinema 5.1 remapping.
 - ProTV and VRChat URL support including resume time and stereoscopic 3D mode parameters.
-- TMDb metadata, aliases, poster cache, season artwork, episode thumbnails, manual matching, poster editing, and duplicate detection.
+- TMDb video metadata and MusicBrainz music metadata with 1024px WebP artwork caching, aliases, season artwork, episode thumbnails, manual matching, poster editing, and duplicate detection.
 - YT-DLP downloads with progress, automatic indexing, and generated thumbnails.
 - M3U and HDHomeRun Live TV with EPG refresh/matching, cached logos, deinterlacing, and rolling HLS.
 - MySQL storage or local JSON fallback for indexes, settings, accounts, sessions, metadata, and playback progress.
-- Admin settings, hardware/network graphs, currently playing, live logs, history, and rotating log files.
+- Admin settings, database backup/restore, hardware/network graphs, currently playing, live logs, history, and rotating log files.
 - Admin-only GitHub release notifications and optional automatic source updates.
 - Swagger/OpenAPI documentation at `/api/docs`.
 
@@ -28,7 +28,7 @@ Docker mode is enabled with `MEDIA_BAKER_DOCKER=1`.
 | Container path | Purpose |
 | --- | --- |
 | `/config/config.json` | Startup configuration |
-| `/cache` | JSON data, metadata, HLS, thumbnails, subtitles, playback state, and source updates |
+| `/cache` | JSON data, metadata, HLS, thumbnails, subtitles, playback state, database backups, and source updates |
 | `/cache/app/current` | Automatically installed application source |
 | `/logs` | Daily log files |
 | `/downloads` | YT-DLP output |
@@ -105,6 +105,8 @@ Use the WebUI for runtime settings and library management. `config.json` only co
 7. Open `http://localhost:5000`.
 
 On first launch, create the first admin account, then add libraries using container paths such as `/media/tv` and `/media/movies`.
+
+Configure manual or scheduled database snapshots in `Admin > Backup & Restore`. The default destination is `/cache/backups`, which persists through the existing `./cache:/cache` mount. A restore replaces the configured MySQL database or JSON stores and restarts the supervised app process.
 
 ## SMB And NAS Media
 

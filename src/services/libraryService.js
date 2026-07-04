@@ -34,12 +34,14 @@ class LibraryService {
           raw_type VARCHAR(64) NULL,
           path TEXT NOT NULL,
           three_d TINYINT(1) NOT NULL DEFAULT 0,
+          track_progress TINYINT(1) NOT NULL DEFAULT 1,
           sort_order INT NOT NULL DEFAULT 0,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
       `);
       await ensureColumn(this.pool, "media_libraries", "sort_order", "INT NOT NULL DEFAULT 0");
+      await ensureColumn(this.pool, "media_libraries", "track_progress", "TINYINT(1) NOT NULL DEFAULT 1");
 
       await this.pool.execute(`
         CREATE TABLE IF NOT EXISTS library_shares (
@@ -65,7 +67,7 @@ class LibraryService {
 
     if (this.config.mysql.enabled) {
       const [rows] = await this.pool.execute(
-        `SELECT library_key, title, library_type, raw_type, path, three_d, sort_order
+        `SELECT library_key, title, library_type, raw_type, path, three_d, track_progress, sort_order
          FROM media_libraries
          ORDER BY sort_order, title`
       );
@@ -77,7 +79,11 @@ class LibraryService {
   }
 
   async listWithShares() {
-    const libraries = await this.list();
+    const storedLibraries = await this.list();
+    const storedKeys = new Set(storedLibraries.map((library) => library.key));
+    const managedLibraries = (this.config.libraries || [])
+      .filter((library) => library.managed && !storedKeys.has(library.key));
+    const libraries = [...storedLibraries, ...managedLibraries];
     const shares = await this.listShares();
     return libraries.map((library) => ({
       ...library,
@@ -96,9 +102,9 @@ class LibraryService {
 
     if (this.config.mysql.enabled) {
       await this.pool.execute(
-        `INSERT INTO media_libraries (library_key, title, library_type, raw_type, path, three_d, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [library.key, library.title, library.type, library.rawType, library.path, library.threeD ? 1 : 0, library.sortOrder]
+        `INSERT INTO media_libraries (library_key, title, library_type, raw_type, path, three_d, track_progress, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [library.key, library.title, library.type, library.rawType, library.path, library.threeD ? 1 : 0, library.trackProgress ? 1 : 0, library.sortOrder]
       );
       return library;
     }
@@ -107,6 +113,33 @@ class LibraryService {
     data.libraries = [...(data.libraries || []), library];
     await this.writeJson(data);
     return library;
+  }
+
+  async update(key, input) {
+    await this.init();
+    const selected = String(key || "").trim();
+    const current = (await this.list()).find((library) => library.key === selected);
+    if (!current) {
+      throw httpError(404, "Library not found");
+    }
+
+    const trackProgress = input.trackProgress === undefined
+      ? current.trackProgress !== false
+      : Boolean(input.trackProgress);
+    if (this.config.mysql.enabled) {
+      await this.pool.execute(
+        "UPDATE media_libraries SET track_progress = ? WHERE library_key = ?",
+        [trackProgress ? 1 : 0, selected]
+      );
+    } else {
+      const data = await this.readJson();
+      data.libraries = (data.libraries || []).map((library) => library.key === selected
+        ? { ...library, trackProgress }
+        : library);
+      await this.writeJson(data);
+    }
+
+    return { ...current, trackProgress };
   }
 
   async remove(key) {
@@ -166,7 +199,7 @@ class LibraryService {
 
   async createShare(libraryKey) {
     await this.init();
-    const library = (await this.list()).find((entry) => entry.key === libraryKey);
+    const library = await this.findAvailableLibrary(libraryKey);
     if (!library) {
       throw httpError(404, "Library not found");
     }
@@ -234,8 +267,15 @@ class LibraryService {
       return null;
     }
 
-    const library = (await this.list()).find((entry) => entry.key === share.libraryKey);
+    const library = await this.findAvailableLibrary(share.libraryKey);
     return library ? { share, library } : null;
+  }
+
+  async findAvailableLibrary(libraryKey) {
+    const selected = String(libraryKey || "").trim();
+    const stored = (await this.list()).find((library) => library.key === selected);
+    if (stored) return stored;
+    return (this.config.libraries || []).find((library) => library.managed && library.key === selected) || null;
   }
 
   async listShares(includeHash = false) {
@@ -263,9 +303,9 @@ class LibraryService {
 
       for (const [index, library] of this.config.libraries.entries()) {
         await this.pool.execute(
-          `INSERT INTO media_libraries (library_key, title, library_type, raw_type, path, three_d, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [library.key, library.title, library.type, library.rawType, library.path, library.threeD ? 1 : 0, index]
+          `INSERT INTO media_libraries (library_key, title, library_type, raw_type, path, three_d, track_progress, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [library.key, library.title, library.type, library.rawType, library.path, library.threeD ? 1 : 0, library.trackProgress === false ? 0 : 1, index]
         );
       }
       return;
@@ -321,6 +361,7 @@ function normalizeLibrary(input) {
     type,
     rawType,
     threeD: isThreeDLibrary({ key, title, type, rawType }),
+    trackProgress: input.trackProgress !== false,
     sortOrder: Number.isFinite(Number(input.sortOrder)) ? Number(input.sortOrder) : 0,
     path: path.resolve(libraryPath)
   };
@@ -334,6 +375,12 @@ function normalizeLibraryType(value) {
   if (["movie", "movies", "film", "films"].includes(type)) {
     return "movies";
   }
+  if (["music", "audio", "songs", "albums"].includes(type)) {
+    return "music";
+  }
+  if (["image", "images", "photo", "photos", "pictures"].includes(type)) {
+    return "images";
+  }
   if (/\b3d\b/i.test(type) && /\b(tv|show|shows|series|episodes)\b/i.test(type)) {
     return "tv";
   }
@@ -341,7 +388,7 @@ function normalizeLibraryType(value) {
     return "movies";
   }
 
-  throw httpError(400, `Unsupported library type: ${value}. Use "tv" or "movies".`);
+  throw httpError(400, `Unsupported library type: ${value}. Use "tv", "movies", "music", or "images".`);
 }
 
 function isThreeDLibrary(library) {
@@ -374,6 +421,7 @@ function fromMysqlLibrary(row) {
     rawType: row.raw_type || row.library_type,
     path: row.path,
     threeD: Boolean(row.three_d),
+    trackProgress: Boolean(row.track_progress),
     sortOrder: Number(row.sort_order) || 0
   };
 }
@@ -427,6 +475,7 @@ function normalizeStoredLibraries(libraries) {
   return libraries
     .map((library, index) => ({
       ...library,
+      trackProgress: library.trackProgress !== false,
       sortOrder: Number.isFinite(Number(library.sortOrder)) ? Number(library.sortOrder) : index
     }))
     .sort((a, b) => a.sortOrder - b.sortOrder || a.title.localeCompare(b.title))

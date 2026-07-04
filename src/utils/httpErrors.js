@@ -4,4 +4,12 @@ function httpError(status, message) {
   return err;
 }
 
-module.exports = { httpError };
+function isClientAbort(err) {
+  if (!err) {
+    return false;
+  }
+  return ["ECONNABORTED", "ECONNRESET", "ERR_STREAM_PREMATURE_CLOSE"].includes(err.code)
+    || /request aborted|premature close/i.test(String(err.message || ""));
+}
+
+module.exports = { httpError, isClientAbort };

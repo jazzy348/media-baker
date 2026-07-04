@@ -32,8 +32,18 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
       const libraries = await libraryService.reorder(req.body && req.body.keys);
       config.libraries = libraries;
       syncYtDlpLibrary(config);
-      await saveIndexLibraryOrder(mediaIndex, config.libraries);
+      await saveIndexLibraryOrder(mediaIndex);
       res.json({ libraries: withShareUrls(req, await libraryService.listWithShares()) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/:libraryKey", requirePermission("canManageLibraries"), async (req, res, next) => {
+    try {
+      const library = await libraryService.update(req.params.libraryKey, req.body || {});
+      await refreshLibraryConfig(config, libraryService, mediaIndex);
+      res.json({ library });
     } catch (err) {
       next(err);
     }
@@ -82,25 +92,42 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
     }
   });
 
-  router.get("/:libraryKey", requireLibraryAccess, (req, res, next) => {
-    const library = mediaIndex.libraryForKey(req.params.libraryKey);
-    if (!library) {
-      next(httpError(404, "Library not found"));
-      return;
-    }
-
-    res.json(library.type === "tv"
-      ? {
-        generatedAt: mediaIndex.index.generatedAt,
-        library,
-        shows: mediaIndex.listShows(library.key),
-        items: mediaIndex.collection(library.key, "tv").items || []
+  router.get("/:libraryKey", requireLibraryAccess, async (req, res, next) => {
+    try {
+      const library = mediaIndex.libraryForKey(req.params.libraryKey);
+      if (!library) {
+        next(httpError(404, "Library not found"));
+        return;
       }
-      : {
-        generatedAt: mediaIndex.index.generatedAt,
-        library,
-        movies: mediaIndex.listMovies(library.key)
-      });
+
+      const collection = await mediaIndex.loadCollection(library.key, library.type);
+      res.json(library.type === "tv"
+        ? {
+          generatedAt: mediaIndex.index.generatedAt,
+          library,
+          shows: await mediaIndex.listShows(library.key, collection),
+          items: collection.items || []
+        }
+        : library.type === "music"
+          ? {
+            generatedAt: mediaIndex.index.generatedAt,
+            library,
+            artists: await mediaIndex.listArtists(library.key, collection)
+          }
+          : library.type === "images"
+            ? {
+              generatedAt: mediaIndex.index.generatedAt,
+              library,
+              images: await mediaIndex.listImages(library.key, collection)
+            }
+        : {
+          generatedAt: mediaIndex.index.generatedAt,
+          library,
+          movies: await mediaIndex.listMovies(library.key, collection)
+        });
+    } catch (err) {
+      next(err);
+    }
   });
 
   router.post("/:libraryKey/reindex", requirePermission("canReindex"), async (req, res, next) => {
@@ -123,42 +150,101 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
     }
   });
 
-  router.get("/:libraryKey/:itemId", requireLibraryAccess, (req, res, next) => {
-    const library = mediaIndex.libraryForKey(req.params.libraryKey);
-    if (!library) {
-      next(httpError(404, "Library not found"));
-      return;
-    }
+  router.get("/:libraryKey/:itemId", requireLibraryAccess, async (req, res, next) => {
+    try {
+      const library = mediaIndex.libraryForKey(req.params.libraryKey);
+      if (!library) {
+        next(httpError(404, "Library not found"));
+        return;
+      }
 
-    const item = library.type === "tv"
-      ? mediaIndex.getShow(req.params.itemId, library.key) || mediaIndex.getMovie(req.params.itemId, library.key)
-      : mediaIndex.getMovie(req.params.itemId, library.key);
-    if (!item) {
-      next(httpError(404, `${library.title} item not found`));
-      return;
-    }
+      const item = library.type === "tv"
+        ? await mediaIndex.getShow(req.params.itemId, library.key) || await mediaIndex.getMovie(req.params.itemId, library.key)
+        : library.type === "music"
+          ? await mediaIndex.getArtist(req.params.itemId, library.key) || await mediaIndex.getTrack(req.params.itemId, library.key)
+          : await mediaIndex.getMovie(req.params.itemId, library.key);
+      if (!item) {
+        next(httpError(404, `${library.title} item not found`));
+        return;
+      }
 
-    res.json(item);
+      res.json(library.type === "music" && item.albums
+        ? await withMusicArtwork(item, library.key, metadata, req)
+        : item);
+    } catch (err) {
+      next(err);
+    }
   });
 
-  router.get("/:libraryKey/:showId/seasons/:seasonNumber", requireLibraryAccess, (req, res, next) => {
-    const library = mediaIndex.libraryForKey(req.params.libraryKey);
-    if (!library || library.type !== "tv") {
-      next(httpError(404, "Library not found"));
-      return;
-    }
+  router.get("/:libraryKey/:showId/seasons/:seasonNumber", requireLibraryAccess, async (req, res, next) => {
+    try {
+      const library = mediaIndex.libraryForKey(req.params.libraryKey);
+      if (!library || library.type !== "tv") {
+        next(httpError(404, "Library not found"));
+        return;
+      }
 
-    const season = mediaIndex.getSeason(req.params.showId, req.params.seasonNumber, library.key);
-    if (!season) {
-      next(httpError(404, `${library.title} season not found`));
-      return;
-    }
+      const season = await mediaIndex.getSeason(req.params.showId, req.params.seasonNumber, library.key);
+      if (!season) {
+        next(httpError(404, `${library.title} season not found`));
+        return;
+      }
 
-    res.json(season);
+      res.json(season);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/:libraryKey/:artistId/albums/:albumId", requireLibraryAccess, async (req, res, next) => {
+    try {
+      const library = mediaIndex.libraryForKey(req.params.libraryKey);
+      if (!library || library.type !== "music") {
+        next(httpError(404, "Library not found"));
+        return;
+      }
+
+      const album = await mediaIndex.getAlbum(req.params.artistId, req.params.albumId, library.key);
+      if (!album) {
+        next(httpError(404, `${library.title} album not found`));
+        return;
+      }
+      res.json(await withAlbumArtwork(album, library.key, metadata, req));
+    } catch (err) {
+      next(err);
+    }
   });
 
   return router;
 };
+
+async function withMusicArtwork(artist, mediaType, metadata, req) {
+  if (!metadata || !metadata.getCachedForMediaItems) {
+    return artist;
+  }
+  const refs = (artist.albums || []).flatMap((album) => (album.tracks || []).map((track) => ({ mediaType, id: track.id })));
+  const records = await metadata.getCachedForMediaItems(refs);
+  const albums = (artist.albums || []).map((album) => albumWithArtwork(album, mediaType, metadata, req, records));
+  return { ...artist, albums };
+}
+
+async function withAlbumArtwork(album, mediaType, metadata, req) {
+  if (!metadata || !metadata.getCachedForMediaItems) {
+    return album;
+  }
+  const records = await metadata.getCachedForMediaItems((album.tracks || []).map((track) => ({ mediaType, id: track.id })));
+  return albumWithArtwork(album, mediaType, metadata, req, records);
+}
+
+function albumWithArtwork(album, mediaType, metadata, req, records) {
+  const record = (album.tracks || [])
+    .map((track) => records.get(`${mediaType}:${track.id}`))
+    .find((entry) => entry && entry.available && entry.posterFilename);
+  return {
+    ...album,
+    posterUrl: record ? metadata.posterUrl(record.posterFilename, req.authToken, req.authParamName || "authToken") : null
+  };
+}
 
 async function refreshLibraryConfig(config, libraryService, mediaIndex) {
   config.libraries = await libraryService.list();
@@ -177,7 +263,7 @@ function startBackgroundReindex(indexScanScheduler, mediaIndex, metadata, reason
   mediaIndex.reindex()
     .then(() => {
       if (metadata) {
-        metadata.startBackgroundPreload(mediaIndex);
+        metadata.startBackgroundPreload(mediaIndex, { retryMissing: reason === "manual" });
       }
     })
     .catch((err) => {
@@ -190,7 +276,7 @@ function startBackgroundLibraryReindex(mediaIndex, metadata, libraryKey) {
   mediaIndex.reindexLibrary(libraryKey)
     .then(() => {
       if (metadata) {
-        metadata.startBackgroundPreload(mediaIndex);
+        metadata.startBackgroundPreload(mediaIndex, { retryMissing: true, mediaType: libraryKey });
       }
     })
     .catch((err) => {
@@ -209,20 +295,8 @@ function assertLibraryAccess(req, libraryKey) {
   }
 }
 
-async function saveIndexLibraryOrder(mediaIndex, libraries) {
-  mediaIndex.index.libraries = libraries.map((library) => ({
-    key: library.key,
-    title: library.title,
-    type: library.type,
-      rawType: library.rawType,
-    threeD: Boolean(library.threeD),
-    managed: Boolean(library.managed),
-    noMetadata: Boolean(library.noMetadata),
-    noSubtitles: Boolean(library.noSubtitles),
-    localThumbnails: Boolean(library.localThumbnails),
-    path: library.path
-  }));
-  await mediaIndex.indexStore.save(mediaIndex.index);
+async function saveIndexLibraryOrder(mediaIndex) {
+  await mediaIndex.updateLibraryOrder(libraries);
 }
 
 function requireLibraryAccess(req, res, next) {

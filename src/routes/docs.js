@@ -65,8 +65,9 @@ function openApiSpec() {
         Error: objectSchema({ error: { type: "string" } }),
         LibraryInput: objectSchema({
           title: { type: "string", example: "Weeb TV" },
-          type: { type: "string", enum: ["tv", "movies", "tv-3d", "movies-3d"] },
-          path: { type: "string", example: "/media/anime/shows" }
+          type: { type: "string", enum: ["tv", "movies", "music", "images", "tv-3d", "movies-3d"] },
+          path: { type: "string", example: "/media/anime/shows" },
+          trackProgress: { type: "boolean", default: true }
         }),
         SettingsRequest: objectSchema({
           settings: { type: "object", additionalProperties: true }
@@ -195,6 +196,32 @@ function openApiSpec() {
           parameters: [queryParam("limit", "integer")]
         })
       },
+      "/api/admin/backups": {
+        get: operation("Admin", "List backups", "Returns backup settings, job status, and available snapshots. Requires backup-management permission."),
+        post: operation("Admin", "Create backup", "Starts a database backup in the background. Requires backup-management permission.")
+      },
+      "/api/admin/backups/settings": {
+        put: operation("Admin", "Update backup schedule", "Sets the destination, local run time, weekdays, and retention count.", true, {
+          requestBody: jsonBody(objectSchema({
+            enabled: { type: "boolean" },
+            directory: { type: "string" },
+            time: { type: "string", example: "03:00" },
+            days: { type: "array", items: { type: "integer", minimum: 0, maximum: 6 } },
+            retentionCount: { type: "integer", minimum: 1 }
+          }))
+        })
+      },
+      "/api/admin/backups/{filename}/restore": {
+        post: operation("Admin", "Restore backup", "Fully replaces the configured database and restarts Media Baker.", true, {
+          parameters: [pathParam("filename")],
+          requestBody: jsonBody(objectSchema({ confirm: { type: "boolean", enum: [true] } }))
+        })
+      },
+      "/api/admin/backup-folders": {
+        get: operation("Admin", "Browse backup folders", "Lists child folders for the backup destination picker.", true, {
+          parameters: [queryParam("path")]
+        })
+      },
       "/api/admin/folders": {
         get: operation("Admin", "Browse folders", "Lists child folders for the library picker.", true, {
           parameters: [queryParam("path")]
@@ -214,7 +241,7 @@ function openApiSpec() {
         })
       },
       "/api/catalog/libraries/{libraryKey}/items": {
-        get: operation("Catalog", "Lazy-load library items", "Lists shows or movies for one library.", true, {
+        get: operation("Catalog", "Lazy-load library items", "Lists shows, artists, images, or movies for one library.", true, {
           parameters: [
             pathParam("libraryKey"),
             queryParam("offset", "integer"),
@@ -229,6 +256,11 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/catalog/{mediaType}/{id}/image": {
+        get: operation("Catalog", "Serve original image", "Serves an authenticated image directly in its original format and resolution.", true, {
+          parameters: [pathParam("mediaType"), pathParam("id")]
+        })
+      },
       "/api/catalog/{mediaType}/{id}/metadata": {
         get: operation("Catalog", "Get metadata", "Returns cached metadata and fetches on demand when enabled.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]
@@ -240,7 +272,7 @@ function openApiSpec() {
         })
       },
       "/api/catalog/{mediaType}/{id}/metadata/search": {
-        get: operation("Catalog", "Search metadata candidates", "Returns TMDb candidates for manual matching.", true, {
+        get: operation("Catalog", "Search metadata candidates", "Returns TMDb or MusicBrainz candidates for manual matching.", true, {
           parameters: [pathParam("mediaType"), pathParam("id"), queryParam("title"), queryParam("year", "integer")]
         })
       },
@@ -324,7 +356,7 @@ function openApiSpec() {
       },
       "/api/ytdlp/downloads": {
         get: operation("YT-DLP", "List downloads", "Returns active and recent YT-DLP download progress records."),
-        post: operation("YT-DLP", "Start download", "Starts a URL download into the managed YT-DLP library.", true, {
+        post: operation("YT-DLP", "Start download", "Starts a URL download into the managed YT-DLP library. YouTube playlist URLs are detected automatically.", true, {
           requestBody: jsonBody(objectSchema({
             url: { type: "string", example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
           }))
@@ -387,8 +419,12 @@ function openApiSpec() {
         })
       },
       "/api/libraries/{libraryKey}": {
-        get: operation("Libraries", "Library details", "Lists shows or movies for a configured library.", true, {
+        get: operation("Libraries", "Library details", "Lists shows, artists, images, or movies for a configured library.", true, {
           parameters: [pathParam("libraryKey")]
+        }),
+        put: operation("Libraries", "Update library", "Updates runtime library options without rescanning.", true, {
+          parameters: [pathParam("libraryKey")],
+          requestBody: jsonBody(objectSchema({ trackProgress: { type: "boolean" } }))
         }),
         delete: operation("Libraries", "Remove library", "Removes a library from Media Baker without deleting files.", true, {
           parameters: [pathParam("libraryKey")]
@@ -419,8 +455,13 @@ function openApiSpec() {
           parameters: [pathParam("libraryKey"), pathParam("showId"), pathParam("seasonNumber", "integer")]
         })
       },
+      "/api/libraries/{libraryKey}/{artistId}/albums/{albumId}": {
+        get: operation("Libraries", "Album details", "Returns one album and its ordered tracks from a music library.", true, {
+          parameters: [pathParam("libraryKey"), pathParam("artistId"), pathParam("albumId")]
+        })
+      },
       "/api/streams/{libraryKey}/{itemId}/master.m3u8": {
-        get: operation("Streams", "Prepare and serve HLS playlist", "Requires a generated playback token. Query options include audio, subtitle, audioChannels, quality, 3d, and t.", true, {
+        get: operation("Streams", "Prepare and serve HLS playlist", "Requires a generated playback token. Video and audio-only media are served as HLS. Query options include audio, subtitle, audioChannels, quality, 3d, and t.", true, {
           security: [{ PlaybackToken: [] }],
           parameters: [
             pathParam("libraryKey"),
@@ -438,6 +479,12 @@ function openApiSpec() {
               content: { "application/vnd.apple.mpegurl": { schema: { type: "string" } } }
             }
           }
+        })
+      },
+      "/api/streams/{libraryKey}/{itemId}/image": {
+        get: operation("Streams", "Serve shared image", "Requires a media-scoped playback token and returns a WebP derivative capped within 1024x1024 while preserving aspect ratio.", true, {
+          security: [{ PlaybackToken: [] }],
+          parameters: [pathParam("libraryKey"), pathParam("itemId")]
         })
       },
       "/api/streams/hls/{cacheKey}/{filename}": {

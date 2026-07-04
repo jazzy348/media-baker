@@ -17,6 +17,12 @@
       return { name: "live-tv", start: start ? new Date(start) : new Date(), pinnedToNow: !start };
     }
     if (segments[0] === "libraries" && segments[1]) {
+      if (segments[2] === "artists" && segments[3] && segments[4] === "albums" && segments[5]) {
+        return { name: "album", libraryKey: segments[1], artistId: segments[3], albumId: segments[5] };
+      }
+      if (segments[2] === "artists" && segments[3]) {
+        return { name: "artist", libraryKey: segments[1], artistId: segments[3] };
+      }
       if (segments[2] === "shows" && segments[3] && segments[4] === "seasons" && segments[5]) {
         return {
           name: "season",
@@ -32,6 +38,7 @@
         return {
           name: "library",
           libraryKey: segments[1],
+          folder: url.searchParams.get("folder") || "",
           title: global.history.state && global.history.state.title || ""
         };
       }
@@ -73,8 +80,9 @@
     return `/search?q=${encodeURIComponent(query)}`;
   }
 
-  function libraryPath(libraryKey) {
-    return `/libraries/${encodeURIComponent(libraryKey)}`;
+  function libraryPath(libraryKey, folder = "") {
+    const base = `/libraries/${encodeURIComponent(libraryKey)}`;
+    return folder ? `${base}?folder=${encodeURIComponent(folder)}` : base;
   }
 
   function showPath(libraryKey, showId) {
@@ -87,6 +95,14 @@
 
   function liveTvPath(start, pinnedToNow) {
     return pinnedToNow ? "/live-tv" : `/live-tv?start=${encodeURIComponent(start.toISOString())}`;
+  }
+
+  function artistPath(libraryKey, artistId) {
+    return `${libraryPath(libraryKey)}/artists/${encodeURIComponent(artistId)}`;
+  }
+
+  function albumPath(libraryKey, artistId, albumId) {
+    return `${artistPath(libraryKey, artistId)}/albums/${encodeURIComponent(albumId)}`;
   }
 
   function decodeSegment(value) {
@@ -106,6 +122,8 @@
     libraryPath,
     showPath,
     seasonPath,
+    artistPath,
+    albumPath,
     liveTvPath
   });
 })(window);

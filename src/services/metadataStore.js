@@ -7,6 +7,7 @@ class MetadataStore {
     this.config = config;
     this.pool = null;
     this.initialized = false;
+    this.initializationPromise = null;
     this.jsonPath = path.join(config.metadata.cachePath, "metadata.json");
   }
 
@@ -71,6 +72,41 @@ class MetadataStore {
 
     const data = await this.readJson();
     return keys.map((key) => data[key]).filter(Boolean);
+  }
+
+  async searchRefs(query, mediaTypes, limit = 1000) {
+    await this.init();
+    const tokens = searchTokens(query);
+    const types = [...new Set((mediaTypes || []).filter(Boolean))];
+    const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 1000, 2000));
+    if (tokens.length === 0 || types.length === 0) {
+      return [];
+    }
+
+    if (this.config.mysql.enabled) {
+      const typePlaceholders = types.map(() => "?").join(", ");
+      const booleanQuery = tokens.map((token) => `+${token}*`).join(" ");
+      const [rows] = await this.pool.execute(
+        `SELECT media_type, media_id
+         FROM media_metadata
+         WHERE found = 1
+           AND media_type IN (${typePlaceholders})
+           AND MATCH(title, source_json) AGAINST(? IN BOOLEAN MODE)
+         LIMIT ${safeLimit}`,
+        [...types, booleanQuery]
+      );
+      return rows.map((row) => ({ mediaType: row.media_type, id: row.media_id }));
+    }
+
+    const data = await this.readJson();
+    return Object.values(data)
+      .filter((record) => record.found && types.includes(record.mediaType))
+      .filter((record) => {
+        const text = normalizeSearchText(`${record.title || ""} ${record.sourceJson || ""}`);
+        return tokens.every((token) => text.includes(token));
+      })
+      .slice(0, safeLimit)
+      .map((record) => ({ mediaType: record.mediaType, id: record.mediaId }));
   }
 
   async getByPosterFilename(filename) {
@@ -177,11 +213,58 @@ class MetadataStore {
     await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
   }
 
+  async replaceCachedImageFilenames(filenameMap) {
+    await this.init();
+    const entries = [...filenameMap.entries()].filter(([from, to]) => from && to && from !== to);
+    if (entries.length === 0) {
+      return;
+    }
+
+    if (this.config.mysql.enabled) {
+      for (const group of chunks(entries, 250)) {
+        const posterCases = group.map(() => "WHEN ? THEN ?").join(" ");
+        const thumbnailCases = group.map(() => "WHEN ? THEN ?").join(" ");
+        const placeholders = group.map(() => "?").join(", ");
+        const pairs = group.flatMap(([from, to]) => [from, to]);
+        const names = group.map(([from]) => from);
+        await this.pool.execute(
+          `UPDATE media_metadata
+           SET poster_filename = CASE poster_filename ${posterCases} ELSE poster_filename END,
+               thumbnail_filename = CASE thumbnail_filename ${thumbnailCases} ELSE thumbnail_filename END
+           WHERE poster_filename IN (${placeholders}) OR thumbnail_filename IN (${placeholders})`,
+          [...pairs, ...pairs, ...names, ...names]
+        );
+      }
+      return;
+    }
+
+    const data = await this.readJson();
+    for (const record of Object.values(data)) {
+      record.posterFilename = filenameMap.get(record.posterFilename) || record.posterFilename;
+      record.thumbnailFilename = filenameMap.get(record.thumbnailFilename) || record.thumbnailFilename;
+    }
+    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
+    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
+  }
+
   async init() {
     if (this.initialized) {
       return;
     }
 
+    if (!this.initializationPromise) {
+      this.initializationPromise = this.initialize();
+    }
+
+    try {
+      await this.initializationPromise;
+    } catch (err) {
+      this.initializationPromise = null;
+      throw err;
+    }
+  }
+
+  async initialize() {
     if (this.config.mysql.enabled) {
       this.pool = mysql.createPool({
         host: this.config.mysql.host,
@@ -225,6 +308,7 @@ class MetadataStore {
       await ensureColumn(this.pool, "media_metadata", "thumbnail_filename", "thumbnail_filename VARCHAR(255) NULL");
       await ensureColumn(this.pool, "media_metadata", "thumbnail_unavailable", "thumbnail_unavailable TINYINT(1) NOT NULL DEFAULT 0");
       await ensureColumn(this.pool, "media_metadata", "thumbnail_unavailable_reason", "thumbnail_unavailable_reason VARCHAR(255) NULL");
+      await ensureIndex(this.pool, "media_metadata", "idx_media_metadata_search", "FULLTEXT INDEX idx_media_metadata_search (title, source_json)");
     }
 
     this.initialized = true;
@@ -278,6 +362,19 @@ function chunks(values, size) {
   return result;
 }
 
+function searchTokens(value) {
+  return normalizeSearchText(value).split(" ").filter(Boolean);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 async function ensureColumn(pool, table, column, definition) {
   const [rows] = await pool.execute(
     `SELECT COUNT(*) AS count
@@ -293,6 +390,21 @@ async function ensureColumn(pool, table, column, definition) {
   }
 
   await pool.execute(`ALTER TABLE \`${table}\` ADD COLUMN ${definition}`);
+}
+
+async function ensureIndex(pool, table, indexName, definition) {
+  const [rows] = await pool.execute(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND INDEX_NAME = ?`,
+    [table, indexName]
+  );
+  if (Number(rows[0].count) > 0) {
+    return;
+  }
+  await pool.execute(`ALTER TABLE ${table} ADD ${definition}`);
 }
 
 module.exports = { MetadataStore };

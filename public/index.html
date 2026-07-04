@@ -82,6 +82,11 @@
       </section>
     </main>
 
+    <div id="imageViewer" class="image-viewer hidden" aria-hidden="true">
+      <button id="closeImageViewer" class="close-button image-viewer-close" type="button" title="Close image" aria-label="Close image">x</button>
+      <img id="imageViewerImage" alt="">
+    </div>
+
     <aside id="detailsPanel" class="details" aria-hidden="true">
       <button id="closeDetails" class="close-button" type="button" title="Close">x</button>
       <div class="poster-panel">
@@ -236,12 +241,66 @@
             <p id="playerCategory" class="eyebrow"></p>
             <h2 id="playerTitle"></h2>
           </div>
-          <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
+          <div class="player-heading-actions">
+            <button id="minimizeVideoPlayer" class="music-icon-button" type="button" title="Minimize player" aria-label="Minimize player"><span aria-hidden="true">&#8722;</span></button>
+            <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
+          </div>
         </div>
-        <video id="webPlayer" class="web-player" controls playsinline></video>
+        <div id="videoPlayerSlot" class="video-player-slot">
+          <div id="videoPlaybackSurface" class="video-playback-surface">
+            <video id="webPlayer" class="web-player" playsinline></video>
+            <div id="videoControls" class="video-controls">
+              <button id="videoPlayPause" class="video-control-button" type="button" title="Pause" aria-label="Pause">&#10074;&#10074;</button>
+              <span id="videoCurrentTime" class="video-time">0:00</span>
+              <input id="videoSeek" class="video-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+              <span id="videoDuration" class="video-time">0:00</span>
+              <button id="videoMute" class="video-control-button" type="button" title="Mute" aria-label="Mute">&#128266;</button>
+              <input id="videoVolume" class="video-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+              <button id="videoPictureInPicture" class="video-control-button" type="button" title="Picture in Picture" aria-label="Picture in Picture">&#9635;</button>
+              <button id="videoFullscreen" class="video-control-button" type="button" title="Fullscreen" aria-label="Fullscreen">&#9974;</button>
+            </div>
+          </div>
+        </div>
         <p id="playerStatus" class="status"></p>
       </div>
     </div>
+
+    <aside id="videoMiniPlayer" class="video-mini-player hidden" aria-hidden="true">
+      <div id="videoMiniPlayerDrag" class="video-mini-player-drag">
+        <div class="video-mini-player-heading">
+          <p id="videoMiniCategory" class="eyebrow"></p>
+          <strong id="videoMiniTitle"></strong>
+        </div>
+        <button id="restoreVideoPlayer" class="music-icon-button" type="button" title="Restore player size" aria-label="Restore player size"><span aria-hidden="true">&#9974;</span></button>
+        <button id="closeVideoMiniPlayer" class="music-icon-button" type="button" title="Close player" aria-label="Close player">x</button>
+      </div>
+      <div id="videoMiniPlayerSlot" class="video-mini-player-slot"></div>
+      <p id="videoMiniStatus" class="status"></p>
+    </aside>
+
+    <aside id="musicPlayer" class="music-player hidden" aria-hidden="true">
+      <div id="musicPlayerDrag" class="music-player-drag">
+        <div id="musicPlayerCover" class="music-player-cover">MB</div>
+        <div class="music-player-heading">
+          <p id="musicPlayerArtist" class="eyebrow"></p>
+          <strong id="musicPlayerTitle"></strong>
+          <span id="musicPlayerAlbum"></span>
+        </div>
+        <button id="closeMusicPlayer" class="music-icon-button" type="button" title="Close music player" aria-label="Close music player">x</button>
+      </div>
+      <div class="music-player-controls">
+        <button id="musicPlayPause" class="music-command-button" type="button">Pause</button>
+        <span id="musicCurrentTime" class="music-time">0:00</span>
+        <input id="musicSeek" class="music-seek" type="range" min="0" max="1000" value="0" aria-label="Seek">
+        <span id="musicDuration" class="music-time">0:00</span>
+        <button id="musicNext" class="music-command-button" type="button">Next</button>
+      </div>
+      <div class="music-player-volume">
+        <button id="musicMute" class="music-command-button" type="button">Mute</button>
+        <input id="musicVolume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+        <p id="musicPlayerStatus" class="status"></p>
+      </div>
+    </aside>
 
     <div id="downloadOverlay" class="choice-overlay hidden" aria-hidden="true">
       <div class="choice-modal download-modal">
@@ -329,6 +388,7 @@
             <button id="adminApiKeysTab" class="admin-nav-button" type="button">API Keys</button>
             <button id="adminLibrariesTab" class="admin-nav-button" type="button">Libraries</button>
             <button id="adminDuplicatesTab" class="admin-nav-button" type="button">Duplicates</button>
+            <button id="adminBackupsTab" class="admin-nav-button" type="button">Backup &amp; Restore</button>
             <button id="adminSettingsTab" class="admin-nav-button" type="button">Settings</button>
             <button id="adminHardwareTab" class="admin-nav-button" type="button">Hardware</button>
             <button id="adminCurrentlyPlayingTab" class="admin-nav-button" type="button">Currently Playing</button>
@@ -360,6 +420,7 @@
                 <label><input id="accountCanMetadata" type="checkbox"> Manage metadata</label>
                 <label><input id="accountCanSettings" type="checkbox"> Manage settings</label>
                 <label><input id="accountCanApiKeys" type="checkbox"> Manage API keys</label>
+                <label><input id="accountCanBackups" type="checkbox"> Manage backups</label>
                 <label><input id="accountCanReindex" type="checkbox"> Re-index libraries</label>
                 <label><input id="accountCanUsers" type="checkbox"> Manage users</label>
                 <label><input id="accountCanHardware" type="checkbox"> View hardware</label>
@@ -419,6 +480,8 @@
                 <select id="libraryTypeSelect">
                   <option value="tv">TV</option>
                   <option value="movies">Movies</option>
+                  <option value="music">Music</option>
+                  <option value="images">Images</option>
                   <option value="tv-3d">TV 3D</option>
                   <option value="movies-3d">Movies 3D</option>
                 </select>
@@ -429,6 +492,10 @@
                   <input id="libraryPathInput" type="text" placeholder="Choose a folder" readonly required>
                   <button id="browseLibraryPath" class="secondary-button compact-button" type="button">Browse</button>
                 </span>
+              </label>
+              <label class="library-progress-field">
+                <input id="libraryTrackProgress" type="checkbox" checked>
+                Track playback progress
               </label>
               <button id="addLibraryButton" class="primary-button" type="submit">Add library</button>
             </form>
@@ -461,6 +528,68 @@
             <p id="duplicatesStatus" class="status"></p>
             <div id="duplicatesList" class="duplicate-list"></div>
           </section>
+          <section id="adminBackupsPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Data</p>
+                <h2>Backup &amp; Restore</h2>
+              </div>
+              <button id="createBackup" class="primary-button compact-button" type="button">Back up now</button>
+            </div>
+            <form id="backupSettingsForm" class="settings-form backup-settings-form">
+              <fieldset>
+                <legend>Destination</legend>
+                <label class="backup-directory-field">
+                  Backup directory
+                  <span class="path-picker-control">
+                    <input id="backupDirectory" type="text" readonly required>
+                    <button id="browseBackupDirectory" class="secondary-button compact-button" type="button">Browse</button>
+                  </span>
+                </label>
+                <label>Backups to keep<input id="backupRetention" type="number" min="1" max="365" step="1"></label>
+              </fieldset>
+              <fieldset>
+                <legend>Schedule</legend>
+                <label class="settings-toggle"><input id="backupScheduleEnabled" type="checkbox"> Enable scheduled backups</label>
+                <div id="backupScheduleBody" class="settings-feature-body backup-schedule-body">
+                  <label>Time<input id="backupTime" type="time" required></label>
+                  <div class="backup-days" role="group" aria-label="Backup days">
+                    <label><input type="checkbox" value="1"> Mon</label>
+                    <label><input type="checkbox" value="2"> Tue</label>
+                    <label><input type="checkbox" value="3"> Wed</label>
+                    <label><input type="checkbox" value="4"> Thu</label>
+                    <label><input type="checkbox" value="5"> Fri</label>
+                    <label><input type="checkbox" value="6"> Sat</label>
+                    <label><input type="checkbox" value="0"> Sun</label>
+                  </div>
+                </div>
+              </fieldset>
+              <div class="action-row compact-actions">
+                <button class="primary-button" type="submit">Save backup settings</button>
+              </div>
+            </form>
+            <section id="backupFolderPicker" class="folder-picker hidden" aria-live="polite">
+              <div class="folder-picker-heading">
+                <div><p class="eyebrow">Folder</p><strong id="backupFolderPath">Loading...</strong></div>
+                <button id="closeBackupFolderPicker" class="secondary-button compact-button" type="button">Close</button>
+              </div>
+              <div id="backupFolderRoots" class="folder-roots"></div>
+              <div class="folder-picker-actions">
+                <button id="backupFolderParent" class="secondary-button compact-button" type="button">Up</button>
+                <button id="selectBackupFolder" class="primary-button compact-button" type="button">Use this folder</button>
+              </div>
+              <div id="backupFolderList" class="folder-list"></div>
+            </section>
+            <div id="backupProgress" class="backup-progress hidden" role="progressbar" aria-label="Backup progress" aria-valuemin="0" aria-valuemax="100">
+              <div class="progress-track" aria-hidden="true"><span id="backupProgressFill" class="progress-fill"></span></div>
+              <div class="backup-progress-meta">
+                <strong id="backupProgressText">Preparing backup...</strong>
+                <span id="backupProgressEta" class="status"></span>
+              </div>
+            </div>
+            <p id="backupStatus" class="status"></p>
+            <div id="backupList" class="library-manager-list"></div>
+          </section>
           <section id="adminSettingsPage" class="admin-page hidden">
             <div class="admin-page-heading">
               <div>
@@ -491,7 +620,7 @@
               </fieldset>
               <fieldset>
                 <legend>Metadata</legend>
-                <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable TMDb metadata</label>
+                <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable TMDb and MusicBrainz metadata</label>
                 <div id="metadataSettingsBody" class="settings-feature-body">
                   <label>TMDb API key<input id="settingsTmdbApiKey" type="password" autocomplete="off"></label>
                   <label>TMDb read access token<input id="settingsTmdbReadToken" type="password" autocomplete="off"></label>
@@ -524,7 +653,7 @@
                 <div id="ytDlpSettingsBody" class="settings-feature-body">
                   <label>Download path<input id="settingsYtDlpPath" type="text" autocomplete="off" placeholder="C:\MediaBaker\downloads"></label>
                   <label>Library title<input id="settingsYtDlpTitle" type="text" autocomplete="off"></label>
-                  <label class="settings-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlist downloads</label>
+                  <label class="settings-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlists from other providers</label>
                 </div>
               </fieldset>
               <fieldset>

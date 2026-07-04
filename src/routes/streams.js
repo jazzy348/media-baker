@@ -1,11 +1,34 @@
 const express = require("express");
 const path = require("path");
-const { httpError } = require("../utils/httpErrors");
+const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const logger = require("../utils/logger");
 
-module.exports = function createStreamRoutes({ mediaIndex, hls, playbackTokens, progress }) {
+module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress }) {
   const router = express.Router();
+
+  router.get("/:mediaType/:id/image", async (req, res, next) => {
+    try {
+      if (!isStreamToken(req.playbackTokenPayload, req.params.mediaType, req.params.id)) {
+        return next(httpError(401, "Unauthorized"));
+      }
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      if (!library || library.type !== "images") {
+        return next(httpError(404, "Image not found"));
+      }
+      const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
+      const filePath = await images.fileFor(mediaFile, 1024);
+      res.set("Cache-Control", "private, max-age=86400");
+      res.type(path.extname(filePath));
+      res.sendFile(filePath, (err) => {
+        if (err && !isClientAbort(err)) {
+          next(httpError(err.statusCode || 404, "Image not found"));
+        }
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   router.get("/hls/:cacheKey/:filename", async (req, res, next) => {
     try {
@@ -48,7 +71,12 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, playbackTokens, 
           return;
         }
 
-        if (progress && req.playbackTokenPayload.mediaType && req.playbackTokenPayload.mediaId) {
+        const progressLibrary = mediaIndex.libraryForKey(req.playbackTokenPayload.mediaType);
+        if (progress
+          && progressLibrary
+          && progressLibrary.trackProgress !== false
+          && req.playbackTokenPayload.mediaType
+          && req.playbackTokenPayload.mediaId) {
           hls.segmentProgress(req.params.cacheKey, req.params.filename)
             .then((segmentProgress) => segmentProgress && progress.recordSegmentDelivery(
               req.playbackTokenPayload.userId || "global",
@@ -103,10 +131,6 @@ function safeUrl(req) {
   }
 
   return `${url.pathname}${url.search}`;
-}
-
-function isClientAbort(err) {
-  return err.code === "ECONNABORTED" || err.message === "Request aborted";
 }
 
 function rewritePlaylistUrls(playlist, baseUrl, secret) {

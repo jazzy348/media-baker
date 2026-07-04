@@ -14,6 +14,7 @@ module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, f
         : { enabled: false, ok: true };
       const playbackReady = Boolean(binaries.ffmpeg.ok && binaries.ffprobe.ok);
       const libraries = config.libraries.filter((library) => canAccessLibrary(req, library.key));
+      const counts = await mediaIndex.counts();
       res.json({
         ok: playbackReady && subtitleTools.ok,
         playbackReady,
@@ -22,7 +23,7 @@ module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, f
         indexStore: indexStore.type,
         index: {
           generatedAt: mediaIndex.index.generatedAt,
-          libraries: indexCounts(mediaIndex.index, req)
+          libraries: indexCounts(mediaIndex.index, counts, req)
         },
         indexScan: indexScanScheduler.getStatus(),
         binaries: {
@@ -39,18 +40,15 @@ module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, f
   return router;
 };
 
-function indexCounts(index, req) {
+function indexCounts(index, counts, req) {
   return (index.libraries || [])
     .filter((library) => canAccessLibrary(req, library.key))
     .map((library) => {
-    const collection = index[library.key] || {};
     return {
       key: library.key,
       title: library.title,
       type: library.type,
-      count: library.type === "tv"
-        ? (collection.shows || []).reduce((total, show) => total + show.seasons.reduce((seasonTotal, season) => seasonTotal + season.episodes.length, 0), 0) + (collection.items || []).length
-        : (collection.items || []).length
+      count: counts[library.key] || 0
     };
   });
 }

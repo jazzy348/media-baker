@@ -5,6 +5,8 @@ const { createIndexStore } = require("./services/indexStores");
 const { MediaIndex } = require("./services/mediaIndex");
 const { FFmpegService } = require("./services/ffmpegService");
 const { HlsService } = require("./services/hlsService");
+const { ImageService } = require("./services/imageService");
+const { CachedImageService } = require("./services/cachedImageService");
 const { FallbackStreamService } = require("./services/fallbackStreamService");
 const { MetadataStore } = require("./services/metadataStore");
 const { MetadataService } = require("./services/metadataService");
@@ -21,6 +23,7 @@ const { PlaybackTokenService } = require("./services/playbackTokens");
 const { YtDlpService, syncYtDlpLibrary } = require("./services/ytdlpService");
 const { IptvService } = require("./services/iptvService");
 const { UpdateService } = require("./services/updateService");
+const { BackupService } = require("./services/backupService");
 const { createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
@@ -58,9 +61,11 @@ async function createApp() {
 
   const ffmpeg = new FFmpegService(config.ffmpeg);
   await ffmpeg.validate();
+  const cachedImages = new CachedImageService(config, ffmpeg);
   const progressStore = new PlaybackProgressStore(config);
   const progress = new PlaybackProgressService(config, progressStore);
   const hls = new HlsService(config, ffmpeg, progress);
+  const images = new ImageService(config, ffmpeg, cachedImages);
   const fallbackStream = new FallbackStreamService(config, ffmpeg);
   try {
     await fallbackStream.prepare();
@@ -68,15 +73,16 @@ async function createApp() {
     logger.error(`[fallback] prepare failed message="${err.message}"`, err);
   }
   const metadataStore = new MetadataStore(config);
-  const metadata = new MetadataService(config, metadataStore, ffmpeg);
+  const metadata = new MetadataService(config, metadataStore, ffmpeg, cachedImages);
   const subtitles = new SubtitleService(config);
   const indexScanScheduler = new IndexScanScheduler(config, mediaIndex, metadata);
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
   const playbackTokens = new PlaybackTokenService(playbackSecret, config.hls.ttlSeconds);
   const ytdlp = new YtDlpService(config);
-  const iptv = new IptvService(config, ffmpeg);
+  const iptv = new IptvService(config, ffmpeg, cachedImages);
   const updates = new UpdateService(config);
+  const backups = new BackupService(config, appSettings);
   ytdlp.setCompletionHandler(async () => {
     await mediaIndex.reindexLibrary(config.ytdlp.libraryKey || "yt-dlp");
   });
@@ -87,6 +93,8 @@ async function createApp() {
     mediaIndex,
     ffmpeg,
     hls,
+    images,
+    cachedImages,
     fallbackStream,
     metadataStore,
     metadata,
@@ -101,19 +109,26 @@ async function createApp() {
     playbackTokens,
     ytdlp,
     iptv,
-    updates
+    updates,
+    backups
   };
-  metadata.startBackgroundPreload(mediaIndex);
+  const imageMigration = cachedImages.migrate(metadataStore, config.iptv.cachePath);
+  backups.setReadiness(imageMigration);
+  imageMigration.catch((err) => {
+    logger.error(`[images] cached image migration failed message="${err.message}"`, err);
+  });
+  imageMigration.catch(() => {}).finally(() => metadata.startBackgroundPreload(mediaIndex));
   indexScanScheduler.start();
   ytdlp.start();
-  iptv.start();
+  imageMigration.catch(() => {}).finally(() => iptv.start());
   updates.start();
+  backups.start();
 
   app.use("/api/streams", createStreamAuthMiddleware(playbackTokens), createStreamRoutes(app.locals.services));
   app.use("/api/auth", createAuthRoutes(app.locals.services));
   app.use("/api/docs", createDocsRoutes());
   app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
-  app.get(/^\/libraries\/[^/]+(?:\/shows\/[^/]+(?:\/seasons\/[^/]+)?)?\/?$/, serveWebApp);
+  app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
   app.use(createAuthMiddleware(accountService, libraryService));
 
   app.use("/api/admin", createAdminRoutes(app.locals.services));

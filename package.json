@@ -1,6 +1,6 @@
 {
   "name": "media-baker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local media library indexer and HLS baking API.",
   "repository": {
     "type": "git",

@@ -6,6 +6,7 @@ const logger = require("../utils/logger");
 
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const VALIDATION_TTL_MS = 60 * 1000;
+const INDEX_REFRESH_DELAY_MS = 750;
 const LIBRARY_KEY = "yt-dlp";
 
 class YtDlpService {
@@ -19,6 +20,9 @@ class YtDlpService {
     this.lastUpdateAt = null;
     this.lastUpdateError = null;
     this.onDownloadComplete = null;
+    this.indexRefreshTimer = null;
+    this.indexRefreshPromise = Promise.resolve();
+    this.indexDirty = false;
   }
 
   setCompletionHandler(handler) {
@@ -52,6 +56,10 @@ class YtDlpService {
     if (this.updateTimer) {
       clearInterval(this.updateTimer);
       this.updateTimer = null;
+    }
+    if (this.indexRefreshTimer) {
+      clearTimeout(this.indexRefreshTimer);
+      this.indexRefreshTimer = null;
     }
   }
 
@@ -168,15 +176,41 @@ class YtDlpService {
       eta: null,
       filename: null,
       outputPath: null,
-      message: "Starting download...",
+      outputPaths: [],
+      fileCount: 0,
+      title: null,
+      playlistTitle: null,
+      isPlaylist: false,
+      items: [],
+      activeItemId: null,
+      message: "Reading media information...",
       error: null,
       startedAt: new Date().toISOString(),
       finishedAt: null
     };
     this.downloads.set(id, record);
 
-    const args = downloadArgs(this.config.downloadPath, inputUrl, this.config.allowPlaylists);
-    logger.info(`[yt-dlp] download starting id=${id} url="${inputUrl}" output="${this.config.downloadPath}"`);
+    this.prepareDownload(record, inputUrl).catch((err) => {
+      finishDownload(record, "failed", err.message);
+      logger.error(`[yt-dlp] download setup failed id=${id} message="${err.message}"`, err);
+    });
+
+    return publicDownload(record);
+  }
+
+  async prepareDownload(record, inputUrl) {
+    const allowPlaylist = this.config.allowPlaylists || isExplicitPlaylistUrl(inputUrl);
+    let inspection = null;
+    try {
+      inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist);
+      applyInspection(record, inspection);
+    } catch (err) {
+      logger.info(`[yt-dlp] playlist inspection failed id=${record.id} message="${err.message}"; continuing`);
+      record.isPlaylist = isExplicitPlaylistUrl(inputUrl);
+    }
+
+    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist);
+    logger.info(`[yt-dlp] download starting id=${record.id} playlist=${record.isPlaylist} items=${record.items.length} url="${inputUrl}" output="${this.config.downloadPath}"`);
     logger.full(`[yt-dlp] command ${this.config.binaryPath} ${args.map(quoteArg).join(" ")}`);
 
     const child = spawn(this.config.binaryPath, args, {
@@ -184,42 +218,103 @@ class YtDlpService {
       stdio: ["ignore", "pipe", "pipe"]
     });
     record.status = "downloading";
+    record.message = record.isPlaylist ? "Starting playlist download..." : "Starting download...";
     record.processId = child.pid || null;
 
-    const onData = (chunk) => {
-      updateProgress(record, chunk.toString());
-    };
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
+    const stdout = createLineBuffer((lines) => this.handleProgress(record, lines));
+    const stderr = createLineBuffer((lines) => this.handleProgress(record, lines));
+    child.stdout.on("data", stdout.push);
+    child.stderr.on("data", stderr.push);
     child.on("error", (err) => {
       finishDownload(record, "failed", err.message);
-      logger.error(`[yt-dlp] download spawn failed id=${id} message="${err.message}"`, err);
+      logger.error(`[yt-dlp] download spawn failed id=${record.id} message="${err.message}"`, err);
     });
     child.on("close", (code) => {
-      if (record.status === "failed") {
-        return;
-      }
+      stdout.flush();
+      stderr.flush();
+      if (record.status === "failed") return;
       if (code === 0) {
         markDownloadIndexing(record);
-        logger.info(`[yt-dlp] download complete id=${id}; indexing library`);
-        Promise.resolve()
-          .then(() => this.onDownloadComplete && this.onDownloadComplete(record))
+        logger.info(`[yt-dlp] download complete id=${record.id}; indexing library`);
+        this.flushIndexRefresh(record)
           .then(() => {
             finishDownload(record, "complete", null);
-            logger.info(`[yt-dlp] post-download index complete id=${id}`);
+            logger.info(`[yt-dlp] post-download index complete id=${record.id}`);
           })
           .catch((err) => {
             finishDownload(record, "failed", `Download completed, but indexing failed: ${err.message}`);
-            logger.error(`[yt-dlp] post-download reindex failed id=${id} message="${err.message}"`, err);
+            logger.error(`[yt-dlp] post-download reindex failed id=${record.id} message="${err.message}"`, err);
           });
         return;
       }
       finishDownload(record, "failed", `yt-dlp exited with code ${code}`);
-      logger.error(`[yt-dlp] download failed id=${id} code=${code}`);
+      logger.error(`[yt-dlp] download failed id=${record.id} code=${code}`);
     });
-
-    return publicDownload(record);
   }
+
+  handleProgress(record, lines) {
+    const completedFiles = record.outputPaths.length;
+    updateProgress(record, lines);
+    if (record.outputPaths.length > completedFiles) {
+      this.scheduleIndexRefresh(record);
+    }
+  }
+
+  scheduleIndexRefresh(record) {
+    if (!this.onDownloadComplete) return;
+    this.indexDirty = true;
+    if (this.indexRefreshTimer) clearTimeout(this.indexRefreshTimer);
+    this.indexRefreshTimer = setTimeout(() => {
+      this.indexRefreshTimer = null;
+      this.runIndexRefresh(record).catch((err) => {
+        logger.error(`[yt-dlp] incremental reindex failed id=${record.id} message="${err.message}"`, err);
+      });
+    }, INDEX_REFRESH_DELAY_MS);
+    this.indexRefreshTimer.unref?.();
+  }
+
+  runIndexRefresh(record) {
+    if (!this.indexDirty || !this.onDownloadComplete) {
+      return this.indexRefreshPromise;
+    }
+    this.indexDirty = false;
+    this.indexRefreshPromise = this.indexRefreshPromise
+      .catch(() => {})
+      .then(() => this.onDownloadComplete(record));
+    return this.indexRefreshPromise;
+  }
+
+  async flushIndexRefresh(record) {
+    if (this.indexRefreshTimer) {
+      clearTimeout(this.indexRefreshTimer);
+      this.indexRefreshTimer = null;
+    }
+    this.indexDirty = true;
+    while (this.indexDirty) {
+      await this.runIndexRefresh(record);
+      await this.indexRefreshPromise;
+    }
+  }
+}
+
+function createLineBuffer(onLines) {
+  let pending = "";
+  return {
+    push(chunk) {
+      pending += chunk.toString();
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() || "";
+      if (lines.length > 0) {
+        onLines(lines.join("\n"));
+      }
+    },
+    flush() {
+      if (pending) {
+        onLines(pending);
+        pending = "";
+      }
+    }
+  };
 }
 
 function syncYtDlpLibrary(config) {
@@ -249,17 +344,68 @@ function ytDlpLibrary(settings) {
   };
 }
 
-function downloadArgs(downloadPath, url, allowPlaylists) {
+const ITEM_MARKER = "__MEDIA_BAKER_ITEM__";
+const FILE_MARKER = "__MEDIA_BAKER_FILE__";
+
+async function inspectDownload(binaryPath, url, allowPlaylist) {
+  const stdout = await execOutput(binaryPath, [
+    "--flat-playlist",
+    "--dump-single-json",
+    "--no-warnings",
+    allowPlaylist ? "--yes-playlist" : "--no-playlist",
+    url
+  ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
+  const data = JSON.parse(stdout);
+  const hasEntries = Array.isArray(data.entries);
+  const entries = hasEntries ? data.entries.filter(Boolean) : [];
+  const isPlaylist = hasEntries || data._type === "playlist";
+  return {
+    isPlaylist,
+    title: data.title || data.playlist_title || data.id || null,
+    entries: entries.map((entry, index) => ({
+      id: String(entry.id || entry.url || index + 1),
+      index: Number(entry.playlist_index) || index + 1,
+      title: entry.title || `Item ${index + 1}`,
+      status: "queued",
+      percent: 0,
+      speed: null,
+      eta: null,
+      filename: null,
+      outputPath: null,
+      message: "Waiting...",
+      error: null
+    }))
+  };
+}
+
+function applyInspection(record, inspection) {
+  record.isPlaylist = Boolean(inspection.isPlaylist);
+  record.playlistTitle = record.isPlaylist ? inspection.title : null;
+  record.title = inspection.title;
+  record.items = record.isPlaylist ? inspection.entries : [];
+  record.message = record.isPlaylist
+    ? `Found ${record.items.length} playlist item${record.items.length === 1 ? "" : "s"}.`
+    : "Media information loaded.";
+}
+
+function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist) {
+  const outputTemplate = isPlaylist
+    ? "%(playlist).150B/%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
+    : "%(title).200B [%(id)s].%(ext)s";
   return [
     "--newline",
     "--progress",
+    allowPlaylist ? "--yes-playlist" : "--no-playlist",
+    "--print",
+    `before_dl:${ITEM_MARKER}%(id)s\t%(playlist_index|0)s\t%(title)s`,
+    "--print",
+    `after_move:${FILE_MARKER}%(id)s\t%(filepath)s`,
     "-f",
     "bv*[vcodec^=avc1]+ba[acodec^=mp4a]/b[vcodec^=avc1][acodec^=mp4a]/bv*+ba/b",
     "-P",
     downloadPath,
     "-o",
-    "%(title).200B [%(id)s].%(ext)s",
-    ...(allowPlaylists ? [] : ["--no-playlist"]),
+    outputTemplate,
     url
   ];
 }
@@ -267,21 +413,96 @@ function downloadArgs(downloadPath, url, allowPlaylists) {
 function updateProgress(record, output) {
   const lines = String(output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   for (const line of lines) {
+    if (line.startsWith(ITEM_MARKER)) {
+      const [id, indexValue, ...titleParts] = line.slice(ITEM_MARKER.length).split("\t");
+      const item = ensureDownloadItem(record, {
+        id,
+        index: Number(indexValue) || record.items.length + 1,
+        title: titleParts.join("\t") || `Item ${record.items.length + 1}`
+      });
+      record.activeItemId = item.id;
+      item.status = "downloading";
+      item.message = "Starting download...";
+      record.message = `Downloading ${item.title}`;
+      recalculateDownloadProgress(record);
+      continue;
+    }
+
+    if (line.startsWith(FILE_MARKER)) {
+      const [id, ...pathParts] = line.slice(FILE_MARKER.length).split("\t");
+      const outputPath = pathParts.join("\t").trim();
+      if (outputPath && !record.outputPaths.includes(outputPath)) {
+        record.outputPaths.push(outputPath);
+        record.fileCount = record.outputPaths.length;
+      }
+      record.outputPath = outputPath || record.outputPath;
+      const item = findDownloadItem(record, id) || activeDownloadItem(record);
+      if (item) {
+        item.status = "complete";
+        item.percent = 100;
+        item.outputPath = outputPath || item.outputPath;
+        item.filename = outputPath ? path.basename(outputPath) : item.filename;
+        item.speed = null;
+        item.eta = null;
+        item.message = "Download complete.";
+      } else {
+        record.filename = outputPath ? path.basename(outputPath) : record.filename;
+      }
+      recalculateDownloadProgress(record);
+      continue;
+    }
+
     const destination = line.match(/\[download\]\s+Destination:\s+(.+)$/i)
-      || line.match(/\[Merger\]\s+Merging formats into\s+"(.+)"$/i);
+      || line.match(/\[(?:Merger|ffmpeg)\].*?(?:Merging|Remuxing|Converting).*?"(.+)"$/i);
     if (destination) {
       record.outputPath = destination[1];
-      record.filename = path.basename(destination[1]);
+      const item = activeDownloadItem(record);
+      if (item) {
+        item.outputPath = destination[1];
+        item.filename = path.basename(destination[1]);
+        if (/^\[(?:Merger|ffmpeg)\].*(?:Merging|Remuxing|Converting)/i.test(line)) {
+          item.status = "merging";
+          item.message = "Merging video and audio...";
+          item.speed = null;
+          item.eta = null;
+          record.message = `Merging ${item.title}`;
+        }
+      } else {
+        record.filename = path.basename(destination[1]);
+      }
     }
 
     const percent = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/i);
     if (percent) {
-      record.percent = Number.parseFloat(percent[1]);
+      const item = activeDownloadItem(record);
+      const percentValue = Number.parseFloat(percent[1]);
       record.message = line;
       const speed = line.match(/\bat\s+(.+?)\s+ETA\b/i);
       const eta = line.match(/\bETA\s+([^\s]+)/i);
       record.speed = speed ? speed[1] : record.speed;
       record.eta = eta ? eta[1] : record.eta;
+      if (item) {
+        item.status = percentValue >= 100 ? "processing" : "downloading";
+        item.percent = percentValue;
+        item.message = percentValue >= 100 ? "Download complete. Processing media..." : line;
+        item.speed = speed ? speed[1] : item.speed;
+        item.eta = eta ? eta[1] : item.eta;
+        recalculateDownloadProgress(record);
+      } else {
+        record.percent = percentValue;
+      }
+      continue;
+    }
+
+    if (/^\[(?:Merger|ffmpeg|Fixup|ExtractAudio)\]/i.test(line)) {
+      const item = activeDownloadItem(record);
+      if (item && !["complete", "failed"].includes(item.status)) {
+        item.status = /merg|remux|convert/i.test(line) ? "merging" : "processing";
+        item.message = item.status === "merging" ? "Merging video and audio..." : "Processing media...";
+        item.speed = null;
+        item.eta = null;
+        record.message = `${item.message.replace(/\.\.\.$/, "")} ${item.title}`;
+      }
       continue;
     }
 
@@ -291,12 +512,76 @@ function updateProgress(record, output) {
   }
 }
 
+function ensureDownloadItem(record, value) {
+  let item = findDownloadItem(record, value.id);
+  if (item) return item;
+  item = {
+    id: String(value.id || record.items.length + 1),
+    index: Number(value.index) || record.items.length + 1,
+    title: value.title || `Item ${record.items.length + 1}`,
+    status: "queued",
+    percent: 0,
+    speed: null,
+    eta: null,
+    filename: null,
+    outputPath: null,
+    message: "Waiting...",
+    error: null
+  };
+  record.items.push(item);
+  return item;
+}
+
+function findDownloadItem(record, id) {
+  return record.items.find((item) => item.id === String(id || "")) || null;
+}
+
+function activeDownloadItem(record) {
+  return findDownloadItem(record, record.activeItemId);
+}
+
+function recalculateDownloadProgress(record) {
+  if (record.items.length === 0) return;
+  const progress = record.items.reduce((total, item) => {
+    if (["complete", "skipped"].includes(item.status)) return total + 1;
+    return total + Math.max(0, Math.min(100, Number(item.percent) || 0)) / 100;
+  }, 0);
+  record.percent = Math.round(progress / record.items.length * 1000) / 10;
+}
+
+function isExplicitPlaylistUrl(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    return (host === "youtube.com" || host === "music.youtube.com" || host === "youtu.be" || host.endsWith(".youtube.com"))
+      && Boolean(url.searchParams.get("list"));
+  } catch (err) {
+    return false;
+  }
+}
+
 function finishDownload(record, status, error) {
   record.status = status;
   record.finishedAt = new Date().toISOString();
   record.percent = status === "complete" ? 100 : record.percent;
   record.error = error;
   record.message = error || (status === "complete" ? "Download complete." : record.message);
+  if (status === "complete") {
+    record.items.forEach((item) => {
+      if (item.status === "queued") {
+        item.status = "skipped";
+        item.message = "Skipped by the provider.";
+      }
+    });
+    recalculateDownloadProgress(record);
+  } else if (status === "failed") {
+    const item = activeDownloadItem(record);
+    if (item && !["complete", "skipped"].includes(item.status)) {
+      item.status = "failed";
+      item.error = error;
+      item.message = error;
+    }
+  }
 }
 
 function markDownloadIndexing(record) {
@@ -335,7 +620,7 @@ function execOutput(binaryPath, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(binaryPath, args, {
       windowsHide: true,
-      maxBuffer: 2 * 1024 * 1024,
+      maxBuffer: options.maxBuffer || 2 * 1024 * 1024,
       timeout: options.timeout || 0
     }, (err, stdout, stderr) => {
       if (err) {

@@ -20,9 +20,10 @@ const MIN_MEMORY_CACHE_BYTES = 64 * 1024 * 1024;
 const ESTIMATED_LIVE_BYTES_PER_SECOND = 2 * 1024 * 1024;
 
 class IptvService {
-  constructor(config, ffmpeg) {
+  constructor(config, ffmpeg, cachedImages) {
     this.config = config.iptv;
     this.ffmpeg = ffmpeg;
+    this.cachedImages = cachedImages;
     this.channels = [];
     this.channelsById = new Map();
     this.guideChannels = [];
@@ -301,8 +302,8 @@ class IptvService {
 
       try {
         const downloaded = await downloadIcon(source);
-        const filename = `${channel.id}-${shortHash(source)}.${downloaded.extension}`;
-        await fs.writeFile(path.join(iconDir, filename), downloaded.buffer);
+        const filename = `${channel.id}-${shortHash(source)}.webp`;
+        await this.cachedImages.cacheBuffer(downloaded.buffer, iconDir, filename, `.${downloaded.extension}`);
         next[channel.id] = { source, filename };
         return { ...channel, logoFilename: filename };
       } catch (err) {

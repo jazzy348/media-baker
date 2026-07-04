@@ -1,18 +1,22 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { createId } = require("../utils/mediaParsers");
+const { MusicBrainzMetadataProvider } = require("./musicBrainzMetadataProvider");
+const { CachedImageService } = require("./cachedImageService");
 const logger = require("../utils/logger");
 
 const TMDB_API_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p";
 
 class MetadataService {
-  constructor(config, store, ffmpeg = null) {
+  constructor(config, store, ffmpeg = null, cachedImages = null) {
     this.appConfig = config;
     this.config = config.metadata;
     this.store = store;
     this.ffmpeg = ffmpeg;
+    this.cachedImages = cachedImages || new CachedImageService(config, ffmpeg);
     this.posterDir = path.join(this.config.cachePath, "posters");
+    this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages);
     this.thumbnailDir = path.join(this.config.cachePath, "thumbnails");
     this.preloadInFlight = null;
     this.missingRecheckInFlight = null;
@@ -33,6 +37,13 @@ class MetadataService {
 
     if (!this.config.enabled) {
       return { available: false, cached: false, reason: "Metadata lookup is disabled." };
+    }
+
+    if (isMusicMediaType(this.appConfig, mediaType)) {
+      const query = await this.queryForMedia(mediaType, mediaFile);
+      const record = await this.fetchMusicRecord(mediaType, mediaFile, query);
+      await this.store.save(record);
+      return toPublicRecord(record, false);
     }
 
     if (this.config.provider !== "tmdb") {
@@ -71,9 +82,13 @@ class MetadataService {
     ]));
   }
 
+  async searchCachedRefs(query, mediaTypes, limit) {
+    return this.store.searchRefs(query, mediaTypes, limit);
+  }
+
   async listPosterUnavailable(mediaIndex, limit) {
     const records = await this.store.listPosterUnavailable(limit);
-    const files = mediaFileMap(mediaIndex.index);
+    const files = mediaFileMap(await mediaIndex.snapshot());
 
     return records.map((record) => {
       const file = files.get(recordKey(record.mediaType, record.mediaId));
@@ -92,9 +107,16 @@ class MetadataService {
   }
 
   async refreshForMedia(mediaType, mediaFile) {
-    const unavailable = metadataUnavailableReason(this.config);
+    const unavailable = metadataUnavailableReason(this.config, isMusicMediaType(this.appConfig, mediaType));
     if (unavailable) {
       return unavailable;
+    }
+
+    if (isMusicMediaType(this.appConfig, mediaType)) {
+      const query = await this.queryForMedia(mediaType, mediaFile);
+      const record = await this.fetchMusicRecord(mediaType, mediaFile, query);
+      await this.store.save(record);
+      return toPublicRecord(record, false);
     }
 
     const query = metadataQuery(this.appConfig, mediaType, mediaFile);
@@ -109,14 +131,31 @@ class MetadataService {
   }
 
   async searchCandidatesForMedia(mediaType, mediaFile, input = {}) {
-    const unavailable = metadataUnavailableReason(this.config);
-    const defaultQuery = metadataQuery(this.appConfig, mediaType, mediaFile);
+    const music = isMusicMediaType(this.appConfig, mediaType);
+    const unavailable = metadataUnavailableReason(this.config, music);
+    const defaultQuery = await this.queryForMedia(mediaType, mediaFile);
     const query = normalizeManualMetadataQuery(defaultQuery, input);
     if (unavailable) {
       return {
         ...unavailable,
         query,
         candidates: []
+      };
+    }
+
+    if (music) {
+      logger.info(`[metadata] manual search mediaType=${mediaType} id=${mediaFile.id} provider=musicbrainz album="${query.title}" artist="${query.artist || "unknown"}"`);
+      const candidates = await this.musicBrainz.search(mediaFile, {
+        ...input,
+        title: query.title,
+        artist: input.artist || query.artist,
+        year: query.year
+      });
+      return {
+        available: true,
+        provider: "musicbrainz",
+        query,
+        candidates: candidates.map((candidate) => this.musicBrainz.candidate(candidate))
       };
     }
 
@@ -131,7 +170,8 @@ class MetadataService {
   }
 
   async matchProviderForMedia(mediaType, mediaFile, input = {}) {
-    const unavailable = metadataUnavailableReason(this.config);
+    const music = isMusicMediaType(this.appConfig, mediaType);
+    const unavailable = metadataUnavailableReason(this.config, music);
     if (unavailable) {
       return unavailable;
     }
@@ -139,6 +179,13 @@ class MetadataService {
     const providerId = String(input.providerId || "").trim();
     if (!providerId) {
       throw new Error("providerId is required");
+    }
+
+    if (music) {
+      const result = await this.musicBrainz.lookup(providerId);
+      const record = await this.musicBrainz.createRecord(mediaType, mediaFile, result);
+      await this.store.save(record);
+      return toPublicRecord(record, false);
     }
 
     const query = metadataQuery(this.appConfig, mediaType, mediaFile);
@@ -241,25 +288,25 @@ class MetadataService {
     return `/api/catalog/${encodeURIComponent(mediaType)}/${encodeURIComponent(mediaId)}/metadata/season-poster?${encodeURIComponent(paramName)}=${encodeURIComponent(token)}`;
   }
 
-  startBackgroundPreload(mediaIndex) {
+  startBackgroundPreload(mediaIndex, options = {}) {
     if (!this.config.enabled || !this.config.preloadOnStartup) {
       return;
     }
 
     setImmediate(() => {
-      this.preloadAll(mediaIndex).catch((err) => {
+      this.preloadAll(mediaIndex, options).catch((err) => {
         logger.error(`[metadata] background preload failed message="${err.message}"`, err);
       });
     });
   }
 
-  async preloadAll(mediaIndex) {
+  async preloadAll(mediaIndex, options = {}) {
     if (this.preloadInFlight) {
       logger.info("[metadata] background preload already running; joining existing task");
       return this.preloadInFlight;
     }
 
-    this.preloadInFlight = this.runPreload(mediaIndex);
+    this.preloadInFlight = this.runPreload(mediaIndex, options);
     try {
       return await this.preloadInFlight;
     } finally {
@@ -267,13 +314,15 @@ class MetadataService {
     }
   }
 
-  async runPreload(mediaIndex) {
-    if (!this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
+  async runPreload(mediaIndex, options = {}) {
+    const hasMusic = (this.appConfig.libraries || []).some((library) => library.type === "music" && !library.noMetadata);
+    if (!hasMusic && !this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
       logger.info("[metadata] background preload skipped: TMDb credentials are not configured");
       return;
     }
 
-    const mediaFiles = listIndexedMediaFiles(mediaIndex.index);
+    const mediaFiles = listIndexedMediaFiles(await mediaIndex.snapshot())
+      .filter((media) => !options.mediaType || media.mediaType === options.mediaType);
     const recordsByQuery = new Map();
     let cachedCount = 0;
     let fetchedCount = 0;
@@ -288,7 +337,12 @@ class MetadataService {
     for (const media of mediaFiles) {
       try {
         const cached = await this.store.get(media.mediaType, media.file.id);
-        if (cached && (!cached.found || cached.posterFilename || cached.posterUnavailable)) {
+        if (cached && !cached.found && !options.retryMissing) {
+          cachedCount += 1;
+          continue;
+        }
+
+        if (cached && cached.found && (cached.posterFilename || cached.posterUnavailable)) {
           cachedCount += 1;
           continue;
         }
@@ -306,20 +360,17 @@ class MetadataService {
           continue;
         }
 
-        const query = metadataQuery(this.appConfig, media.mediaType, media.file);
+        const query = await this.queryForMedia(media.mediaType, media.file);
         const queryKey = metadataQueryKey(query);
         const sharedRecord = recordsByQuery.get(queryKey);
         if (sharedRecord) {
-          await this.store.save(copyRecordForMedia(sharedRecord, media.mediaType, media.file.id));
+          await this.store.save(copyRecordForMedia(sharedRecord, media.mediaType, media.file.id, media.file));
           copiedCount += 1;
           continue;
         }
 
         logger.full(`[metadata] preload fetch mediaType=${media.mediaType} id=${media.file.id} query="${query.title}" year=${query.year || "none"}`);
-        const result = await this.searchTmdb(query);
-        const record = result
-          ? await this.createFoundRecord(media.mediaType, media.file.id, query.kind, result)
-          : createMissingRecord(media.mediaType, media.file.id, "tmdb");
+        const record = await this.fetchRecordForMedia(media.mediaType, media.file, query);
 
         await this.store.save(record);
         recordsByQuery.set(queryKey, record);
@@ -340,7 +391,9 @@ class MetadataService {
   }
 
   async runMissingRecheck(mediaIndex, limit) {
-    const unavailable = metadataUnavailableReason(this.config);
+    const unavailable = !this.config.enabled
+      ? { reason: "Metadata lookup is disabled." }
+      : null;
     if (unavailable) {
       return {
         running: false,
@@ -368,12 +421,9 @@ class MetadataService {
     for (const media of missingMedia) {
       try {
         checked += 1;
-        const query = metadataQuery(this.appConfig, media.mediaType, media.file);
+        const query = await this.queryForMedia(media.mediaType, media.file);
         logger.full(`[metadata] missing recheck fetch mediaType=${media.mediaType} id=${media.file.id} query="${query.title}" year=${query.year || "none"}`);
-        const result = await this.searchTmdb(query);
-        const updated = result
-          ? await this.createFoundRecord(media.mediaType, media.file.id, query.kind, result)
-          : createMissingRecord(media.mediaType, media.file.id, "tmdb");
+        const updated = await this.fetchRecordForMedia(media.mediaType, media.file, query);
         await this.store.save(updated);
 
         if (updated.found) {
@@ -405,7 +455,7 @@ class MetadataService {
   }
 
   async indexedMissingMedia(mediaIndex, limit) {
-    const mediaFiles = listIndexedMediaFiles(mediaIndex.index);
+    const mediaFiles = listIndexedMediaFiles(await mediaIndex.snapshot());
     const records = await this.store.getMany(mediaFiles.map((media) => ({
       mediaType: media.mediaType,
       id: media.file.id
@@ -449,6 +499,11 @@ class MetadataService {
     }
 
     logger.full(`[metadata] poster cache miss filename="${path.basename(filename)}" provider=${record.provider} mediaType=${record.mediaType} id=${record.mediaId}`);
+    if (record.provider === "musicbrainz") {
+      const repaired = await this.musicBrainz.ensurePoster({ ...record, posterFilename: null });
+      await this.store.save(repaired);
+      return repaired.posterFilename ? this.posterFilePath(repaired.posterFilename) : null;
+    }
     const posterPath = await this.resolvePosterPathForRecord(record);
     if (!posterPath) {
       return null;
@@ -620,7 +675,7 @@ class MetadataService {
       return { available: false, reason: "Local thumbnail generation is unavailable." };
     }
 
-    const filename = safePosterFilename(`local-${mediaType}-${mediaFile.id}-${createId(`${mediaFile.filePath}:${mediaFile.mtimeMs || ""}`)}.jpg`);
+    const filename = safePosterFilename(`local-${mediaType}-${mediaFile.id}-${createId(`${mediaFile.filePath}:${mediaFile.mtimeMs || ""}`)}.webp`);
     const filePath = path.join(this.thumbnailDir, filename);
     if (!filePath.startsWith(this.thumbnailDir)) {
       return { available: false, reason: "Invalid thumbnail path." };
@@ -759,9 +814,53 @@ class MetadataService {
     };
   }
 
+  async queryForMedia(mediaType, mediaFile) {
+    let query = metadataQuery(this.appConfig, mediaType, mediaFile);
+    if (query.kind !== "music" || !musicQueryNeedsTagFallback(query) || !this.ffmpeg) {
+      return query;
+    }
+
+    try {
+      const probe = await this.ffmpeg.probe(mediaFile.filePath, { analyzeduration: "1M", probesize: "1M" });
+      query = musicQueryFromTags(query, probe);
+    } catch (err) {
+      logger.full(`[metadata] music tag fallback failed file="${mediaFile.filePath}" message="${err.message}"`);
+    }
+    return query;
+  }
+
+  async fetchMusicRecord(mediaType, mediaFile, query = metadataQuery(this.appConfig, mediaType, mediaFile)) {
+    if (!isSearchableMusicQuery(query)) {
+      return createMissingRecord(mediaType, mediaFile.id, "musicbrainz", JSON.stringify(musicQueryIdentity(mediaFile, query)));
+    }
+    const result = await this.musicBrainz.find(mediaFile, query);
+    return result
+      ? this.musicBrainz.createRecord(mediaType, mediaFile, result)
+      : createMissingRecord(mediaType, mediaFile.id, "musicbrainz", JSON.stringify(musicQueryIdentity(mediaFile, query)));
+  }
+
+  async fetchRecordForMedia(mediaType, mediaFile, query = metadataQuery(this.appConfig, mediaType, mediaFile)) {
+    if (query.kind === "music") {
+      return this.fetchMusicRecord(mediaType, mediaFile, query);
+    }
+    if (!this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
+      return createMissingRecord(mediaType, mediaFile.id, "tmdb");
+    }
+    const result = await this.searchTmdb(query);
+    return result
+      ? this.createFoundRecord(mediaType, mediaFile.id, query.kind, result)
+      : createMissingRecord(mediaType, mediaFile.id, "tmdb");
+  }
+
   async ensurePosterForRecord(record) {
     if (!record.found || record.posterFilename) {
       return record;
+    }
+
+    if (record.provider === "musicbrainz") {
+      const updated = await this.musicBrainz.ensurePoster(record);
+      await this.store.save(updated);
+      return updated;
     }
 
     const kind = kindForMediaType(this.appConfig, record.mediaType);
@@ -869,7 +968,7 @@ class MetadataService {
   }
 
   async cachePosterFile(posterPath, filename) {
-    const safeName = safePosterFilename(filename);
+    const safeName = this.cachedImages.filename(safePosterFilename(filename));
     const filePath = path.join(this.posterDir, safeName);
 
     try {
@@ -881,18 +980,16 @@ class MetadataService {
       }
     }
 
-    await fs.mkdir(this.posterDir, { recursive: true });
     const response = await fetch(`${TMDB_IMAGE_BASE}/${this.config.posterSize}${posterPath}`);
     if (!response.ok) {
       throw new Error(`TMDb poster download failed with HTTP ${response.status}`);
     }
 
-    await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
-    return safeName;
+    return this.cachedImages.cacheBuffer(Buffer.from(await response.arrayBuffer()), this.posterDir, safeName, path.extname(posterPath) || ".jpg");
   }
 
   async cacheThumbnailFile(thumbnailPath, filename) {
-    const safeName = safePosterFilename(filename);
+    const safeName = this.cachedImages.filename(safePosterFilename(filename));
     const filePath = path.join(this.thumbnailDir, safeName);
 
     try {
@@ -904,23 +1001,17 @@ class MetadataService {
       }
     }
 
-    await fs.mkdir(this.thumbnailDir, { recursive: true });
     const response = await fetch(`${TMDB_IMAGE_BASE}/${this.config.thumbnailSize}${thumbnailPath}`);
     if (!response.ok) {
       throw new Error(`TMDb thumbnail download failed with HTTP ${response.status}`);
     }
 
-    await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
-    return safeName;
+    return this.cachedImages.cacheBuffer(Buffer.from(await response.arrayBuffer()), this.thumbnailDir, safeName, path.extname(thumbnailPath) || ".jpg");
   }
 
   async cacheManualPoster(mediaType, mediaId, source) {
     const sourceValue = source.url || source.filePath;
-    const extension = posterExtension(sourceValue);
-    const filename = safePosterFilename(`manual-${mediaType}-${mediaId}-${createId(sourceValue)}${extension}`);
-    const filePath = path.join(this.posterDir, filename);
-
-    await fs.mkdir(this.posterDir, { recursive: true });
+    const filename = safePosterFilename(`manual-${mediaType}-${mediaId}-${createId(sourceValue)}.webp`);
 
     if (source.url) {
       const response = await fetch(source.url);
@@ -928,12 +1019,10 @@ class MetadataService {
         throw new Error(`Manual poster download failed with HTTP ${response.status}`);
       }
 
-      await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
-      return filename;
+      return this.cachedImages.cacheBuffer(Buffer.from(await response.arrayBuffer()), this.posterDir, filename, imageExtension(source.url));
     }
 
-    await fs.copyFile(source.filePath, filePath);
-    return filename;
+    return this.cachedImages.cacheFile(source.filePath, this.posterDir, filename);
   }
 
   async fetchJson(url) {
@@ -958,11 +1047,19 @@ class MetadataService {
 }
 
 function metadataQuery(config, mediaType, mediaFile) {
+  if (kindForMediaType(config, mediaType) === "music") {
+    return {
+      kind: "music",
+      title: cleanMetadataSearchText(mediaFile.albumName || "Unknown Album"),
+      artist: cleanMetadataSearchText(mediaFile.artistName || "Unknown Artist"),
+      year: mediaFile.year || null
+    };
+  }
   if (kindForMediaType(config, mediaType) === "movie") {
     const parsed = splitTitleYear(mediaFile.title || mediaFile.folder || mediaFile.filename);
     return {
       kind: "movie",
-      title: parsed.title,
+      title: cleanMetadataSearchText(parsed.title),
       year: mediaFile.year || parsed.year
     };
   }
@@ -970,14 +1067,22 @@ function metadataQuery(config, mediaType, mediaFile) {
   const parsed = splitTitleYear(mediaFile.showName || mediaFile.title || mediaFile.filename);
   return {
     kind: "tv",
-    title: parsed.title,
+    title: cleanMetadataSearchText(parsed.title),
     year: parsed.year
   };
 }
 
 function kindForMediaType(config, mediaType) {
   const library = (config.libraries || []).find((entry) => entry.key === mediaType);
-  return library && library.type === "movies" ? "movie" : library && library.type === "tv" ? "tv" : null;
+  return library && library.type === "movies"
+    ? "movie"
+    : library && library.type === "tv"
+      ? "tv"
+      : library && library.type === "music" ? "music" : null;
+}
+
+function isMusicMediaType(config, mediaType) {
+  return kindForMediaType(config, mediaType) === "music";
 }
 
 function isLocalThumbnailLibrary(config, mediaType) {
@@ -1007,17 +1112,19 @@ function posterLanguageRank(poster, languageRank) {
 }
 
 function metadataQueryKey(query) {
-  return `${query.kind}:${query.title.toLowerCase()}:${query.year || ""}`;
+  return `${query.kind}:${query.title.toLowerCase()}:${String(query.artist || "").toLowerCase()}:${query.year || ""}`;
 }
 
 function listIndexedMediaFiles(index) {
   return (index.libraries || []).flatMap((library) => (
-    library.noMetadata
+    library.noMetadata || library.type === "images"
       ? []
       :
     library.type === "movies"
       ? movieFiles(index[library.key], library.key)
-      : [...movieFiles(index[library.key], library.key), ...episodeFiles(index[library.key], library.key)]
+      : library.type === "music"
+        ? musicFiles(index[library.key], library.key)
+        : [...movieFiles(index[library.key], library.key), ...episodeFiles(index[library.key], library.key)]
   ));
 }
 
@@ -1055,12 +1162,26 @@ function episodeFiles(collection, mediaType) {
   )));
 }
 
-function copyRecordForMedia(record, mediaType, mediaId) {
-  return {
+function musicFiles(collection, mediaType) {
+  return Object.values(collection && collection.tracksById || {}).map((file) => ({ mediaType, file }));
+}
+
+function copyRecordForMedia(record, mediaType, mediaId, mediaFile = null) {
+  const copied = {
     ...record,
     mediaType,
     mediaId
   };
+  if (record.provider === "musicbrainz" && mediaFile) {
+    const source = parseSourceJson(record.sourceJson) || {};
+    copied.title = mediaFile.title || mediaFile.filename;
+    copied.sourceJson = JSON.stringify({
+      ...source,
+      trackTitle: copied.title,
+      aliases: uniqueText([...(source.aliases || []), mediaFile.artistName, mediaFile.albumName])
+    });
+  }
+  return copied;
 }
 
 function mediaFileMap(index) {
@@ -1193,7 +1314,8 @@ function normalizeManualMetadataQuery(defaultQuery, input = {}) {
 
   return {
     ...defaultQuery,
-    title: split.title || defaultQuery.title,
+    title: cleanMetadataSearchText(split.title || defaultQuery.title),
+    artist: cleanMetadataSearchText(input.artist || defaultQuery.artist || ""),
     year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : null
   };
 }
@@ -1230,9 +1352,12 @@ function normalizeTitle(value) {
     .trim();
 }
 
-function metadataUnavailableReason(config) {
+function metadataUnavailableReason(config, music = false) {
   if (!config.enabled) {
     return { available: false, cached: false, reason: "Metadata lookup is disabled." };
+  }
+  if (music) {
+    return null;
   }
   if (config.provider !== "tmdb") {
     return { available: false, cached: false, reason: `Unsupported metadata provider: ${config.provider}` };
@@ -1244,7 +1369,7 @@ function metadataUnavailableReason(config) {
   return null;
 }
 
-function createMissingRecord(mediaType, mediaId, provider) {
+function createMissingRecord(mediaType, mediaId, provider, sourceJson = null) {
   return {
     mediaType,
     mediaId,
@@ -1262,8 +1387,66 @@ function createMissingRecord(mediaType, mediaId, provider) {
     thumbnailFilename: null,
     thumbnailUnavailable: false,
     thumbnailUnavailableReason: null,
-    sourceJson: null
+    sourceJson
   };
+}
+
+function musicQueryIdentity(mediaFile, query = null) {
+  return {
+    artistName: String(query && query.artist || mediaFile.artistName || "Unknown Artist").trim(),
+    albumName: String(query && query.title || mediaFile.albumName || "Unknown Album").trim(),
+    year: Number.parseInt(query && query.year || mediaFile.year, 10) || null,
+    trackTitle: String(mediaFile.title || mediaFile.filename || "").trim()
+  };
+}
+
+function musicQueryNeedsTagFallback(query) {
+  return !isSearchableMusicQuery(query)
+    || /^unknown artist$/i.test(String(query.artist || "").trim());
+}
+
+function isSearchableMusicQuery(query) {
+  const title = cleanMetadataSearchText(query && query.title);
+  return Boolean(title)
+    && !/^unknown album$/i.test(title)
+    && !/^(?:cd|disc|disk)\s*\d+$/i.test(title);
+}
+
+function musicQueryFromTags(fallback, probe) {
+  const tags = normalizedProbeTags(probe);
+  const taggedYear = Number.parseInt(String(tags.date || tags.year || "").slice(0, 4), 10) || null;
+  return {
+    ...fallback,
+    title: cleanMetadataSearchText(tags.album || fallback.title),
+    artist: cleanMetadataSearchText(tags.album_artist || tags.albumartist || tags.artist || fallback.artist),
+    year: taggedYear || fallback.year || null
+  };
+}
+
+function normalizedProbeTags(probe) {
+  const sources = [
+    probe && probe.format && probe.format.tags,
+    ...(probe && Array.isArray(probe.streams) ? probe.streams.map((stream) => stream.tags) : [])
+  ];
+  const tags = {};
+  for (const source of sources) {
+    for (const [key, value] of Object.entries(source || {})) {
+      const normalizedKey = String(key || "").toLowerCase();
+      if (normalizedKey && tags[normalizedKey] === undefined && value !== undefined && value !== null) {
+        tags[normalizedKey] = String(value).trim();
+      }
+    }
+  }
+  return tags;
+}
+
+function cleanMetadataSearchText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function createManualRecord(mediaType, mediaFile) {
@@ -1327,7 +1510,10 @@ function metadataAliases(record) {
     source && source.title,
     source && source.name,
     source && source.original_title,
-    source && source.original_name
+    source && source.original_name,
+    source && source.artistName,
+    source && source.albumName,
+    ...(source && Array.isArray(source.aliases) ? source.aliases : [])
   ].filter((value) => value && value !== record.title));
 }
 
@@ -1363,34 +1549,27 @@ function withApiKey(url, apiKey) {
 }
 
 function posterFilenameFor(kind, providerId, posterSize, posterPath) {
-  const extension = path.extname(posterPath) || ".jpg";
-  return safePosterFilename(`tmdb-${kind}-${providerId || createId(posterPath)}-${posterSize}${extension}`);
+  return safePosterFilename(`tmdb-${kind}-${providerId || createId(posterPath)}-${posterSize}.webp`);
 }
 
 function seasonPosterFilenameFor(providerId, season, posterSize) {
-  return safePosterFilename(`tmdb-tv-${providerId}-season-${pad(season)}-${posterSize}.jpg`);
+  return safePosterFilename(`tmdb-tv-${providerId}-season-${pad(season)}-${posterSize}.webp`);
 }
 
 function thumbnailFilenameFor(kind, providerId, thumbnailSize, thumbnailPath, mediaFile) {
-  const extension = path.extname(thumbnailPath) || ".jpg";
-  return safePosterFilename(`${kind}-${providerId || createId(thumbnailPath)}-s${pad(mediaFile.season)}e${pad(mediaFile.episode)}-${thumbnailSize}${extension}`);
-}
-
-function posterExtension(value) {
-  const extension = path.extname(urlishPath(value)).toLowerCase();
-  return [".jpg", ".jpeg", ".png", ".webp"].includes(extension) ? extension : ".jpg";
-}
-
-function urlishPath(value) {
-  try {
-    return new URL(value).pathname;
-  } catch (err) {
-    return String(value || "");
-  }
+  return safePosterFilename(`${kind}-${providerId || createId(thumbnailPath)}-s${pad(mediaFile.season)}e${pad(mediaFile.episode)}-${thumbnailSize}.webp`);
 }
 
 function safePosterFilename(value) {
   return value.replace(/[^a-z0-9._-]/gi, "_");
+}
+
+function imageExtension(value) {
+  try {
+    return path.extname(new URL(value).pathname) || ".jpg";
+  } catch (err) {
+    return path.extname(String(value || "")) || ".jpg";
+  }
 }
 
 async function fileExists(filePath) {

@@ -1,13 +1,19 @@
 const fs = require("fs/promises");
 const path = require("path");
-const { SUBTITLE_EXTENSIONS } = require("../utils/mediaParsers");
+const { SUBTITLE_EXTENSIONS, isAudioFile } = require("../utils/mediaParsers");
 const { detectProTv3d } = require("./protv3d");
 const { qualityOptionsForProbe } = require("./qualityProfiles");
 
 async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
-  const probe = await ffmpeg.probe(mediaFile.filePath);
+  const probe = await ffmpeg.probe(mediaFile.filePath, options.library && options.library.type === "music"
+    ? { analyzeduration: "1M", probesize: "1M" }
+    : {});
   const streams = probe.streams || [];
-  const subtitlesEnabled = !options.library || !options.library.noSubtitles;
+  const audioOnly = isAudioFile(mediaFile.filePath) || !streams.some((stream) => (
+    stream.codec_type === "video"
+    && Number(stream.disposition && stream.disposition.attached_pic) !== 1
+  ));
+  const subtitlesEnabled = !audioOnly && (!options.library || !options.library.noSubtitles);
   const fetchedSubtitles = subtitlesEnabled && options.subtitles
     ? await options.subtitles.cachedOptions(options.mediaType, mediaFile.id)
     : [];
@@ -19,7 +25,7 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
       enabled: Boolean(subtitlesEnabled && options.subtitles && options.subtitles.config.enabled),
       provider: options.subtitles ? options.subtitles.config.provider : null
     },
-    quality: qualityOptionsForProbe(probe),
+    quality: audioOnly ? [{ id: "original", label: "Original audio" }] : qualityOptionsForProbe(probe),
     audio: streams
       .filter((stream) => stream.codec_type === "audio")
       .map((stream) => ({
@@ -31,7 +37,7 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
         channelLayout: stream.channel_layout || null,
         surround51: isSurround51(stream)
       })),
-    subtitles: [
+    subtitles: audioOnly ? [{ id: "none", index: null, language: "none", label: "No subtitles", source: "none" }] : [
       {
         id: "none",
         index: null,

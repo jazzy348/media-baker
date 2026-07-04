@@ -20,6 +20,26 @@ async function resolveMediaFile(mediaIndex, mediaType, id) {
     return episode;
   }
 
+  if (library.type === "music") {
+    const track = await mediaIndex.getTrackOrReindex(id, library.key);
+    if (!track) {
+      throw httpError(404, `${library.title} track not found`);
+    }
+    return track;
+  }
+
+  if (library.type === "images") {
+    const image = await mediaIndex.getImage(id, library.key);
+    if (!image) {
+      await mediaIndex.reindexLibrary(library.key);
+    }
+    const resolved = image || await mediaIndex.getImage(id, library.key);
+    if (!resolved) {
+      throw httpError(404, `${library.title} image not found`);
+    }
+    return resolved;
+  }
+
   const movie = await mediaIndex.getMovieOrReindex(id, library.key);
   if (!movie) {
     throw httpError(404, `${library.title} item not found`);

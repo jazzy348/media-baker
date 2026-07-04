@@ -160,7 +160,7 @@ class PlaybackProgressService {
 
       const updatedAtMs = timeMs(record.updatedAt);
       if (record.status === STATUS_IN_PROGRESS && record.positionSeconds > 0 && updatedAtMs >= cutoff) {
-        const mediaFile = mediaFileForRecord(mediaIndex, record);
+        const mediaFile = await mediaFileForRecord(mediaIndex, record);
         if (mediaFile) {
           itemsByKey.set(recordKey(record.mediaType, record.mediaId), await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "resume"));
         }
@@ -168,7 +168,7 @@ class PlaybackProgressService {
       }
 
       if (record.status === STATUS_WATCHED) {
-        const mediaFile = mediaFileForRecord(mediaIndex, record);
+        const mediaFile = await mediaFileForRecord(mediaIndex, record);
         if (mediaFile && mediaFile.showId) {
           const showKey = `${record.mediaType}:${mediaFile.showId}`;
           const previous = latestWatchedByShow.get(showKey);
@@ -180,7 +180,7 @@ class PlaybackProgressService {
     }
 
     for (const { record, mediaFile } of latestWatchedByShow.values()) {
-      const nextEpisode = nextEpisodeFor(mediaIndex, record.mediaType, mediaFile);
+      const nextEpisode = await nextEpisodeFor(mediaIndex, record.mediaType, mediaFile);
       if (!nextEpisode) {
         continue;
       }
@@ -223,7 +223,7 @@ class PlaybackProgressService {
         continue;
       }
 
-      const mediaFile = mediaFileForRecord(mediaIndex, record);
+      const mediaFile = await mediaFileForRecord(mediaIndex, record);
       if (!mediaFile) {
         continue;
       }
@@ -244,7 +244,7 @@ class PlaybackProgressService {
         continue;
       }
 
-      const mediaFile = mediaFileForRecord(mediaIndex, record);
+      const mediaFile = await mediaFileForRecord(mediaIndex, record);
       if (!mediaFile) {
         continue;
       }
@@ -341,6 +341,24 @@ function itemFromMediaFile(mediaIndex, mediaType, mediaFile) {
     };
   }
 
+  if (mediaFile.artistId) {
+    return {
+      id: mediaFile.id,
+      mediaType,
+      category,
+      itemType: "track",
+      title: mediaFile.title || mediaFile.filename,
+      subtitle: `${mediaFile.artistName} - ${mediaFile.albumName}`,
+      artistId: mediaFile.artistId,
+      artistName: mediaFile.artistName,
+      albumId: mediaFile.albumId,
+      albumName: mediaFile.albumName,
+      disc: mediaFile.disc,
+      track: mediaFile.track,
+      filePath: mediaFile.filePath
+    };
+  }
+
   return {
     id: mediaFile.id,
     mediaType,
@@ -352,21 +370,25 @@ function itemFromMediaFile(mediaIndex, mediaType, mediaFile) {
   };
 }
 
-function mediaFileForRecord(mediaIndex, record) {
+async function mediaFileForRecord(mediaIndex, record) {
   const library = mediaIndex.libraryForKey(record.mediaType);
-  if (!library) {
+  if (!library || library.trackProgress === false) {
     return null;
   }
 
   if (library.type === "tv") {
-    return mediaIndex.getEpisode(record.mediaId, library.key) || mediaIndex.getMovie(record.mediaId, library.key);
+    return await mediaIndex.getEpisode(record.mediaId, library.key) || await mediaIndex.getMovie(record.mediaId, library.key);
   }
 
-  return mediaIndex.getMovie(record.mediaId, library.key);
+  if (library.type === "music") {
+    return await mediaIndex.getTrack(record.mediaId, library.key);
+  }
+
+  return await mediaIndex.getMovie(record.mediaId, library.key);
 }
 
-function nextEpisodeFor(mediaIndex, mediaType, episode) {
-  const show = mediaIndex.getShow(episode.showId, mediaType);
+async function nextEpisodeFor(mediaIndex, mediaType, episode) {
+  const show = await mediaIndex.getShow(episode.showId, mediaType);
   if (!show) {
     return null;
   }

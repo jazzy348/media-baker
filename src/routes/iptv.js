@@ -1,6 +1,6 @@
 const express = require("express");
 const path = require("path");
-const { httpError } = require("../utils/httpErrors");
+const { httpError, isClientAbort } = require("../utils/httpErrors");
 const logger = require("../utils/logger");
 const LIVE_TV_PERMISSION_KEY = "@live-tv";
 
@@ -57,7 +57,7 @@ module.exports = function createIptvRoutes({ config, iptv }) {
       }
       res.set("Cache-Control", "private, max-age=86400");
       res.sendFile(filePath, (err) => {
-        if (err && err.code !== "ECONNABORTED" && err.message !== "Request aborted") {
+        if (err && !isClientAbort(err)) {
           next(httpError(err.statusCode || 404, "IPTV channel icon not found"));
         }
       });
@@ -86,7 +86,7 @@ module.exports = function createIptvRoutes({ config, iptv }) {
       }
       res.type(contentTypeFor(req.params.filename));
       res.sendFile(filePath, (err) => {
-        if (err && err.code !== "ECONNABORTED" && err.message !== "Request aborted") {
+        if (err && !isClientAbort(err)) {
           next(httpError(err.statusCode || 404, "IPTV segment not found"));
         }
       });

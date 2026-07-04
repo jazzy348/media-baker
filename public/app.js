@@ -74,6 +74,9 @@ const els = {
   liveTvEarlier: document.getElementById("liveTvEarlier"),
   liveTvNow: document.getElementById("liveTvNow"),
   liveTvLater: document.getElementById("liveTvLater"),
+  imageViewer: document.getElementById("imageViewer"),
+  imageViewerImage: document.getElementById("imageViewerImage"),
+  closeImageViewer: document.getElementById("closeImageViewer"),
   detailsPanel: document.getElementById("detailsPanel"),
   closeDetails: document.getElementById("closeDetails"),
   detailsPoster: document.getElementById("detailsPoster"),
@@ -137,10 +140,45 @@ const els = {
   metadataMatchStatus: document.getElementById("metadataMatchStatus"),
   playerOverlay: document.getElementById("playerOverlay"),
   closePlayer: document.getElementById("closePlayer"),
+  minimizeVideoPlayer: document.getElementById("minimizeVideoPlayer"),
+  videoPlayerSlot: document.getElementById("videoPlayerSlot"),
+  videoPlaybackSurface: document.getElementById("videoPlaybackSurface"),
+  videoControls: document.getElementById("videoControls"),
+  videoPlayPause: document.getElementById("videoPlayPause"),
+  videoCurrentTime: document.getElementById("videoCurrentTime"),
+  videoSeek: document.getElementById("videoSeek"),
+  videoDuration: document.getElementById("videoDuration"),
+  videoMute: document.getElementById("videoMute"),
+  videoVolume: document.getElementById("videoVolume"),
+  videoPictureInPicture: document.getElementById("videoPictureInPicture"),
+  videoFullscreen: document.getElementById("videoFullscreen"),
   webPlayer: document.getElementById("webPlayer"),
   playerCategory: document.getElementById("playerCategory"),
   playerTitle: document.getElementById("playerTitle"),
   playerStatus: document.getElementById("playerStatus"),
+  videoMiniPlayer: document.getElementById("videoMiniPlayer"),
+  videoMiniPlayerDrag: document.getElementById("videoMiniPlayerDrag"),
+  videoMiniPlayerSlot: document.getElementById("videoMiniPlayerSlot"),
+  videoMiniCategory: document.getElementById("videoMiniCategory"),
+  videoMiniTitle: document.getElementById("videoMiniTitle"),
+  videoMiniStatus: document.getElementById("videoMiniStatus"),
+  restoreVideoPlayer: document.getElementById("restoreVideoPlayer"),
+  closeVideoMiniPlayer: document.getElementById("closeVideoMiniPlayer"),
+  musicPlayer: document.getElementById("musicPlayer"),
+  musicPlayerDrag: document.getElementById("musicPlayerDrag"),
+  musicPlayerCover: document.getElementById("musicPlayerCover"),
+  musicPlayerArtist: document.getElementById("musicPlayerArtist"),
+  musicPlayerTitle: document.getElementById("musicPlayerTitle"),
+  musicPlayerAlbum: document.getElementById("musicPlayerAlbum"),
+  musicPlayerStatus: document.getElementById("musicPlayerStatus"),
+  closeMusicPlayer: document.getElementById("closeMusicPlayer"),
+  musicPlayPause: document.getElementById("musicPlayPause"),
+  musicNext: document.getElementById("musicNext"),
+  musicMute: document.getElementById("musicMute"),
+  musicSeek: document.getElementById("musicSeek"),
+  musicVolume: document.getElementById("musicVolume"),
+  musicCurrentTime: document.getElementById("musicCurrentTime"),
+  musicDuration: document.getElementById("musicDuration"),
   downloadOverlay: document.getElementById("downloadOverlay"),
   downloadForm: document.getElementById("downloadForm"),
   downloadUrlInput: document.getElementById("downloadUrlInput"),
@@ -174,6 +212,7 @@ const els = {
   libraryNameInput: document.getElementById("libraryNameInput"),
   libraryTypeSelect: document.getElementById("libraryTypeSelect"),
   libraryPathInput: document.getElementById("libraryPathInput"),
+  libraryTrackProgress: document.getElementById("libraryTrackProgress"),
   browseLibraryPath: document.getElementById("browseLibraryPath"),
   folderPicker: document.getElementById("folderPicker"),
   folderPickerPath: document.getElementById("folderPickerPath"),
@@ -189,12 +228,35 @@ const els = {
   refreshDuplicates: document.getElementById("refreshDuplicates"),
   duplicatesStatus: document.getElementById("duplicatesStatus"),
   duplicatesList: document.getElementById("duplicatesList"),
+  backupSettingsForm: document.getElementById("backupSettingsForm"),
+  backupDirectory: document.getElementById("backupDirectory"),
+  browseBackupDirectory: document.getElementById("browseBackupDirectory"),
+  backupRetention: document.getElementById("backupRetention"),
+  backupScheduleEnabled: document.getElementById("backupScheduleEnabled"),
+  backupScheduleBody: document.getElementById("backupScheduleBody"),
+  backupTime: document.getElementById("backupTime"),
+  backupDays: document.querySelectorAll(".backup-days input[type=checkbox]"),
+  createBackup: document.getElementById("createBackup"),
+  backupStatus: document.getElementById("backupStatus"),
+  backupProgress: document.getElementById("backupProgress"),
+  backupProgressFill: document.getElementById("backupProgressFill"),
+  backupProgressText: document.getElementById("backupProgressText"),
+  backupProgressEta: document.getElementById("backupProgressEta"),
+  backupList: document.getElementById("backupList"),
+  backupFolderPicker: document.getElementById("backupFolderPicker"),
+  backupFolderPath: document.getElementById("backupFolderPath"),
+  backupFolderRoots: document.getElementById("backupFolderRoots"),
+  backupFolderParent: document.getElementById("backupFolderParent"),
+  selectBackupFolder: document.getElementById("selectBackupFolder"),
+  closeBackupFolderPicker: document.getElementById("closeBackupFolderPicker"),
+  backupFolderList: document.getElementById("backupFolderList"),
   adminPanelOverlay: document.getElementById("adminPanelOverlay"),
   closeAdminPanel: document.getElementById("closeAdminPanel"),
   adminAccountsTab: document.getElementById("adminAccountsTab"),
   adminApiKeysTab: document.getElementById("adminApiKeysTab"),
   adminLibrariesTab: document.getElementById("adminLibrariesTab"),
   adminDuplicatesTab: document.getElementById("adminDuplicatesTab"),
+  adminBackupsTab: document.getElementById("adminBackupsTab"),
   adminSettingsTab: document.getElementById("adminSettingsTab"),
   adminHardwareTab: document.getElementById("adminHardwareTab"),
   adminCurrentlyPlayingTab: document.getElementById("adminCurrentlyPlayingTab"),
@@ -204,6 +266,7 @@ const els = {
   adminApiKeysPage: document.getElementById("adminApiKeysPage"),
   adminLibrariesPage: document.getElementById("adminLibrariesPage"),
   adminDuplicatesPage: document.getElementById("adminDuplicatesPage"),
+  adminBackupsPage: document.getElementById("adminBackupsPage"),
   adminSettingsPage: document.getElementById("adminSettingsPage"),
   adminHardwarePage: document.getElementById("adminHardwarePage"),
   adminCurrentlyPlayingPage: document.getElementById("adminCurrentlyPlayingPage"),
@@ -220,6 +283,7 @@ const els = {
   accountCanMetadata: document.getElementById("accountCanMetadata"),
   accountCanSettings: document.getElementById("accountCanSettings"),
   accountCanApiKeys: document.getElementById("accountCanApiKeys"),
+  accountCanBackups: document.getElementById("accountCanBackups"),
   accountCanReindex: document.getElementById("accountCanReindex"),
   accountCanUsers: document.getElementById("accountCanUsers"),
   accountCanHardware: document.getElementById("accountCanHardware"),
@@ -328,11 +392,18 @@ const els = {
 
 let hlsPlayer = null;
 let nativePlayerErrorHandler = null;
+let autoAdvanceInFlight = false;
+let musicSeeking = false;
+let videoSeeking = false;
+let videoControlsHideTimer = null;
+let floatingPlayerDrag = null;
 let libraryObserver = null;
 let progressRefreshPromise = null;
 let draggedLibraryKey = null;
 let adminRefreshTimer = null;
 let folderPickerPath = "";
+let backupFolderPickerPath = "";
+let backupWasRunning = false;
 let downloadRefreshTimer = null;
 let downloadHomeRefreshPromise = null;
 let onDeckRefreshTimer = null;
@@ -387,6 +458,7 @@ els.brandLink.addEventListener("click", (event) => {
 els.lockButton.addEventListener("click", () => {
   hideLiveTvView();
   closeAccountPanel();
+  closePlayer();
   localStorage.removeItem("streamToken");
   state.token = "";
   state.user = null;
@@ -430,6 +502,7 @@ els.adminAccountsTab.addEventListener("click", () => openAdminPanel("accounts"))
 els.adminApiKeysTab.addEventListener("click", () => openAdminPanel("apiKeys"));
 els.adminLibrariesTab.addEventListener("click", () => openAdminPanel("libraries"));
 els.adminDuplicatesTab.addEventListener("click", () => openAdminPanel("duplicates"));
+els.adminBackupsTab.addEventListener("click", () => openAdminPanel("backups"));
 els.adminSettingsTab.addEventListener("click", () => openAdminPanel("settings"));
 els.adminHardwareTab.addEventListener("click", () => openAdminPanel("hardware"));
 els.adminCurrentlyPlayingTab.addEventListener("click", () => openAdminPanel("currentlyPlaying"));
@@ -481,6 +554,15 @@ els.folderPickerParent.addEventListener("click", () => {
 els.selectFolderPath.addEventListener("click", selectFolderPickerPath);
 els.reindexLibraries.addEventListener("click", reindexLibraries);
 els.refreshDuplicates.addEventListener("click", loadDuplicates);
+els.backupSettingsForm.addEventListener("submit", saveBackupSettings);
+els.backupScheduleEnabled.addEventListener("change", updateBackupScheduleVisibility);
+els.createBackup.addEventListener("click", createBackupNow);
+els.browseBackupDirectory.addEventListener("click", openBackupFolderPicker);
+els.closeBackupFolderPicker.addEventListener("click", closeBackupFolderPicker);
+els.backupFolderParent.addEventListener("click", () => {
+  if (els.backupFolderParent.dataset.path) loadBackupFolderPicker(els.backupFolderParent.dataset.path);
+});
+els.selectBackupFolder.addEventListener("click", selectBackupFolder);
 els.closeDetails.addEventListener("click", closeDetails);
 els.toggleFilePath.addEventListener("click", toggleFilePath);
 els.searchInput.addEventListener("input", debounce(search, 180));
@@ -509,12 +591,73 @@ els.metadataMatchOverlay.addEventListener("click", (event) => {
 els.markWatched.addEventListener("click", markSelectedWatched);
 els.removeOnDeck.addEventListener("click", removeSelectedOnDeck);
 els.closePlayer.addEventListener("click", closePlayer);
+els.minimizeVideoPlayer.addEventListener("click", minimizeVideoPlayback);
+els.restoreVideoPlayer.addEventListener("click", restoreVideoPlayback);
+els.closeVideoMiniPlayer.addEventListener("click", closePlayer);
 els.webPlayer.addEventListener("playing", startOnDeckPolling);
 els.webPlayer.addEventListener("pause", stopOnDeckPolling);
-els.webPlayer.addEventListener("ended", stopOnDeckPolling);
+els.webPlayer.addEventListener("ended", handleWebPlayerEnded);
+els.webPlayer.addEventListener("play", updateMusicPlayerControls);
+els.webPlayer.addEventListener("pause", updateMusicPlayerControls);
+els.webPlayer.addEventListener("timeupdate", updateMusicPlayerControls);
+els.webPlayer.addEventListener("loadedmetadata", updateMusicPlayerControls);
+els.webPlayer.addEventListener("durationchange", updateMusicPlayerControls);
+els.webPlayer.addEventListener("volumechange", updateMusicPlayerControls);
+els.webPlayer.addEventListener("play", updateVideoPlayerControls);
+els.webPlayer.addEventListener("pause", updateVideoPlayerControls);
+els.webPlayer.addEventListener("timeupdate", updateVideoPlayerControls);
+els.webPlayer.addEventListener("loadedmetadata", updateVideoPlayerControls);
+els.webPlayer.addEventListener("durationchange", updateVideoPlayerControls);
+els.webPlayer.addEventListener("volumechange", updateVideoPlayerControls);
+els.webPlayer.addEventListener("click", toggleVideoPlayback);
+els.webPlayer.addEventListener("dblclick", toggleVideoFullscreen);
+els.videoPlayPause.addEventListener("click", toggleVideoPlayback);
+els.videoMute.addEventListener("click", toggleVideoMute);
+els.videoSeek.addEventListener("pointerdown", () => { videoSeeking = true; });
+els.videoSeek.addEventListener("input", seekVideoPlayback);
+els.videoSeek.addEventListener("change", () => { videoSeeking = false; updateVideoPlayerControls(); });
+els.videoVolume.addEventListener("input", updateVideoVolume);
+els.videoPictureInPicture.addEventListener("click", toggleVideoPictureInPicture);
+els.videoFullscreen.addEventListener("click", toggleVideoFullscreen);
+els.videoPlaybackSurface.addEventListener("pointermove", showVideoControls);
+els.videoPlaybackSurface.addEventListener("pointerleave", scheduleVideoControlsHide);
+els.videoPlaybackSurface.addEventListener("focusin", showVideoControls);
+els.videoPlaybackSurface.addEventListener("focusout", scheduleVideoControlsHide);
+document.addEventListener("fullscreenchange", updateVideoFullscreenControl);
+document.addEventListener("webkitfullscreenchange", updateVideoFullscreenControl);
+els.webPlayer.addEventListener("webkitbeginfullscreen", updateVideoFullscreenControl);
+els.webPlayer.addEventListener("webkitendfullscreen", updateVideoFullscreenControl);
+els.webPlayer.addEventListener("enterpictureinpicture", updateVideoPictureInPictureControl);
+els.webPlayer.addEventListener("leavepictureinpicture", updateVideoPictureInPictureControl);
+els.webPlayer.addEventListener("webkitpresentationmodechanged", updateVideoPictureInPictureControl);
+els.webPlayer.addEventListener("loadedmetadata", updateVideoPictureInPictureControl);
+els.webPlayer.addEventListener("emptied", updateVideoPictureInPictureControl);
+els.closeMusicPlayer.addEventListener("click", closePlayer);
+els.musicPlayPause.addEventListener("click", toggleMusicPlayback);
+els.musicNext.addEventListener("click", handleWebPlayerEnded);
+els.musicMute.addEventListener("click", toggleMusicMute);
+els.musicSeek.addEventListener("pointerdown", () => { musicSeeking = true; });
+els.musicSeek.addEventListener("input", seekMusicPlayback);
+els.musicSeek.addEventListener("change", () => { musicSeeking = false; updateMusicPlayerControls(); });
+els.musicVolume.addEventListener("input", updateMusicVolume);
+els.musicPlayerDrag.addEventListener("pointerdown", startMusicPlayerDrag);
+els.musicPlayerDrag.addEventListener("pointermove", moveMusicPlayer);
+els.musicPlayerDrag.addEventListener("pointerup", stopMusicPlayerDrag);
+els.musicPlayerDrag.addEventListener("pointercancel", stopMusicPlayerDrag);
+els.videoMiniPlayerDrag.addEventListener("pointerdown", startVideoPlayerDrag);
+els.videoMiniPlayerDrag.addEventListener("pointermove", moveFloatingPlayer);
+els.videoMiniPlayerDrag.addEventListener("pointerup", stopFloatingPlayerDrag);
+els.videoMiniPlayerDrag.addEventListener("pointercancel", stopFloatingPlayerDrag);
+window.addEventListener("resize", clampFloatingPlayersToViewport);
 els.playerOverlay.addEventListener("click", (event) => {
   if (event.target === els.playerOverlay) {
     closePlayer();
+  }
+});
+els.closeImageViewer.addEventListener("click", hideImageViewer);
+els.imageViewer.addEventListener("click", (event) => {
+  if (event.target === els.imageViewer) {
+    hideImageViewer();
   }
 });
 document.addEventListener("pointerdown", (event) => {
@@ -524,7 +667,7 @@ document.addEventListener("pointerdown", (event) => {
   if (els.detailsPanel.contains(event.target)) {
     return;
   }
-  if (event.target.closest(".choice-overlay, .player-overlay, .login-overlay")) {
+  if (event.target.closest(".choice-overlay, .player-overlay, .login-overlay, .music-player, .video-mini-player, .image-viewer")) {
     return;
   }
   closeDetails();
@@ -555,6 +698,14 @@ document.addEventListener("keydown", (event) => {
   }
   if (els.detailsPanel.classList.contains("open")) {
     closeDetails();
+    return;
+  }
+  if (!els.musicPlayer.classList.contains("hidden")) {
+    closePlayer();
+    return;
+  }
+  if (!els.videoMiniPlayer.classList.contains("hidden")) {
+    closePlayer();
   }
 });
 
@@ -650,7 +801,7 @@ async function renderRoute(route) {
       navigation.navigate("/", { replace: true });
     }
     if (route.name === "library") {
-      await openLibraryView(route.libraryKey, route.title || readableRouteName(route.libraryKey));
+      await openLibraryView(route.libraryKey, route.title || readableRouteName(route.libraryKey), route.folder || "");
       return;
     }
     if (route.name === "show") {
@@ -659,6 +810,14 @@ async function renderRoute(route) {
     }
     if (route.name === "season" && Number.isFinite(route.season)) {
       await openSeasonView(route.libraryKey, route.showId, route.season);
+      return;
+    }
+    if (route.name === "artist") {
+      await openArtistView(route.libraryKey, route.artistId);
+      return;
+    }
+    if (route.name === "album") {
+      await openAlbumView(route.libraryKey, route.artistId, route.albumId);
       return;
     }
     if (route.name === "search") {
@@ -982,12 +1141,27 @@ function card(item, options = {}) {
   `;
   const poster = button.querySelector(".poster");
   poster.classList.toggle("thumbnail-art", Boolean(showEpisodeThumbnail && item.thumbnailUrl));
+  poster.classList.toggle("image-art", item.itemType === "image");
+  poster.classList.toggle("image-folder-art", ["image-folder", "media-folder"].includes(item.itemType));
+  poster.classList.toggle("playlist-art", item.itemType === "playlist");
   if (imageUrl) {
     setPosterImage(poster, imageUrl);
   }
   button.addEventListener("click", () => {
+    if (["image-folder", "media-folder", "playlist"].includes(item.itemType)) {
+      openLibraryView(item.mediaType, item.category, item.folderPath);
+      return;
+    }
     if (isShowCard(item)) {
       openShowView(item.mediaType, item.showId || item.id);
+      return;
+    }
+    if (isArtistCard(item)) {
+      openArtistView(item.mediaType, item.artistId || item.id);
+      return;
+    }
+    if (isAlbumCard(item)) {
+      openAlbumView(item.mediaType, item.artistId, item.albumId || item.id);
       return;
     }
 
@@ -1000,6 +1174,18 @@ async function openDetails(item) {
   if (isShowCard(item)) {
     openShowView(item.mediaType, item.showId || item.id);
     return;
+  }
+  if (isArtistCard(item)) {
+    openArtistView(item.mediaType, item.artistId || item.id);
+    return;
+  }
+  if (isAlbumCard(item)) {
+    openAlbumView(item.mediaType, item.artistId, item.albumId || item.id);
+    return;
+  }
+
+  if (item.itemType !== "image") {
+    hideImageViewer();
   }
 
   state.selected = item;
@@ -1019,6 +1205,7 @@ async function openDetails(item) {
   els.detailsPoster.textContent = initials(item.title);
   els.detailsPoster.classList.remove("with-image");
   els.detailsPoster.classList.toggle("thumbnail-art", Boolean(item.thumbnailUrl));
+  els.detailsPoster.classList.toggle("image-preview", item.itemType === "image");
   els.detailsPoster.style.removeProperty("--poster-image");
   const detailsImageUrl = imageUrlForItem(item);
   if (detailsImageUrl) {
@@ -1039,6 +1226,33 @@ async function openDetails(item) {
   els.detailsPanel.classList.add("open");
   els.detailsPanel.setAttribute("aria-hidden", "false");
   updatePlaybackControls();
+
+  if (item.itemType === "image") {
+    if (detailsImageUrl) {
+      showImageViewer(detailsImageUrl, item.title);
+    }
+    const options = await api(`/api/catalog/${item.mediaType}/${item.id}/options`);
+    state.options = options;
+    state.selected = {
+      ...state.selected,
+      ...options.item,
+      itemType: "image",
+      category: item.category,
+      filePath: options.filePath,
+      thumbnailUrl: item.thumbnailUrl
+    };
+    els.filePath.value = options.filePath;
+    if (options.originalUrl) {
+      setPosterImage(els.detailsPoster, options.originalUrl);
+      showImageViewer(options.originalUrl, state.selected.title);
+    }
+    fillSelect(els.audioSelect, options.audio);
+    fillSelect(els.qualitySelect, options.quality);
+    fillSelect(els.subtitleSelect, options.subtitles);
+    updateDetailsAdminControls();
+    updatePlaybackControls();
+    return;
+  }
 
   loadMetadata(item);
 
@@ -1129,6 +1343,14 @@ function rowSection(title, count, items, libraryKey, options = {}) {
 
 function renderHierarchyNav(item) {
   els.hierarchyNav.innerHTML = "";
+  if (item && item.artistId && item.albumId) {
+    els.hierarchyNav.classList.remove("hidden");
+    els.hierarchyNav.append(
+      hierarchyButton(item.albumName || "Album", () => openAlbumView(item.mediaType, item.artistId, item.albumId)),
+      hierarchyButton(item.artistName || "Artist", () => openArtistView(item.mediaType, item.artistId))
+    );
+    return;
+  }
   if (!isEpisodeItem(item)) {
     els.hierarchyNav.classList.add("hidden");
     return;
@@ -1208,6 +1430,56 @@ async function openShowView(mediaType, showId) {
   });
 }
 
+async function openAlbumView(mediaType, artistId, albumId) {
+  stopLibraryLoading();
+  recordRoute(navigation.albumPath(mediaType, artistId, albumId));
+  const [artist, album] = await Promise.all([
+    api(`${tvBasePath(mediaType)}/${artistId}`),
+    api(`${tvBasePath(mediaType)}/${artistId}/albums/${albumId}`)
+  ]);
+  state.currentView = "album";
+  closeDetails();
+  const section = document.createElement("section");
+  section.className = "search-results";
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  album.tracks.map((track) => trackItem(mediaType, artist, album, track))
+    .forEach((item) => grid.appendChild(card(item)));
+  section.appendChild(grid);
+  showContentView({
+    title: `${artist.name} - ${album.name}`,
+    subtitle: `${album.tracks.length} tracks${album.year ? ` - ${album.year}` : ""}`,
+    actions: [
+      { label: "Artist", onClick: () => openArtistView(mediaType, artistId) },
+      { label: "Home", onClick: () => loadHome() }
+    ],
+    content: section
+  });
+}
+
+async function openArtistView(mediaType, artistId) {
+  stopLibraryLoading();
+  recordRoute(navigation.artistPath(mediaType, artistId));
+  const artist = await api(`${tvBasePath(mediaType)}/${artistId}`);
+  state.currentView = "artist";
+  closeDetails();
+  const fragment = document.createDocumentFragment();
+  for (const album of artist.albums || []) {
+    const items = (album.tracks || []).map((track) => trackItem(mediaType, artist, album, track));
+    const section = rowSection(album.name, `${items.length} tracks`, items);
+    const viewAlbum = hierarchyButton("View album", () => openAlbumView(mediaType, artistId, album.id));
+    viewAlbum.className = "text-button";
+    section.querySelector(".section-actions").appendChild(viewAlbum);
+    fragment.appendChild(section);
+  }
+  showContentView({
+    title: artist.name,
+    subtitle: `${artist.albums.length} albums`,
+    actions: [{ label: "Home", onClick: () => loadHome() }],
+    content: fragment
+  });
+}
+
 function openRandomEpisode(mediaType, show) {
   const episodes = (show.seasons || []).flatMap((season) => season.episodes || []);
   if (episodes.length === 0) {
@@ -1244,14 +1516,17 @@ function showContentView({ title, subtitle, actions, content }) {
   return { header, content };
 }
 
-async function openLibraryView(libraryKey, title) {
+async function openLibraryView(libraryKey, title, folder = "") {
   stopLibraryLoading();
   closeDetails();
-  recordRoute(navigation.libraryPath(libraryKey), { state: { title } });
+  recordRoute(navigation.libraryPath(libraryKey, folder), { state: { title } });
 
   const section = document.createElement("section");
   section.className = "library-results";
   const controls = libraryViewControls();
+  if (folder && libraryKey === "yt-dlp") {
+    controls.classList.add("hidden");
+  }
   const grid = document.createElement("div");
   grid.className = "grid";
   const status = document.createElement("p");
@@ -1261,9 +1536,12 @@ async function openLibraryView(libraryKey, title) {
   section.append(controls, grid, status, sentinel);
 
   const view = showContentView({
-    title,
+    title: folder ? catalogFolderName(folder) : title,
     subtitle: "Loading...",
-    actions: [{ label: "Home", onClick: () => loadHome() }],
+    actions: [
+      ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder)) }] : []),
+      { label: "Home", onClick: () => loadHome() }
+    ],
     content: section
   });
 
@@ -1271,12 +1549,14 @@ async function openLibraryView(libraryKey, title) {
   state.libraryView = {
     key: libraryKey,
     title,
+    folder,
     sort: "alpha",
     metadataFilter: "all",
     offset: 0,
     total: 0,
     hasMore: true,
     loading: false,
+    supportsMetadataMatching: null,
     grid,
     status,
     sentinel,
@@ -1303,7 +1583,7 @@ function libraryViewControls() {
       <button class="active" type="button" data-sort="alpha">Alphabetical</button>
       <button type="button" data-sort="recent">Recently Added</button>
     </div>
-    <div class="segmented-control library-filter-control ${hasPermission("canManageMetadata") ? "" : "hidden"}">
+    <div class="segmented-control library-filter-control hidden">
       <button class="active" type="button" data-filter="all">All</button>
       <button type="button" data-filter="unmatched">Unmatched</button>
     </div>
@@ -1332,7 +1612,7 @@ function setLibrarySort(sort) {
 
 function setLibraryMetadataFilter(filter) {
   const view = state.libraryView;
-  if (!view || view.metadataFilter === filter) {
+  if (!view || view.supportsMetadataMatching === false || view.metadataFilter === filter) {
     return;
   }
   view.metadataFilter = filter === "unmatched" ? "unmatched" : "all";
@@ -1660,6 +1940,7 @@ async function openAdminPanel(page = "accounts") {
 
 function closeAdminPanel() {
   closeIptvMatcher();
+  closeBackupFolderPicker();
   els.adminPanelOverlay.classList.add("hidden");
   els.adminPanelOverlay.setAttribute("aria-hidden", "true");
   document.body.classList.remove("admin-panel-open");
@@ -1680,6 +1961,9 @@ function showAdminPage(page) {
   if (page === "duplicates" && !hasPermission("canManageMetadata")) {
     page = firstAllowedAdminPage();
   }
+  if (page === "backups" && !hasPermission("canManageBackups")) {
+    page = firstAllowedAdminPage();
+  }
   if (page === "hardware" && !hasPermission("canViewHardware")) {
     page = firstAllowedAdminPage();
   }
@@ -1697,6 +1981,7 @@ function showAdminPage(page) {
     apiKeys: els.adminApiKeysPage,
     libraries: els.adminLibrariesPage,
     duplicates: els.adminDuplicatesPage,
+    backups: els.adminBackupsPage,
     settings: els.adminSettingsPage,
     hardware: els.adminHardwarePage,
     currentlyPlaying: els.adminCurrentlyPlayingPage,
@@ -1710,6 +1995,7 @@ function showAdminPage(page) {
   els.adminApiKeysTab.classList.toggle("hidden", !hasPermission("canManageApiKeys"));
   els.adminLibrariesTab.classList.toggle("hidden", !canViewLibraryAdmin());
   els.adminDuplicatesTab.classList.toggle("hidden", !hasPermission("canManageMetadata"));
+  els.adminBackupsTab.classList.toggle("hidden", !hasPermission("canManageBackups"));
   els.adminSettingsTab.classList.toggle("hidden", !hasPermission("canManageSettings"));
   els.adminHardwareTab.classList.toggle("hidden", !hasPermission("canViewHardware"));
   els.adminCurrentlyPlayingTab.classList.toggle("hidden", !hasPermission("canViewUserHistory"));
@@ -1725,6 +2011,9 @@ function showAdminPage(page) {
     loadLibraryManager();
   } else if (page === "duplicates") {
     loadDuplicates();
+  } else if (page === "backups") {
+    loadBackups();
+    adminRefreshTimer = setInterval(() => loadBackups(false), 2000);
   } else if (page === "settings") {
     loadSettings();
   } else if (page === "hardware") {
@@ -1746,6 +2035,7 @@ function firstAllowedAdminPage() {
   if (hasPermission("canManageApiKeys")) return "apiKeys";
   if (canViewLibraryAdmin()) return "libraries";
   if (hasPermission("canManageMetadata")) return "duplicates";
+  if (hasPermission("canManageBackups")) return "backups";
   if (hasPermission("canManageSettings")) return "settings";
   if (hasPermission("canViewHardware")) return "hardware";
   if (hasPermission("canViewUserHistory")) return "currentlyPlaying";
@@ -1797,8 +2087,10 @@ function accountCard(account) {
         <h3>${escapeHtml(account.username)}</h3>
         <div class="library-path">${account.permissions.isAdmin ? "Admin" : `${account.permissions.libraries.length} libraries`}</div>
       </div>
-      <button class="secondary-button compact-button edit-account" type="button">${editing ? "Stop editing" : "Edit"}</button>
-      <button class="secondary-button compact-button delete-account" type="button">Remove</button>
+      <div class="account-card-actions">
+        <button class="secondary-button compact-button edit-account" type="button">${editing ? "Stop editing" : "Edit"}</button>
+        <button class="secondary-button compact-button delete-account" type="button">Remove</button>
+      </div>
     </div>
   `;
   cardElement.querySelector(".edit-account").addEventListener("click", () => {
@@ -1824,6 +2116,7 @@ function editAccount(account) {
   els.accountCanMetadata.checked = Boolean(permissions.canManageMetadata);
   els.accountCanSettings.checked = Boolean(permissions.canManageSettings);
   els.accountCanApiKeys.checked = Boolean(permissions.canManageApiKeys);
+  els.accountCanBackups.checked = Boolean(permissions.canManageBackups);
   els.accountCanReindex.checked = Boolean(permissions.canReindex);
   els.accountCanUsers.checked = Boolean(permissions.canManageUsers);
   els.accountCanHardware.checked = Boolean(permissions.canViewHardware);
@@ -1848,6 +2141,7 @@ function resetAccountForm() {
   els.accountCanMetadata.checked = false;
   els.accountCanSettings.checked = false;
   els.accountCanApiKeys.checked = false;
+  els.accountCanBackups.checked = false;
   els.accountCanReindex.checked = false;
   els.accountCanUsers.checked = false;
   els.accountCanHardware.checked = false;
@@ -1929,6 +2223,7 @@ function setAdminNavState(page) {
     apiKeys: els.adminApiKeysTab,
     libraries: els.adminLibrariesTab,
     duplicates: els.adminDuplicatesTab,
+    backups: els.adminBackupsTab,
     hardware: els.adminHardwareTab,
     currentlyPlaying: els.adminCurrentlyPlayingTab,
     logs: els.adminLogsTab,
@@ -1953,6 +2248,7 @@ function accountPermissionsFromForm() {
     || els.accountCanMetadata.checked
     || els.accountCanSettings.checked
     || els.accountCanApiKeys.checked
+    || els.accountCanBackups.checked
     || els.accountCanReindex.checked
     || els.accountCanUsers.checked
     || els.accountCanHardware.checked
@@ -1965,6 +2261,7 @@ function accountPermissionsFromForm() {
     canManageMetadata: els.accountCanMetadata.checked,
     canManageSettings: els.accountCanSettings.checked,
     canManageApiKeys: els.accountCanApiKeys.checked,
+    canManageBackups: els.accountCanBackups.checked,
     canReindex: els.accountCanReindex.checked,
     canManageUsers: els.accountCanUsers.checked,
     canViewAdmin,
@@ -2135,6 +2432,232 @@ function renderDuplicates(data) {
     });
     els.duplicatesList.appendChild(section);
   });
+}
+
+async function loadBackups(showLoading = true) {
+  if (!hasPermission("canManageBackups")) return;
+  if (showLoading) {
+    els.backupStatus.textContent = "Loading backups...";
+  }
+  try {
+    const data = await api("/api/admin/backups");
+    const finishedSinceLastRefresh = backupWasRunning && !data.running;
+    backupWasRunning = Boolean(data.running);
+    if (showLoading || finishedSinceLastRefresh) {
+      fillBackupSettings(data.settings || {});
+      renderBackups(data.backups || []);
+    }
+    renderBackupProgress(data.progress, data.running);
+    els.createBackup.disabled = Boolean(data.running || data.restoring);
+    if (data.restoring) {
+      els.backupStatus.textContent = "A database restore is running.";
+    } else if (data.running) {
+      els.backupStatus.textContent = "A backup is currently running.";
+    } else if (data.lastResult && !data.lastResult.ok) {
+      els.backupStatus.textContent = `Last operation failed: ${data.lastResult.error}`;
+    } else if (showLoading) {
+      els.backupStatus.textContent = "";
+    }
+  } catch (err) {
+    els.backupStatus.textContent = err.message || "Failed to load backups.";
+  }
+}
+
+function fillBackupSettings(settings) {
+  els.backupDirectory.value = settings.directory || "";
+  els.backupRetention.value = settings.retentionCount || 7;
+  els.backupScheduleEnabled.checked = Boolean(settings.enabled);
+  els.backupTime.value = settings.time || "03:00";
+  const selectedDays = new Set((settings.days || []).map(Number));
+  els.backupDays.forEach((checkbox) => {
+    checkbox.checked = selectedDays.has(Number(checkbox.value));
+  });
+  updateBackupScheduleVisibility();
+}
+
+function updateBackupScheduleVisibility() {
+  els.backupScheduleBody.classList.toggle("hidden", !els.backupScheduleEnabled.checked);
+}
+
+async function saveBackupSettings(event) {
+  event.preventDefault();
+  const days = [...els.backupDays].filter((checkbox) => checkbox.checked).map((checkbox) => Number(checkbox.value));
+  if (els.backupScheduleEnabled.checked && days.length === 0) {
+    els.backupStatus.textContent = "Select at least one backup day.";
+    return;
+  }
+  els.backupStatus.textContent = "Saving backup settings...";
+  try {
+    const data = await api("/api/admin/backups/settings", state.token, {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: els.backupScheduleEnabled.checked,
+        directory: els.backupDirectory.value,
+        time: els.backupTime.value,
+        days,
+        retentionCount: Number.parseInt(els.backupRetention.value, 10) || 7
+      })
+    });
+    fillBackupSettings(data.settings || {});
+    renderBackups(data.backups || []);
+    els.backupStatus.textContent = "Backup settings saved.";
+  } catch (err) {
+    els.backupStatus.textContent = err.message || "Failed to save backup settings.";
+  }
+}
+
+async function createBackupNow() {
+  els.createBackup.disabled = true;
+  els.backupStatus.textContent = "Backing up the database...";
+  try {
+    const started = await api("/api/admin/backups", state.token, { method: "POST" });
+    renderBackupProgress(started.progress, true);
+    await waitForBackupCompletion();
+  } catch (err) {
+    els.backupStatus.textContent = err.message || "Backup failed.";
+  } finally {
+    els.createBackup.disabled = false;
+  }
+}
+
+async function waitForBackupCompletion() {
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const data = await api("/api/admin/backups");
+    renderBackupProgress(data.progress, data.running);
+    if (data.running) {
+      els.backupStatus.textContent = "Backing up the database...";
+      continue;
+    }
+    fillBackupSettings(data.settings || {});
+    renderBackups(data.backups || []);
+    if (data.lastResult && !data.lastResult.ok) {
+      throw new Error(data.lastResult.error || "Backup failed.");
+    }
+    els.backupStatus.textContent = "Backup completed.";
+    return;
+  }
+}
+
+function renderBackupProgress(progress, running) {
+  if (!running || !progress) {
+    els.backupProgress.classList.add("hidden");
+    els.backupProgress.removeAttribute("aria-valuenow");
+    return;
+  }
+
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const phase = String(progress.phase || "preparing").replace(/_/g, " ");
+  const current = progress.current ? ` - ${progress.current}` : "";
+  els.backupProgress.classList.remove("hidden");
+  els.backupProgress.setAttribute("aria-valuenow", String(percent));
+  els.backupProgressFill.style.setProperty("--progress", `${percent}%`);
+  els.backupProgressText.textContent = `${phase.charAt(0).toUpperCase()}${phase.slice(1)}${current} (${percent.toFixed(percent % 1 ? 1 : 0)}%)`;
+  const elapsed = Number(progress.elapsedSeconds) || 0;
+  const hasEta = progress.etaSeconds !== null && progress.etaSeconds !== undefined;
+  const eta = Number(progress.etaSeconds);
+  els.backupProgressEta.textContent = hasEta && Number.isFinite(eta)
+    ? `Elapsed ${formatDuration(elapsed)} - ETA ${formatDuration(eta)}`
+    : `Elapsed ${formatDuration(elapsed)} - calculating ETA...`;
+}
+
+function renderBackups(backups) {
+  els.backupList.innerHTML = "";
+  if (backups.length === 0) {
+    els.backupList.innerHTML = '<p class="status">No backups in this directory.</p>';
+    return;
+  }
+  backups.forEach((backup) => {
+    const card = document.createElement("section");
+    card.className = "library-manager-card";
+    card.innerHTML = `
+      <div class="library-manager-heading">
+        <div>
+          <h3>${escapeHtml(backup.filename)}</h3>
+          <div class="backup-card-meta">${escapeHtml(new Date(backup.createdAt).toLocaleString())} - ${formatBytes(backup.size)}</div>
+        </div>
+        <button class="secondary-button compact-button restore-backup" type="button">Restore</button>
+      </div>
+    `;
+    card.querySelector(".restore-backup").addEventListener("click", () => restoreBackup(backup));
+    els.backupList.appendChild(card);
+  });
+}
+
+async function restoreBackup(backup) {
+  if (!window.confirm(`Restore ${backup.filename}? This will completely replace the current database and restart Media Baker.`)) return;
+  els.backupStatus.textContent = "Restoring the database...";
+  els.backupList.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  try {
+    await api(`/api/admin/backups/${encodeURIComponent(backup.filename)}/restore`, state.token, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true })
+    });
+    els.backupStatus.textContent = "Restore complete. Media Baker is restarting...";
+    setTimeout(() => window.location.reload(), 3500);
+  } catch (err) {
+    els.backupStatus.textContent = err.message || "Restore failed.";
+    els.backupList.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+  }
+}
+
+async function openBackupFolderPicker() {
+  els.backupFolderPicker.classList.remove("hidden");
+  await loadBackupFolderPicker(els.backupDirectory.value.trim());
+}
+
+function closeBackupFolderPicker() {
+  els.backupFolderPicker.classList.add("hidden");
+}
+
+async function loadBackupFolderPicker(pathValue) {
+  els.backupFolderPath.textContent = "Loading...";
+  els.backupFolderList.innerHTML = "";
+  els.backupFolderRoots.innerHTML = "";
+  els.backupFolderParent.disabled = true;
+  els.selectBackupFolder.disabled = true;
+  try {
+    const params = new URLSearchParams();
+    if (pathValue) params.set("path", pathValue);
+    const data = await api(`/api/admin/backup-folders${params.toString() ? `?${params}` : ""}`);
+    backupFolderPickerPath = data.path || "";
+    els.backupFolderPath.textContent = data.error
+      ? `${data.attemptedPath || pathValue} - ${data.error}`
+      : backupFolderPickerPath;
+    els.backupFolderParent.disabled = !data.parent;
+    els.backupFolderParent.dataset.path = data.parent || "";
+    els.selectBackupFolder.disabled = !backupFolderPickerPath;
+    (data.roots || []).forEach((root) => {
+      const button = document.createElement("button");
+      button.className = "secondary-button compact-button";
+      button.type = "button";
+      button.textContent = root.name;
+      button.addEventListener("click", () => loadBackupFolderPicker(root.path));
+      els.backupFolderRoots.appendChild(button);
+    });
+    if (data.error) {
+      els.backupFolderList.innerHTML = '<p class="status">Choose an available root above.</p>';
+    } else if (!(data.directories || []).length) {
+      els.backupFolderList.innerHTML = '<p class="status">No child folders.</p>';
+    }
+    (data.directories || []).forEach((directory) => {
+      const button = document.createElement("button");
+      button.className = "folder-row";
+      button.type = "button";
+      button.innerHTML = `<span>${escapeHtml(directory.name)}</span><small>${escapeHtml(directory.path)}</small>`;
+      button.addEventListener("click", () => loadBackupFolderPicker(directory.path));
+      els.backupFolderList.appendChild(button);
+    });
+  } catch (err) {
+    els.backupFolderPath.textContent = "Could not open folder.";
+    els.backupFolderList.innerHTML = '<p class="status">This folder could not be read.</p>';
+  }
+}
+
+function selectBackupFolder() {
+  if (!backupFolderPickerPath) return;
+  els.backupDirectory.value = backupFolderPickerPath;
+  closeBackupFolderPicker();
 }
 
 async function loadSettings() {
@@ -2833,24 +3356,67 @@ function renderYtDlpDownloads(downloads) {
   downloads
     .sort((a, b) => Date.parse(b.startedAt || 0) - Date.parse(a.startedAt || 0))
     .forEach((download) => {
-      const row = document.createElement("section");
-      row.className = `download-card download-${download.status}`;
-      const percent = Math.max(0, Math.min(100, Number(download.percent) || 0));
-      row.innerHTML = `
-        <div class="download-heading">
-          <strong title="${escapeHtml(download.filename || download.url)}">${escapeHtml(download.filename || download.url)}</strong>
-          <span>${escapeHtml(download.status)}</span>
-        </div>
-        <div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${percent}%"></span></div>
-        <div class="download-meta">
-          <span>${escapeHtml(`${percent.toFixed(percent % 1 ? 1 : 0)}%`)}</span>
-          <span>${escapeHtml(download.speed || "")}</span>
-          <span>${escapeHtml(download.eta ? `ETA ${download.eta}` : "")}</span>
-        </div>
-        <p class="status">${escapeHtml(download.error || download.message || "")}</p>
-      `;
-      els.downloadList.appendChild(row);
+      els.downloadList.appendChild(download.isPlaylist
+        ? playlistDownloadView(download)
+        : downloadItemView(download));
     });
+}
+
+function playlistDownloadView(download) {
+  const group = document.createElement("section");
+  group.className = `download-group download-${download.status}`;
+  const percent = boundedPercent(download.percent);
+  const completed = (download.items || []).filter((item) => ["complete", "skipped"].includes(item.status)).length;
+  group.innerHTML = `
+    <div class="download-heading">
+      <strong title="${escapeHtml(download.playlistTitle || download.title || download.url)}">${escapeHtml(download.playlistTitle || download.title || download.url)}</strong>
+      <span>${escapeHtml(download.status)}</span>
+    </div>
+    <div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${percent}%"></span></div>
+    <div class="download-meta">
+      <span>${escapeHtml(`${percentLabel(percent)} overall`)}</span>
+      <span>${escapeHtml(`${completed} / ${(download.items || []).length} items`)}</span>
+      <span>${escapeHtml(download.eta ? `Current ETA ${download.eta}` : "")}</span>
+    </div>
+    <p class="status">${escapeHtml(download.error || download.message || "")}</p>
+    <div class="playlist-download-items"></div>
+  `;
+  const itemList = group.querySelector(".playlist-download-items");
+  (download.items || [])
+    .sort((a, b) => (a.index || 0) - (b.index || 0))
+    .forEach((item) => itemList.appendChild(downloadItemView(item, { child: true })));
+  return group;
+}
+
+function downloadItemView(download, options = {}) {
+  const row = document.createElement("section");
+  row.className = `${options.child ? "playlist-download-item" : "download-card"} download-${download.status}`;
+  const percent = boundedPercent(download.percent);
+  const title = options.child
+    ? `${String(download.index || 0).padStart(2, "0")} - ${download.title || download.filename || "Playlist item"}`
+    : download.title || download.filename || download.url;
+  row.innerHTML = `
+    <div class="download-heading">
+      <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
+      <span>${escapeHtml(download.status)}</span>
+    </div>
+    <div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${percent}%"></span></div>
+    <div class="download-meta">
+      <span>${escapeHtml(percentLabel(percent))}</span>
+      <span>${escapeHtml(download.speed || "")}</span>
+      <span>${escapeHtml(download.eta ? `ETA ${download.eta}` : "")}</span>
+    </div>
+    <p class="status">${escapeHtml(download.error || download.message || "")}</p>
+  `;
+  return row;
+}
+
+function boundedPercent(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
+}
+
+function percentLabel(value) {
+  return `${value.toFixed(value % 1 ? 1 : 0)}%`;
 }
 
 async function deleteAccount(account) {
@@ -3109,8 +3675,9 @@ function canViewLibraryAdmin() {
 function libraryManagerCard(library) {
   const cardElement = document.createElement("section");
   cardElement.className = "library-manager-card";
-  cardElement.draggable = hasPermission("canManageLibraries");
+  cardElement.draggable = hasPermission("canManageLibraries") && !library.managed;
   cardElement.dataset.libraryKey = library.key;
+  cardElement.dataset.managed = library.managed ? "true" : "false";
   cardElement.innerHTML = `
     <div class="library-manager-heading">
       <div>
@@ -3120,11 +3687,22 @@ function libraryManagerCard(library) {
       <div class="library-card-actions">
         ${hasPermission("canCreateShareLinks") ? '<button class="secondary-button compact-button create-share" type="button">Create share URL</button>' : ""}
         ${hasPermission("canReindex") ? '<button class="secondary-button compact-button reindex-library" type="button">Re-index</button>' : ""}
-        ${hasPermission("canManageLibraries") ? '<button class="secondary-button compact-button delete-library" type="button">Remove</button>' : ""}
+        ${hasPermission("canManageLibraries") && !library.managed ? '<button class="secondary-button compact-button delete-library" type="button">Remove</button>' : ""}
       </div>
     </div>
+    ${hasPermission("canManageLibraries") && !library.managed ? `
+      <label class="library-progress-toggle">
+        <input class="track-library-progress" type="checkbox" ${library.trackProgress === false ? "" : "checked"}>
+        Store playback progress
+      </label>
+    ` : ""}
     <div class="share-list"></div>
   `;
+
+  const progressToggle = cardElement.querySelector(".track-library-progress");
+  if (progressToggle) {
+    progressToggle.addEventListener("change", () => updateLibraryProgress(library, progressToggle));
+  }
 
   const shareButton = cardElement.querySelector(".create-share");
   if (shareButton) {
@@ -3202,6 +3780,7 @@ async function moveLibraryCard(sourceKey, targetKey, clientY) {
 
 async function saveLibraryOrder() {
   const keys = Array.from(els.libraryManagerList.querySelectorAll(".library-manager-card"))
+    .filter((cardElement) => cardElement.dataset.managed !== "true")
     .map((cardElement) => cardElement.dataset.libraryKey)
     .filter(Boolean);
 
@@ -3267,10 +3846,12 @@ async function addLibrary(event) {
       body: JSON.stringify({
         title: els.libraryNameInput.value.trim(),
         type: els.libraryTypeSelect.value,
-        path: els.libraryPathInput.value.trim()
+        path: els.libraryPathInput.value.trim(),
+        trackProgress: els.libraryTrackProgress.checked
       })
     });
     els.libraryForm.reset();
+    els.libraryTrackProgress.checked = true;
     await loadLibraryManager();
     await loadHome();
     els.libraryManagerStatus.textContent = "Library added. Re-index running in the background.";
@@ -3278,6 +3859,27 @@ async function addLibrary(event) {
     els.libraryManagerStatus.textContent = "Failed to add library.";
   } finally {
     els.addLibraryButton.disabled = false;
+  }
+}
+
+async function updateLibraryProgress(library, toggle) {
+  toggle.disabled = true;
+  els.libraryManagerStatus.textContent = "Saving playback progress setting...";
+  try {
+    const result = await api(`/api/libraries/${encodeURIComponent(library.key)}`, state.token, {
+      method: "PUT",
+      body: JSON.stringify({ trackProgress: toggle.checked })
+    });
+    library.trackProgress = result.library.trackProgress;
+    els.libraryManagerStatus.textContent = result.library.trackProgress
+      ? "Playback progress enabled."
+      : "Playback progress disabled.";
+    await refreshOnDeckRow({ force: true }).catch(() => {});
+  } catch (err) {
+    toggle.checked = library.trackProgress !== false;
+    els.libraryManagerStatus.textContent = "Failed to save playback progress setting.";
+  } finally {
+    toggle.disabled = false;
   }
 }
 
@@ -3304,12 +3906,14 @@ async function loadFolderPicker(pathValue) {
     }
     const data = await api(`/api/admin/folders${params.toString() ? `?${params.toString()}` : ""}`);
     folderPickerPath = data.path || "";
-    els.folderPickerPath.textContent = folderPickerPath;
+    els.folderPickerPath.textContent = data.error
+      ? `${data.attemptedPath || pathValue} - ${data.error}`
+      : folderPickerPath;
     els.folderPickerParent.disabled = !data.parent;
     els.folderPickerParent.dataset.path = data.parent || "";
     els.selectFolderPath.disabled = !folderPickerPath;
     renderFolderRoots(data.roots || []);
-    renderFolderList(data.directories || []);
+    renderFolderList(data.directories || [], data.error);
   } catch (err) {
     els.folderPickerPath.textContent = "Could not open folder.";
     els.folderPickerList.innerHTML = '<p class="status">This folder could not be read.</p>';
@@ -3317,10 +3921,6 @@ async function loadFolderPicker(pathValue) {
 }
 
 function renderFolderRoots(roots) {
-  if (roots.length <= 1) {
-    return;
-  }
-
   roots.forEach((root) => {
     const button = document.createElement("button");
     button.className = "secondary-button compact-button";
@@ -3331,7 +3931,11 @@ function renderFolderRoots(roots) {
   });
 }
 
-function renderFolderList(directories) {
+function renderFolderList(directories, error = null) {
+  if (error) {
+    els.folderPickerList.innerHTML = '<p class="status">Choose an available root above.</p>';
+    return;
+  }
   if (directories.length === 0) {
     els.folderPickerList.innerHTML = '<p class="status">No child folders.</p>';
     return;
@@ -3470,16 +4074,22 @@ async function loadNextLibraryPage() {
       sort: view.sort || "alpha",
       metadata: view.metadataFilter || "all"
     });
+    if (view.folder) {
+      params.set("folder", view.folder);
+    }
     const data = await api(`/api/catalog/libraries/${encodeURIComponent(view.key)}/items?${params.toString()}`);
     if (state.libraryView !== view || requestId !== view.requestId) {
       return;
     }
 
+    view.supportsMetadataMatching = data.supportsMetadataMatching !== false;
+    view.grid.closest(".library-results").querySelector(".library-filter-control")
+      .classList.toggle("hidden", !view.supportsMetadataMatching || !hasPermission("canManageMetadata"));
     view.total = data.total;
     view.offset = data.nextOffset;
     view.hasMore = data.hasMore;
     view.title = data.title || view.title;
-    view.heading.textContent = view.title;
+    view.heading.textContent = view.folder ? catalogFolderName(view.folder) : view.title;
     view.subtitle.textContent = `${data.total} items`;
     data.items.forEach((item) => view.grid.appendChild(card(item)));
 
@@ -3538,6 +4148,26 @@ function episodeItem(mediaType, show, episode) {
   };
 }
 
+function trackItem(mediaType, artist, album, track) {
+  return {
+    id: track.id,
+    mediaType,
+    category: libraryTitle(mediaType),
+    itemType: "track",
+    title: track.title || track.filename,
+    subtitle: `${artist.name} - ${album.name}`,
+    artistId: artist.id,
+    artistName: artist.name,
+    albumId: album.id,
+    albumName: album.name,
+    disc: track.disc,
+    track: track.track,
+    filePath: track.filePath,
+    posterUrl: album.posterUrl || null,
+    searchText: `${artist.name} ${album.name} ${track.title || ""}`
+  };
+}
+
 function isEpisodeItem(item) {
   return item && item.showId && item.season !== undefined;
 }
@@ -3548,6 +4178,14 @@ function isShowCard(item) {
       || item.kind === "show"
       || item.type === "show"
       || (item.showId && item.id === item.showId && item.season === undefined && item.episode === undefined && !item.filePath));
+}
+
+function isArtistCard(item) {
+  return Boolean(item) && (item.itemType === "artist" || item.kind === "artist" || item.type === "artist");
+}
+
+function isAlbumCard(item) {
+  return Boolean(item) && (item.itemType === "album" || item.kind === "album" || item.type === "album");
 }
 
 function tvBasePath(mediaType) {
@@ -3709,6 +4347,7 @@ function openMetadataMatchModal(target) {
   els.metadataSearchTitle.value = "";
   els.metadataSearchYear.value = "";
   els.metadataProviderId.value = "";
+  els.metadataProviderId.placeholder = target && target.itemType === "track" ? "MusicBrainz release ID" : "TMDb ID";
   els.metadataCandidateSelect.innerHTML = "";
   els.metadataCandidateOverview.textContent = "";
   els.metadataMatchStatus.textContent = "";
@@ -3841,7 +4480,8 @@ function metadataTargetFromItem(item) {
   return item ? {
     mediaType: item.mediaType,
     id: item.id,
-    title: item.title
+    title: item.title,
+    itemType: item.itemType
   } : null;
 }
 
@@ -3877,7 +4517,34 @@ function setPosterImage(element, url) {
 }
 
 function imageUrlForItem(item) {
-  return item && (item.thumbnailUrl || item.posterUrl) || null;
+  return item && (item.collageUrl || item.thumbnailUrl || item.posterUrl) || null;
+}
+
+function showImageViewer(url, title) {
+  els.imageViewerImage.src = url;
+  els.imageViewerImage.alt = title || "Image preview";
+  els.imageViewer.classList.remove("hidden");
+  els.imageViewer.setAttribute("aria-hidden", "false");
+  document.body.classList.add("image-viewer-open");
+}
+
+function hideImageViewer() {
+  els.imageViewer.classList.add("hidden");
+  els.imageViewer.setAttribute("aria-hidden", "true");
+  els.imageViewerImage.removeAttribute("src");
+  els.imageViewerImage.alt = "";
+  document.body.classList.remove("image-viewer-open");
+}
+
+function catalogFolderName(folder) {
+  const parts = String(folder || "").split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || "Images";
+}
+
+function parentFolderPath(folder) {
+  const parts = String(folder || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
 }
 
 function thumbnailUrlForEpisode(mediaType, id) {
@@ -3937,11 +4604,17 @@ function canAccessLiveTv() {
 function updateDetailsAdminControls() {
   const signedIn = Boolean(state.user);
   const canManageMetadata = hasPermission("canManageMetadata");
-  els.editPoster.classList.toggle("hidden", !canManageMetadata);
-  els.pregenerateHls.classList.toggle("hidden", !isAdminMode());
-  els.rematchMetadata.classList.toggle("hidden", !canManageMetadata);
-  els.markWatched.classList.toggle("hidden", !signedIn);
-  els.removeOnDeck.classList.toggle("hidden", !signedIn || !(state.selected && state.selected.progress && state.selected.progress.status === "in_progress" && Number(state.selected.progress.positionSeconds) > 0));
+  const image = Boolean(state.selected && state.selected.itemType === "image");
+  els.editPoster.classList.toggle("hidden", image || !canManageMetadata);
+  els.pregenerateHls.classList.toggle("hidden", image || !isAdminMode());
+  els.rematchMetadata.classList.toggle("hidden", image || !canManageMetadata);
+  els.markWatched.classList.toggle("hidden", image || !signedIn);
+  els.removeOnDeck.classList.toggle("hidden", image || !signedIn || !(state.selected && state.selected.progress && state.selected.progress.status === "in_progress" && Number(state.selected.progress.positionSeconds) > 0));
+  els.playStream.classList.toggle("hidden", image);
+  els.copyUrl.textContent = image ? "Copy image URL" : "Copy URL";
+  for (const select of [els.audioSelect, els.qualitySelect, els.subtitleSelect]) {
+    select.closest("label").classList.toggle("hidden", image);
+  }
 }
 
 function updatePlaybackControls() {
@@ -4053,6 +4726,9 @@ function selectedAudioOption() {
 }
 
 function selectedAudioChannels() {
+  if (state.selected && state.selected.itemType === "track") {
+    return "preserve";
+  }
   return els.audioChannelsLabel.classList.contains("hidden")
     ? "preserve"
     : els.audioChannelsSelect.value;
@@ -4218,7 +4894,7 @@ async function copyStreamUrl() {
     return;
   }
 
-  const resumeSeconds = await selectedResumeSeconds("copy");
+  const resumeSeconds = state.selected.itemType === "image" ? 0 : await selectedResumeSeconds("copy");
   if (resumeSeconds === null) {
     return;
   }
@@ -4282,9 +4958,17 @@ async function playStream() {
   await openWebPlayer(url, {
     category: state.selected.category || "",
     title: state.selected.title || "Playback",
+    audioOnly: state.selected.itemType === "track",
+    audioMetadata: state.selected.itemType === "track" ? {
+      title: state.selected.title,
+      artist: state.selected.artistName,
+      album: state.selected.albumName,
+      artwork: state.selected.posterUrl || state.selected.thumbnailUrl || null
+    } : null,
     resumeSeconds,
     errorMessage: "Playback failed. Try pre-generating HLS or check the stream logs.",
     fallbackUrl: fallbackWebPlayerUrl(),
+    autoAdvance: Boolean(state.options && state.options.nextItem),
     hlsOptions: {
       lowLatencyMode: false,
       backBufferLength: 90
@@ -4296,25 +4980,35 @@ async function openWebPlayer(url, options = {}) {
   closePlayer();
   const resumeSeconds = Math.max(0, Number(options.resumeSeconds) || 0);
   const fallbackUrl = options.fallbackUrl ? options.fallbackUrl.toString() : "";
+  const audioOnly = Boolean(options.audioOnly);
   let fallbackStarted = false;
   els.playerCategory.textContent = options.category || "";
   els.playerTitle.textContent = options.title || "Playback";
-  els.playerStatus.textContent = "Preparing stream...";
+  setPlayerStatus("Preparing stream...");
   els.playerOverlay.classList.toggle("live-player", Boolean(options.live));
-  els.playerOverlay.classList.remove("hidden");
-  els.playerOverlay.setAttribute("aria-hidden", "false");
+  els.playerOverlay.classList.toggle("hidden", audioOnly);
+  els.playerOverlay.setAttribute("aria-hidden", audioOnly ? "true" : "false");
+  if (audioOnly) {
+    showMusicPlayer(options.audioMetadata || {}, Boolean(options.autoAdvance));
+  }
 
   const video = els.webPlayer;
-  video.controls = true;
+  video.controls = false;
   video.autoplay = true;
   video.playsInline = true;
+  video.dataset.autoAdvance = options.autoAdvance ? "true" : "false";
+  els.videoPlaybackSurface.classList.toggle("audio-only", audioOnly);
+  updateVideoPlayerControls();
+  updateVideoPictureInPictureControl();
 
   const startFallback = () => {
     if (!fallbackUrl || fallbackStarted) {
       return false;
     }
     fallbackStarted = true;
-    els.playerStatus.textContent = "The requested stream failed. Playing the fallback stream.";
+    video.dataset.autoAdvance = "false";
+    els.musicNext.disabled = true;
+    setPlayerStatus("The requested stream failed. Playing the fallback stream.");
     return true;
   };
 
@@ -4331,24 +5025,24 @@ async function openWebPlayer(url, options = {}) {
         if (startFallback()) {
           video.src = fallbackUrl;
           video.play().catch(() => {
-            els.playerStatus.textContent = "The fallback stream could not be played.";
+            setPlayerStatus("The fallback stream could not be played.");
           });
           return;
         }
-        els.playerStatus.textContent = fallbackStarted
+        setPlayerStatus(fallbackStarted
           ? "The fallback stream could not be played."
-          : options.errorMessage || "Playback failed.";
+          : options.errorMessage || "Playback failed.");
       };
       video.addEventListener("error", nativePlayerErrorHandler);
       video.src = url.toString();
       await seekNativeVideo(video, resumeSeconds);
       await video.play();
-      els.playerStatus.textContent = "";
+      setPlayerStatus("");
       return;
     }
 
     if (!hlsJsSupported) {
-      els.playerStatus.textContent = "This browser cannot play HLS.";
+      setPlayerStatus("This browser cannot play HLS.");
       return;
     }
 
@@ -4372,13 +5066,13 @@ async function openWebPlayer(url, options = {}) {
         if (!isFallback && options.live && liveRecoveryAttempts < 3) {
           if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
             liveRecoveryAttempts += 1;
-            els.playerStatus.textContent = "Reconnecting live stream...";
+            setPlayerStatus("Reconnecting live stream...");
             player.startLoad(-1);
             return;
           }
           if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
             liveRecoveryAttempts += 1;
-            els.playerStatus.textContent = "Recovering live playback...";
+            setPlayerStatus("Recovering live playback...");
             player.recoverMediaError();
             return;
           }
@@ -4391,14 +5085,14 @@ async function openWebPlayer(url, options = {}) {
           startHls(fallbackUrl, true);
           return;
         }
-        els.playerStatus.textContent = isFallback
+        setPlayerStatus(isFallback
           ? "The fallback stream could not be played."
-          : options.errorMessage || "Playback failed.";
+          : options.errorMessage || "Playback failed.");
       });
       player.on(window.Hls.Events.FRAG_BUFFERED, () => {
         liveRecoveryAttempts = 0;
         if (!isFallback) {
-          els.playerStatus.textContent = "";
+          setPlayerStatus("");
         }
       });
       player.on(window.Hls.Events.MANIFEST_PARSED, async () => {
@@ -4408,10 +5102,10 @@ async function openWebPlayer(url, options = {}) {
           }
           await video.play();
           if (!isFallback) {
-            els.playerStatus.textContent = "";
+            setPlayerStatus("");
           }
         } catch (err) {
-          els.playerStatus.textContent = "Press play to start playback.";
+          setPlayerStatus("Press play to start playback.");
         }
       });
       player.loadSource(source);
@@ -4422,16 +5116,19 @@ async function openWebPlayer(url, options = {}) {
     if (startFallback()) {
       video.src = fallbackUrl;
       video.play().catch(() => {
-        els.playerStatus.textContent = "The fallback stream could not be played.";
+        setPlayerStatus("The fallback stream could not be played.");
       });
     } else {
-      els.playerStatus.textContent = options.errorMessage || "Playback failed to start.";
+      setPlayerStatus(options.errorMessage || "Playback failed to start.");
     }
   }
 }
 
 function closePlayer() {
   stopOnDeckPolling();
+  exitVideoPictureInPicture();
+  clearTimeout(videoControlsHideTimer);
+  videoControlsHideTimer = null;
   if (hlsPlayer) {
     hlsPlayer.destroy();
     hlsPlayer = null;
@@ -4443,6 +5140,10 @@ function closePlayer() {
       nativePlayerErrorHandler = null;
     }
     els.webPlayer.pause();
+    if (els.videoPlaybackSurface.parentElement !== els.videoPlayerSlot) {
+      els.videoPlayerSlot.appendChild(els.videoPlaybackSurface);
+    }
+    els.webPlayer.dataset.autoAdvance = "false";
     els.webPlayer.removeAttribute("src");
     els.webPlayer.load();
   }
@@ -4450,7 +5151,441 @@ function closePlayer() {
   els.playerOverlay.classList.add("hidden");
   els.playerOverlay.classList.remove("live-player");
   els.playerOverlay.setAttribute("aria-hidden", "true");
-  els.playerStatus.textContent = "";
+  els.musicPlayer.classList.add("hidden");
+  els.musicPlayer.setAttribute("aria-hidden", "true");
+  els.videoMiniPlayer.classList.add("hidden");
+  els.videoMiniPlayer.setAttribute("aria-hidden", "true");
+  setPlayerStatus("");
+}
+
+function minimizeVideoPlayback() {
+  if (els.playerOverlay.classList.contains("hidden") || els.videoPlaybackSurface.parentElement !== els.videoPlayerSlot) {
+    return;
+  }
+  els.videoMiniCategory.textContent = els.playerCategory.textContent;
+  els.videoMiniTitle.textContent = els.playerTitle.textContent;
+  els.videoMiniPlayer.classList.remove("hidden");
+  els.videoMiniPlayer.setAttribute("aria-hidden", "false");
+  moveActiveWebPlayer(els.videoMiniPlayerSlot);
+  els.playerOverlay.classList.add("hidden");
+  els.playerOverlay.setAttribute("aria-hidden", "true");
+  restoreVideoPlayerPosition();
+}
+
+function restoreVideoPlayback() {
+  if (els.videoMiniPlayer.classList.contains("hidden")) {
+    return;
+  }
+  els.playerOverlay.classList.remove("hidden");
+  els.playerOverlay.setAttribute("aria-hidden", "false");
+  moveActiveWebPlayer(els.videoPlayerSlot);
+  els.videoMiniPlayer.classList.add("hidden");
+  els.videoMiniPlayer.setAttribute("aria-hidden", "true");
+}
+
+function moveActiveWebPlayer(target) {
+  const wasPlaying = !els.webPlayer.paused;
+  target.appendChild(els.videoPlaybackSurface);
+  if (wasPlaying && els.webPlayer.paused) {
+    els.webPlayer.play().catch(() => setPlayerStatus("Press play to continue playback."));
+  }
+}
+
+function toggleVideoPlayback() {
+  if (els.videoPlaybackSurface.classList.contains("audio-only")) {
+    return;
+  }
+  if (els.webPlayer.paused) {
+    els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be resumed."));
+  } else {
+    els.webPlayer.pause();
+  }
+}
+
+function seekVideoPlayback() {
+  const duration = Number(els.webPlayer.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return;
+  }
+  els.webPlayer.currentTime = duration * (Number(els.videoSeek.value) || 0) / 1000;
+  els.videoCurrentTime.textContent = formatMediaTime(els.webPlayer.currentTime);
+}
+
+function updateVideoVolume() {
+  els.webPlayer.muted = false;
+  els.webPlayer.volume = Math.max(0, Math.min(1, Number(els.videoVolume.value) || 0));
+}
+
+function toggleVideoMute() {
+  els.webPlayer.muted = !els.webPlayer.muted;
+}
+
+function updateVideoPlayerControls() {
+  const duration = Number(els.webPlayer.duration);
+  const currentTime = Number(els.webPlayer.currentTime) || 0;
+  const paused = els.webPlayer.paused;
+  const muted = els.webPlayer.muted || els.webPlayer.volume === 0;
+  els.videoPlayPause.innerHTML = paused ? "&#9654;" : "&#10074;&#10074;";
+  els.videoPlayPause.title = paused ? "Play" : "Pause";
+  els.videoPlayPause.setAttribute("aria-label", paused ? "Play" : "Pause");
+  els.videoMute.innerHTML = muted ? "&#128263;" : "&#128266;";
+  els.videoMute.title = muted ? "Unmute" : "Mute";
+  els.videoMute.setAttribute("aria-label", muted ? "Unmute" : "Mute");
+  els.videoVolume.value = String(els.webPlayer.volume);
+  els.videoCurrentTime.textContent = formatMediaTime(currentTime);
+  els.videoDuration.textContent = formatMediaTime(duration);
+  if (!videoSeeking) {
+    els.videoSeek.value = Number.isFinite(duration) && duration > 0
+      ? String(Math.round(currentTime / duration * 1000))
+      : "0";
+  }
+  if (paused) {
+    showVideoControls(false);
+  } else if (!videoControlsHideTimer && !els.videoPlaybackSurface.classList.contains("controls-hidden")) {
+    scheduleVideoControlsHide();
+  }
+}
+
+function toggleVideoPictureInPicture() {
+  const video = els.webPlayer;
+  try {
+    if (document.pictureInPictureElement === video && typeof document.exitPictureInPicture === "function") {
+      handlePictureInPictureResult(document.exitPictureInPicture());
+      return;
+    }
+    if (video.webkitPresentationMode === "picture-in-picture" && typeof video.webkitSetPresentationMode === "function") {
+      video.webkitSetPresentationMode("inline");
+      return;
+    }
+    if (typeof video.requestPictureInPicture === "function" && document.pictureInPictureEnabled !== false) {
+      handlePictureInPictureResult(video.requestPictureInPicture());
+      return;
+    }
+    if (typeof video.webkitSetPresentationMode === "function"
+      && typeof video.webkitSupportsPresentationMode === "function"
+      && video.webkitSupportsPresentationMode("picture-in-picture")) {
+      video.webkitSetPresentationMode("picture-in-picture");
+      return;
+    }
+  } catch (err) {
+    setPlayerStatus("Picture in Picture is unavailable for this video.");
+    return;
+  }
+  setPlayerStatus("Picture in Picture is unavailable in this browser.");
+}
+
+function handlePictureInPictureResult(result) {
+  if (result && typeof result.catch === "function") {
+    result.catch(() => setPlayerStatus("Picture in Picture is unavailable for this video."));
+  }
+}
+
+function exitVideoPictureInPicture() {
+  const video = els.webPlayer;
+  try {
+    if (document.pictureInPictureElement === video && typeof document.exitPictureInPicture === "function") {
+      document.exitPictureInPicture().catch(() => {});
+    } else if (video.webkitPresentationMode === "picture-in-picture" && typeof video.webkitSetPresentationMode === "function") {
+      video.webkitSetPresentationMode("inline");
+    }
+  } catch (err) {
+    // Closing playback should continue even if the browser already dismissed PiP.
+  }
+}
+
+function updateVideoPictureInPictureControl() {
+  const video = els.webPlayer;
+  const active = document.pictureInPictureElement === video || video.webkitPresentationMode === "picture-in-picture";
+  const standardSupported = typeof video.requestPictureInPicture === "function" && document.pictureInPictureEnabled !== false;
+  let webkitSupported = false;
+  try {
+    webkitSupported = typeof video.webkitSupportsPresentationMode === "function"
+      && video.webkitSupportsPresentationMode("picture-in-picture");
+  } catch (err) {
+    webkitSupported = false;
+  }
+  els.videoPictureInPicture.disabled = !active && !standardSupported && !webkitSupported;
+  els.videoPictureInPicture.title = active ? "Exit Picture in Picture" : "Picture in Picture";
+  els.videoPictureInPicture.setAttribute("aria-label", active ? "Exit Picture in Picture" : "Picture in Picture");
+}
+
+function showVideoControls(scheduleHide = true) {
+  clearTimeout(videoControlsHideTimer);
+  videoControlsHideTimer = null;
+  els.videoPlaybackSurface.classList.remove("controls-hidden");
+  if (scheduleHide && !els.webPlayer.paused) {
+    scheduleVideoControlsHide();
+  }
+}
+
+function scheduleVideoControlsHide() {
+  clearTimeout(videoControlsHideTimer);
+  if (els.webPlayer.paused || videoSeeking) {
+    return;
+  }
+  videoControlsHideTimer = window.setTimeout(() => {
+    videoControlsHideTimer = null;
+    if (els.videoControls.matches(":hover")) {
+      scheduleVideoControlsHide();
+      return;
+    }
+    els.videoPlaybackSurface.classList.add("controls-hidden");
+  }, 3000);
+}
+
+function toggleVideoFullscreen() {
+  const video = els.webPlayer;
+  const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+  if (video.webkitDisplayingFullscreen && typeof video.webkitExitFullscreen === "function") {
+    video.webkitExitFullscreen();
+    return;
+  }
+  if (fullscreenElement) {
+    const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
+    if (typeof exitFullscreen === "function") {
+      handleFullscreenResult(exitFullscreen.call(document));
+    }
+    return;
+  }
+
+  try {
+    if (typeof els.videoPlaybackSurface.requestFullscreen === "function") {
+      handleFullscreenResult(els.videoPlaybackSurface.requestFullscreen());
+      return;
+    }
+    if (typeof video.webkitEnterFullscreen === "function" && video.webkitSupportsFullscreen !== false) {
+      video.webkitEnterFullscreen();
+      return;
+    }
+    if (typeof els.videoPlaybackSurface.webkitRequestFullscreen === "function") {
+      handleFullscreenResult(els.videoPlaybackSurface.webkitRequestFullscreen());
+      return;
+    }
+  } catch (err) {
+    setPlayerStatus("Fullscreen is unavailable in this browser.");
+    return;
+  }
+  setPlayerStatus("Fullscreen is unavailable in this browser.");
+}
+
+function handleFullscreenResult(result) {
+  if (result && typeof result.catch === "function") {
+    result.catch(() => setPlayerStatus("Fullscreen is unavailable in this browser."));
+  }
+}
+
+function updateVideoFullscreenControl() {
+  const fullscreen = document.fullscreenElement === els.videoPlaybackSurface
+    || document.webkitFullscreenElement === els.videoPlaybackSurface
+    || Boolean(els.webPlayer.webkitDisplayingFullscreen);
+  els.videoFullscreen.title = fullscreen ? "Exit fullscreen" : "Fullscreen";
+  els.videoFullscreen.setAttribute("aria-label", fullscreen ? "Exit fullscreen" : "Fullscreen");
+  showVideoControls();
+}
+
+function setPlayerStatus(message) {
+  const text = String(message || "");
+  els.playerStatus.textContent = text;
+  els.musicPlayerStatus.textContent = text;
+  els.videoMiniStatus.textContent = text;
+}
+
+function showMusicPlayer(metadata, hasNext) {
+  els.musicPlayerArtist.textContent = metadata.artist || "Unknown Artist";
+  els.musicPlayerTitle.textContent = metadata.title || "Untitled";
+  els.musicPlayerAlbum.textContent = metadata.album || "Unknown Album";
+  els.musicPlayerCover.classList.remove("with-image");
+  els.musicPlayerCover.style.removeProperty("--poster-image");
+  els.musicPlayerCover.textContent = initials(metadata.album || metadata.title || "Music");
+  if (metadata.artwork) {
+    setPosterImage(els.musicPlayerCover, metadata.artwork);
+  }
+  els.musicNext.disabled = !hasNext;
+  els.musicPlayer.classList.remove("hidden");
+  els.musicPlayer.setAttribute("aria-hidden", "false");
+  restoreMusicPlayerPosition();
+  updateMusicPlayerControls();
+}
+
+function toggleMusicPlayback() {
+  if (els.webPlayer.paused) {
+    els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be resumed."));
+  } else {
+    els.webPlayer.pause();
+  }
+}
+
+function seekMusicPlayback() {
+  const duration = Number(els.webPlayer.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return;
+  }
+  els.webPlayer.currentTime = duration * (Number(els.musicSeek.value) || 0) / 1000;
+  els.musicCurrentTime.textContent = formatMediaTime(els.webPlayer.currentTime);
+}
+
+function updateMusicVolume() {
+  els.webPlayer.muted = false;
+  els.webPlayer.volume = Math.max(0, Math.min(1, Number(els.musicVolume.value) || 0));
+}
+
+function toggleMusicMute() {
+  els.webPlayer.muted = !els.webPlayer.muted;
+}
+
+function updateMusicPlayerControls() {
+  const duration = Number(els.webPlayer.duration);
+  const currentTime = Number(els.webPlayer.currentTime) || 0;
+  els.musicPlayPause.textContent = els.webPlayer.paused ? "Play" : "Pause";
+  els.musicMute.textContent = els.webPlayer.muted ? "Unmute" : "Mute";
+  els.musicVolume.value = String(els.webPlayer.volume);
+  els.musicCurrentTime.textContent = formatMediaTime(currentTime);
+  els.musicDuration.textContent = formatMediaTime(Number.isFinite(duration) ? duration : 0);
+  if (!musicSeeking) {
+    els.musicSeek.value = Number.isFinite(duration) && duration > 0
+      ? String(Math.round(currentTime / duration * 1000))
+      : "0";
+  }
+}
+
+function formatMediaTime(value) {
+  const seconds = Math.max(0, Math.floor(Number(value) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function startMusicPlayerDrag(event) {
+  startFloatingPlayerDrag(event, els.musicPlayer, els.musicPlayerDrag, "musicPlayerPosition");
+}
+
+function moveMusicPlayer(event) {
+  moveFloatingPlayer(event);
+}
+
+function stopMusicPlayerDrag(event) {
+  stopFloatingPlayerDrag(event);
+}
+
+function startVideoPlayerDrag(event) {
+  startFloatingPlayerDrag(event, els.videoMiniPlayer, els.videoMiniPlayerDrag, "videoPlayerPosition");
+}
+
+function startFloatingPlayerDrag(event, element, handle, storageKey) {
+  if (window.innerWidth <= 760 || event.button !== 0 || event.target.closest("button, input")) {
+    return;
+  }
+  const rect = element.getBoundingClientRect();
+  floatingPlayerDrag = {
+    pointerId: event.pointerId,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    element,
+    handle,
+    storageKey
+  };
+  element.style.right = "auto";
+  element.style.bottom = "auto";
+  element.style.left = `${rect.left}px`;
+  element.style.top = `${rect.top}px`;
+  handle.setPointerCapture(event.pointerId);
+}
+
+function moveFloatingPlayer(event) {
+  if (!floatingPlayerDrag || event.pointerId !== floatingPlayerDrag.pointerId) {
+    return;
+  }
+  const { element, offsetX, offsetY } = floatingPlayerDrag;
+  const left = Math.max(8, Math.min(event.clientX - offsetX, window.innerWidth - element.offsetWidth - 8));
+  const top = Math.max(8, Math.min(event.clientY - offsetY, window.innerHeight - element.offsetHeight - 8));
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+}
+
+function stopFloatingPlayerDrag(event) {
+  if (!floatingPlayerDrag || event.pointerId !== floatingPlayerDrag.pointerId) {
+    return;
+  }
+  const { element, handle, storageKey } = floatingPlayerDrag;
+  floatingPlayerDrag = null;
+  try {
+    handle.releasePointerCapture(event.pointerId);
+  } catch (err) {
+    // The browser may release capture before pointercancel is delivered.
+  }
+  sessionStorage.setItem(storageKey, JSON.stringify({
+    left: Number.parseFloat(element.style.left) || 0,
+    top: Number.parseFloat(element.style.top) || 0
+  }));
+}
+
+function restoreMusicPlayerPosition() {
+  restoreFloatingPlayerPosition(els.musicPlayer, "musicPlayerPosition");
+}
+
+function restoreVideoPlayerPosition() {
+  restoreFloatingPlayerPosition(els.videoMiniPlayer, "videoPlayerPosition");
+}
+
+function restoreFloatingPlayerPosition(element, storageKey) {
+  if (window.innerWidth <= 760) {
+    return;
+  }
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(storageKey) || "null");
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      element.style.right = "auto";
+      element.style.bottom = "auto";
+      element.style.left = `${saved.left}px`;
+      element.style.top = `${saved.top}px`;
+    }
+  } catch (err) {
+    sessionStorage.removeItem(storageKey);
+  }
+  requestAnimationFrame(() => clampFloatingPlayerToViewport(element));
+}
+
+function clampFloatingPlayerToViewport(element) {
+  if (window.innerWidth <= 760 || element.classList.contains("hidden") || !element.style.left) {
+    return;
+  }
+  const rect = element.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - rect.height - 8));
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+}
+
+function clampFloatingPlayersToViewport() {
+  clampFloatingPlayerToViewport(els.musicPlayer);
+  clampFloatingPlayerToViewport(els.videoMiniPlayer);
+}
+
+async function handleWebPlayerEnded() {
+  stopOnDeckPolling();
+  const nextItem = els.webPlayer.dataset.autoAdvance === "true" && state.options && state.options.nextItem;
+  if (!nextItem || autoAdvanceInFlight) {
+    return;
+  }
+
+  autoAdvanceInFlight = true;
+  try {
+    const currentArtwork = state.selected && state.selected.itemType === "track"
+      ? state.selected.posterUrl || state.selected.thumbnailUrl || null
+      : null;
+    closePlayer();
+    await openDetails({
+      ...nextItem,
+      category: libraryTitle(nextItem.mediaType),
+      posterUrl: nextItem.posterUrl || currentArtwork
+    });
+    await playStream();
+  } finally {
+    autoAdvanceInFlight = false;
+  }
 }
 
 async function selectedResumeSeconds(action) {
@@ -4520,6 +5655,12 @@ function selectedStreamUrl(options = {}) {
   if (!playbackToken) {
     els.copyStatus.textContent = "Stream options are still loading.";
     return null;
+  }
+
+  if (state.selected.itemType === "image") {
+    const imageUrl = new URL(`/api/streams/${state.selected.mediaType}/${state.selected.id}/image`, window.location.origin);
+    imageUrl.searchParams.set("playbackToken", playbackToken);
+    return imageUrl;
   }
 
   const url = new URL(`/api/streams/${state.selected.mediaType}/${state.selected.id}/master.m3u8`, window.location.origin);
@@ -4661,6 +5802,7 @@ function removeOnDeckCard(item) {
 function closeDetails() {
   els.detailsPanel.classList.remove("open");
   els.detailsPanel.setAttribute("aria-hidden", "true");
+  hideImageViewer();
   closePosterEditor();
   hideManualCopyUrl();
 }

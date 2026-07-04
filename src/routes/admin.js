@@ -6,7 +6,7 @@ const { httpError } = require("../utils/httpErrors");
 const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, iptv, updates }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, iptv, updates }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -302,6 +302,53 @@ module.exports = function createAdminRoutes({ accountService, appSettings, confi
     }
   });
 
+  router.get("/backups", requirePermission("canManageBackups"), async (req, res, next) => {
+    try {
+      res.json(await backups.status());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/backups/settings", requirePermission("canManageBackups"), async (req, res, next) => {
+    try {
+      const settings = await backups.saveSettings(req.body && req.body.settings || req.body || {});
+      res.json({ settings, backups: await backups.list(settings.directory) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/backups", requirePermission("canManageBackups"), async (req, res, next) => {
+    try {
+      res.status(202).json(backups.startCreate("manual"));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/backups/:filename/restore", requirePermission("canManageBackups"), async (req, res, next) => {
+    try {
+      if (!req.body || req.body.confirm !== true) {
+        next(httpError(400, "Restore confirmation is required"));
+        return;
+      }
+      const result = await backups.restore(req.params.filename);
+      res.json({ restore: result, restarting: true });
+      setTimeout(() => process.exit(0), 1500).unref();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/backup-folders", requirePermission("canManageBackups"), async (req, res, next) => {
+    try {
+      res.json(await listFolders(req.query.path));
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post("/reindex", requirePermission("canReindex"), async (req, res, next) => {
     try {
       const status = indexScanScheduler
@@ -321,19 +368,36 @@ module.exports = function createAdminRoutes({ accountService, appSettings, confi
 };
 
 async function listFolders(requestedPath) {
-  const currentPath = path.resolve(String(requestedPath || process.cwd()));
-  const stat = await fs.stat(currentPath).catch((err) => {
-    if (err.code === "ENOENT") {
-      throw httpError(404, "Folder not found");
+  const attemptedPath = path.resolve(String(requestedPath || process.cwd()));
+  const defaultRoot = path.parse(process.cwd()).root;
+  let stat;
+  try {
+    stat = await fs.stat(attemptedPath);
+  } catch (err) {
+    if (!["ENOENT", "EACCES", "EPERM"].includes(err.code)) {
+      throw err;
     }
-    if (err.code === "EACCES" || err.code === "EPERM") {
-      throw httpError(403, "Folder access denied");
-    }
-    throw err;
-  });
-  if (!stat.isDirectory()) {
-    throw httpError(400, "Path is not a folder");
+    return {
+      path: "",
+      attemptedPath,
+      parent: null,
+      roots: await listRoots(defaultRoot),
+      directories: [],
+      error: err.code === "ENOENT" ? "Folder not found" : "Folder access denied"
+    };
   }
+  if (!stat.isDirectory()) {
+    return {
+      path: "",
+      attemptedPath,
+      parent: null,
+      roots: await listRoots(defaultRoot),
+      directories: [],
+      error: "Path is not a folder"
+    };
+  }
+
+  const currentPath = attemptedPath;
 
   const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch((err) => {
     if (err.code === "EACCES" || err.code === "EPERM") {
@@ -352,6 +416,7 @@ async function listFolders(requestedPath) {
 
   return {
     path: currentPath,
+    attemptedPath: currentPath,
     parent: currentPath === root ? null : path.dirname(currentPath),
     roots: await listRoots(root),
     directories
@@ -387,7 +452,7 @@ function startBackgroundStandaloneReindex(mediaIndex, metadata) {
   mediaIndex.reindex()
     .then(() => {
       if (metadata) {
-        metadata.startBackgroundPreload(mediaIndex);
+        metadata.startBackgroundPreload(mediaIndex, { retryMissing: true });
       }
     })
     .catch((err) => {
@@ -405,7 +470,7 @@ function startBackgroundStandaloneReindex(mediaIndex, metadata) {
 
 async function findDuplicateFiles(mediaIndex, metadata, limit) {
   const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 200, 1000));
-  const files = indexedMediaFiles(mediaIndex);
+  const files = indexedMediaFiles(await mediaIndex.snapshot());
   if (!metadata || !metadata.getCachedForMediaItems || files.length === 0) {
     return { scanned: files.length, matched: 0, groups: [] };
   }
@@ -468,9 +533,12 @@ async function findDuplicateFiles(mediaIndex, metadata, limit) {
   };
 }
 
-function indexedMediaFiles(mediaIndex) {
-  return (mediaIndex.index.libraries || []).flatMap((library) => {
-    const collection = mediaIndex.index[library.key];
+function indexedMediaFiles(index) {
+  return (index.libraries || []).flatMap((library) => {
+    const collection = index[library.key];
+    if (library.type === "music" || library.type === "images") {
+      return [];
+    }
     if (library.type === "movies") {
       return (collection && collection.items || []).map((movie) => ({
         ...movie,

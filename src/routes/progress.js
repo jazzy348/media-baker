@@ -28,6 +28,10 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
   router.get("/:mediaType/:id", async (req, res, next) => {
     try {
       assertMediaAccess(req, req.params.mediaType);
+      if (!tracksProgress(mediaIndex, req.params.mediaType)) {
+        res.json(emptyProgress(req.params.mediaType, req.params.id));
+        return;
+      }
       res.json(await progress.get(progressUserId(req), req.params.mediaType, req.params.id));
     } catch (err) {
       next(err);
@@ -37,6 +41,7 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
   router.post("/:mediaType/:id/watched", async (req, res, next) => {
     try {
       requireAuthenticatedUser(req);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const record = await progress.markWatched(progressUserId(req), req.params.mediaType, mediaFile.id, req.body && req.body.durationSeconds);
       res.json({
@@ -51,6 +56,7 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
   router.post("/:mediaType/:id/remove", async (req, res, next) => {
     try {
       requireAuthenticatedUser(req);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const record = await progress.markRemoved(progressUserId(req), req.params.mediaType, mediaFile.id);
       res.json({
@@ -65,6 +71,7 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
   router.post("/:mediaType/:id/unwatched", async (req, res, next) => {
     try {
       requireAuthenticatedUser(req);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const record = await progress.markUnwatched(progressUserId(req), req.params.mediaType, mediaFile.id);
       res.json({
@@ -92,6 +99,31 @@ function requireAuthenticatedUser(req) {
   if (!req.user) {
     throw httpError(403, "User access required");
   }
+}
+
+function tracksProgress(mediaIndex, mediaType) {
+  const library = mediaIndex.libraryForKey(mediaType);
+  return Boolean(library && library.trackProgress !== false);
+}
+
+function requireProgressTracking(mediaIndex, mediaType) {
+  if (!tracksProgress(mediaIndex, mediaType)) {
+    throw httpError(409, "Playback progress is disabled for this library");
+  }
+}
+
+function emptyProgress(mediaType, mediaId) {
+  return {
+    mediaType,
+    mediaId,
+    status: "none",
+    positionSeconds: 0,
+    durationSeconds: 0,
+    percent: 0,
+    resumeSeconds: 0,
+    updatedAt: null,
+    watchedAt: null
+  };
 }
 
 function progressUserId(req) {

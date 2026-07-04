@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
-const { SUBTITLE_EXTENSIONS, normalizeAudioPreference } = require("../utils/mediaParsers");
+const { SUBTITLE_EXTENSIONS, isAudioFile, normalizeAudioPreference } = require("../utils/mediaParsers");
 const { normalizeQualityPreference, qualityProfileForProbe } = require("./qualityProfiles");
 const logger = require("../utils/logger");
 
@@ -26,19 +26,21 @@ class HlsService {
     const playlistPath = path.join(cacheDir, "master.m3u8");
     const manifestPath = path.join(cacheDir, "stream.json");
 
+    if (this.activeSetups.has(cacheKey)) {
+      logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey}`);
+      await this.activeSetups.get(cacheKey);
+      return this.result(cacheKey, cacheDir, playlistPath);
+    }
+
     if (await this.isUsableCache(manifestPath)) {
       logger.info(`[hls] cache hit cacheKey=${cacheKey} playlist="${playlistPath}"`);
       return this.result(cacheKey, cacheDir, playlistPath);
     }
 
-    if (!this.activeSetups.has(cacheKey)) {
-      logger.info(`[hls] cache miss cacheKey=${cacheKey}; starting ffmpeg setup`);
-      const setup = this.startHls(mediaFile.filePath, normalizedOptions, cacheDir, playlistPath)
-        .finally(() => this.activeSetups.delete(cacheKey));
-      this.activeSetups.set(cacheKey, setup);
-    } else {
-      logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey}`);
-    }
+    logger.info(`[hls] cache miss cacheKey=${cacheKey}; starting ffmpeg setup`);
+    const setup = this.startHls(mediaFile, normalizedOptions, cacheDir, playlistPath)
+      .finally(() => this.activeSetups.delete(cacheKey));
+    this.activeSetups.set(cacheKey, setup);
 
     await this.activeSetups.get(cacheKey);
     return this.result(cacheKey, cacheDir, playlistPath);
@@ -175,10 +177,11 @@ class HlsService {
     return crypto
       .createHash("sha1")
       .update(JSON.stringify({
-        hlsFormatVersion: "synthetic-vod-h264-compat-v11",
+        hlsFormatVersion: "synthetic-vod-h264-compat-v15-audio-progressive",
         filePath,
         size: stat.size,
         mtimeMs: stat.mtimeMs,
+        segmentSeconds: this.config.hls.segmentSeconds,
         options
       }))
       .digest("hex")
@@ -199,15 +202,18 @@ class HlsService {
     }
   }
 
-  async startHls(inputPath, options, cacheDir, playlistPath) {
+  async startHls(mediaFile, options, cacheDir, playlistPath) {
+    const inputPath = mediaFile.filePath;
     logger.info(`[hls] start input="${inputPath}" cacheDir="${cacheDir}" playlist="${playlistPath}" audio=${options.audio} audioChannels=${options.audioChannels} quality=${options.quality}`);
     await this.cleanupExpired();
     await fs.rm(cacheDir, { recursive: true, force: true });
     await fs.mkdir(cacheDir, { recursive: true });
 
-    const probe = await this.ffmpeg.probe(inputPath);
+    const probe = await this.ffmpeg.probe(inputPath, isAudioFile(inputPath)
+      ? { analyzeduration: "1M", probesize: "1M" }
+      : {});
     const hlsBuild = await this.buildFfmpegArgs(inputPath, probe, options, playlistPath);
-    const manifest = buildManifest(probe, this.config.hls.segmentSeconds, {
+    const manifest = buildManifest(probe, hlsBuild.segmentSeconds || this.config.hls.segmentSeconds, {
       independentSegments: hlsBuild.independentSegments,
       splitByTime: hlsBuild.splitByTime
     });
@@ -244,6 +250,26 @@ class HlsService {
     });
 
     logger.info(`[hls] transcode launched input="${inputPath}" playlist="${playlistPath}"`);
+    if (hlsBuild.audioOnly) {
+      try {
+        await waitForInitialHlsSegment(
+          path.join(cacheDir, "segment_00000.ts"),
+          exitPromise,
+          this.config.hls.segmentWaitTimeoutSeconds * 1000
+        );
+        logger.info(`[hls] audio HLS started input="${inputPath}" playlist="${playlistPath}"`);
+      } catch (err) {
+        logger.error(`[hls] audio ffmpeg failed before playback input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
+        await fs.rm(cacheDir, { recursive: true, force: true });
+        throw err;
+      }
+      exitPromise.catch(async (err) => {
+        logger.error(`[hls] audio ffmpeg failed after launch input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
+        await fs.rm(cacheDir, { recursive: true, force: true });
+      });
+      return;
+    }
+
     exitPromise.catch(async (err) => {
       logger.error(`[hls] ffmpeg failed after launch input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
       await fs.rm(cacheDir, { recursive: true, force: true });
@@ -251,9 +277,12 @@ class HlsService {
   }
 
   async buildFfmpegArgs(inputPath, probe, options, playlistPath) {
-    const videoStream = selectVideoStream(probe);
+    const videoStream = isAudioFile(inputPath) ? null : selectVideoStream(probe);
     const audioStream = selectAudioStream(probe, options.audio);
     const audioMode = selectAudioMode(audioStream, options.audioChannels);
+    if (!videoStream) {
+      return this.buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath);
+    }
     const subtitle = await this.selectSubtitle(inputPath, probe, options, audioStream);
     const qualityProfile = qualityProfileForProbe(probe, options.quality);
     const scaleFilter = transcodeScaleFilter(videoStream, qualityProfile.targetHeight);
@@ -402,6 +431,41 @@ class HlsService {
       independentSegments: hlsFlags.includes("independent_segments"),
       splitByTime: hlsFlags.includes("split_by_time")
     };
+  }
+
+  buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath) {
+    const audioCodec = audioStream.codec_name === "aac" && !audioMode.forceTranscode ? "copy" : "aac";
+    const segmentSeconds = Math.min(2, this.config.hls.segmentSeconds);
+    const args = [
+      "-hide_banner", "-y",
+      "-analyzeduration", "1M",
+      "-probesize", "1M",
+      "-i", inputPath,
+      "-map", `0:${audioStream.index}`,
+      "-vn", "-sn",
+      "-c:a", audioCodec
+    ];
+    if (audioCodec === "aac") {
+      if (audioMode.filter) {
+        args.push("-af", audioMode.filter);
+      }
+      if (audioMode.channels) {
+        args.push("-ac", String(audioMode.channels));
+      }
+      const channels = audioMode.channels || Number.parseInt(audioStream.channels, 10) || 2;
+      args.push("-b:a", channels > 2 ? "512k" : "320k");
+    }
+    args.push(
+      "-muxdelay", "0",
+      "-f", "hls",
+      "-hls_time", String(segmentSeconds),
+      "-hls_list_size", "0",
+      "-hls_flags", "split_by_time+temp_file",
+      "-hls_segment_filename", path.join(path.dirname(playlistPath), "segment_%05d.ts"),
+      playlistPath
+    );
+    logger.full(`[hls] selected audio-only audio=${streamLog(audioStream)} audioMode=${audioMode.id} audioCodec=${audioCodec} segmentSeconds=${segmentSeconds}`);
+    return { args, independentSegments: false, splitByTime: true, segmentSeconds, audioOnly: true };
   }
 
   async selectSubtitle(inputPath, probe, options, audioStream) {
@@ -616,7 +680,10 @@ function subtitleLog(subtitle) {
 }
 
 function selectVideoStream(probe) {
-  return (probe.streams || []).find((stream) => stream.codec_type === "video");
+  return (probe.streams || []).find((stream) => (
+    stream.codec_type === "video"
+    && Number(stream.disposition && stream.disposition.attached_pic) !== 1
+  ));
 }
 
 function isCompatibleH264Stream(stream) {
@@ -1130,6 +1197,33 @@ function escapeSubtitleFilterPath(filePath) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForInitialHlsSegment(filePath, exitPromise, timeoutMs) {
+  const exitState = { settled: false, error: null };
+  exitPromise.then(
+    () => { exitState.settled = true; },
+    (err) => {
+      exitState.settled = true;
+      exitState.error = err;
+    }
+  );
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await fileExists(filePath)) {
+      return;
+    }
+    if (exitState.error) {
+      throw exitState.error;
+    }
+    if (exitState.settled) {
+      throw new Error("FFmpeg exited without publishing an audio HLS segment");
+    }
+    await delay(50);
+  }
+
+  throw new Error("Timed out waiting for the first audio HLS segment");
 }
 
 async function fileExists(filePath) {

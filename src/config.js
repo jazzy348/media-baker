@@ -23,6 +23,12 @@ function loadConfigFile() {
     if (err.code === "ENOENT") {
       throw new Error(`Missing config file: ${configFilePath}. Copy config.example.json to config.json, then create the first admin account from the WebUI.`);
     }
+    if (err.code === "EISDIR") {
+      throw new Error(`Expected a config file at ${configFilePath}, but found a directory. Ensure the host config.json exists as a file before starting Docker.`);
+    }
+    if (err instanceof SyntaxError) {
+      throw new Error(`Invalid JSON in config file: ${configFilePath}. ${err.message}`);
+    }
 
     throw err;
   }
@@ -58,6 +64,13 @@ module.exports = {
     enabled: !fileConfig.indexScan || fileConfig.indexScan.enabled !== false,
     intervalSeconds: intValue(fileConfig.indexScan && fileConfig.indexScan.intervalSeconds, 15 * 60),
     runOnStartup: fileConfig.indexScan && typeof fileConfig.indexScan.runOnStartup === "boolean" ? fileConfig.indexScan.runOnStartup : false
+  },
+  backup: {
+    enabled: Boolean(fileConfig.backup && fileConfig.backup.enabled),
+    directory: appPath(fileConfig.backup && fileConfig.backup.directory, "cache/backups"),
+    time: fileConfig.backup && fileConfig.backup.time || "03:00",
+    days: Array.isArray(fileConfig.backup && fileConfig.backup.days) ? fileConfig.backup.days : [0, 1, 2, 3, 4, 5, 6],
+    retentionCount: intValue(fileConfig.backup && fileConfig.backup.retentionCount, 7)
   },
   mysql: mysqlConfig,
   metadata: {
@@ -290,6 +303,7 @@ function normalizeLibraries(value) {
       type,
       rawType,
       threeD: isThreeDLibrary({ ...library, key, type, rawType }),
+      trackProgress: library.trackProgress !== false,
       path: resolvePath(library.path, library.path)
     };
   });
@@ -317,6 +331,12 @@ function normalizeLibraryType(value) {
   if (["movie", "movies", "film", "films"].includes(type)) {
     return "movies";
   }
+  if (["music", "audio", "songs", "albums"].includes(type)) {
+    return "music";
+  }
+  if (["image", "images", "photo", "photos", "pictures"].includes(type)) {
+    return "images";
+  }
   if (/\b3d\b/i.test(type) && /\b(tv|show|shows|series|episodes)\b/i.test(type)) {
     return "tv";
   }
@@ -324,7 +344,7 @@ function normalizeLibraryType(value) {
     return "movies";
   }
 
-  throw new Error(`Unsupported library type: ${value}. Use "tv" or "movies".`);
+  throw new Error(`Unsupported library type: ${value}. Use "tv", "movies", "music", or "images".`);
 }
 
 function isThreeDLibrary(library) {

@@ -2,6 +2,8 @@ const crypto = require("crypto");
 const path = require("path");
 
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm"]);
+const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aif", ".aiff"]);
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif"]);
 const SUBTITLE_EXTENSIONS = [".srt", ".ass", ".ssa", ".vtt"];
 
 function createId(value) {
@@ -10,6 +12,33 @@ function createId(value) {
 
 function isVideoFile(filePath) {
   return VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function isAudioFile(filePath) {
+  return AUDIO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function isImageFile(filePath) {
+  return IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
+function parseMusicFile(libraryPath, filePath) {
+  const relativeParts = path.relative(libraryPath, filePath).split(path.sep).filter(Boolean);
+  const directoryParts = relativeParts.slice(0, -1);
+  const filename = path.basename(filePath, path.extname(filePath));
+  const trackMatch = filename.match(/^\s*(?:(\d{1,2})[-_.])?(\d{1,3})(?:\s*[-_.]\s*|\s+)(.+)$/);
+  const artist = directoryParts.length > 0 ? directoryParts[0] : "Unknown Artist";
+  const albumFolder = directoryParts.length >= 2 ? directoryParts[directoryParts.length - 1] : "Unknown Album";
+  const album = parseMovieFolder(albumFolder);
+
+  return {
+    artist: cleanReleaseName(artist),
+    album: album.title,
+    year: album.year,
+    disc: trackMatch && trackMatch[1] ? Number.parseInt(trackMatch[1], 10) : 1,
+    track: trackMatch ? Number.parseInt(trackMatch[2], 10) : null,
+    title: cleanReleaseName(trackMatch ? trackMatch[3] : filename)
+  };
 }
 
 function parseEpisodeFile(filePath) {
@@ -64,6 +93,14 @@ function normalizeEpisodeMatch(match, pattern) {
 
 function parseMovieFolder(folderName) {
   const normalized = normalizeSeparators(folderName);
+  const leadingYear = normalized.match(/^((?:19|20)\d{2})(?:\s*[-:]\s*|\s+)(.+)$/);
+  if (leadingYear) {
+    return {
+      title: cleanReleaseName(leadingYear[2]),
+      year: Number.parseInt(leadingYear[1], 10)
+    };
+  }
+
   const match = normalized.match(/^(.*?)(?:\s+|\[|\()((?:19|20)\d{2})(?:\)|\]|\s+|$)/);
   const year = match ? match[2] : null;
 
@@ -139,8 +176,11 @@ function normalizeAudioPreference(value, fallback) {
 module.exports = {
   SUBTITLE_EXTENSIONS,
   createId,
+  isAudioFile,
+  isImageFile,
   isVideoFile,
   normalizeAudioPreference,
   parseEpisodeFile,
+  parseMusicFile,
   parseMovieFolder
 };

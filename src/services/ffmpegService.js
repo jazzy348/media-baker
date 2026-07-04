@@ -1,5 +1,6 @@
 const { execFile, spawn } = require("child_process");
 const fs = require("fs/promises");
+const path = require("path");
 const logger = require("../utils/logger");
 
 const VALIDATION_TTL_MS = 60 * 1000;
@@ -69,15 +70,17 @@ class FFmpegService {
     };
   }
 
-  async probe(filePath) {
+  async probe(filePath, options = {}) {
     logger.full(`[ffprobe] probing file="${filePath}"`);
+    const analyzeduration = options.analyzeduration || "100M";
+    const probesize = options.probesize || "100M";
     const args = [
       "-v",
       "error",
       "-analyzeduration",
-      "100M",
+      String(analyzeduration),
       "-probesize",
-      "100M",
+      String(probesize),
       "-print_format",
       "json",
       "-show_format",
@@ -130,13 +133,65 @@ class FFmpegService {
       "-frames:v",
       "1",
       "-vf",
-      `thumbnail,scale=${scaleWidth}:-2`,
-      "-q:v",
-      "4",
+      `thumbnail,scale='min(${scaleWidth},iw)':'min(1024,ih)':force_original_aspect_ratio=decrease`,
+      ...imageEncodingArgs(outputPath, 80),
       outputPath
     ];
 
     logger.full(`[ffmpeg] thumbnail input="${filePath}" output="${outputPath}" seek=${seekSeconds}`);
+    await this.exec(this.ffmpegPath, args);
+  }
+
+  async resizeImage(filePath, outputPath, maxDimension) {
+    const limit = Math.max(1, Number.parseInt(maxDimension, 10) || 1024);
+    const args = [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      "-i", filePath,
+      "-map", "0:v:0",
+      "-frames:v", "1",
+      "-map_metadata", "0",
+      "-vf", `scale='min(${limit},iw)':'min(${limit},ih)':force_original_aspect_ratio=decrease`,
+      ...imageEncodingArgs(outputPath, 82),
+      outputPath
+    ];
+    logger.full(`[ffmpeg] image resize input="${filePath}" output="${outputPath}" max=${limit}`);
+    await this.exec(this.ffmpegPath, args);
+  }
+
+  async createImageCollage(inputPaths, outputPath) {
+    const sources = inputPaths.slice(0, 4);
+    if (sources.length === 0) {
+      throw new Error("At least one image is required to create a collage");
+    }
+
+    const twoColumns = sources.length > 1;
+    const twoRows = sources.length > 2;
+    const tileWidth = twoColumns ? 512 : 1024;
+    const tileHeight = twoRows ? 512 : 1024;
+    const filters = sources.map((_, index) =>
+      `[${index}:v]scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=increase,crop=${tileWidth}:${tileHeight},setsar=1[v${index}]`
+    );
+    if (sources.length === 1) {
+      filters.push("[v0]null[outv]");
+    } else {
+      const layout = sources.map((_, index) => `${index % 2 * tileWidth}_${Math.floor(index / 2) * tileHeight}`).join("|");
+      filters.push(`${sources.map((_, index) => `[v${index}]`).join("")}xstack=inputs=${sources.length}:layout=${layout}:fill=black[outv]`);
+    }
+
+    const args = [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      ...sources.flatMap((filePath) => ["-i", filePath]),
+      "-filter_complex", filters.join(";"),
+      "-map", "[outv]",
+      "-frames:v", "1",
+      ...imageEncodingArgs(outputPath, 82),
+      outputPath
+    ];
+    logger.full(`[ffmpeg] image collage inputs=${sources.length} output="${outputPath}"`);
     await this.exec(this.ffmpegPath, args);
   }
 
@@ -438,6 +493,13 @@ function redactSource(source) {
   } catch (err) {
     return String(source || "");
   }
+}
+
+function imageEncodingArgs(outputPath, quality) {
+  if (path.extname(outputPath).toLowerCase() === ".webp") {
+    return ["-c:v", "libwebp", "-quality", String(quality), "-compression_level", "4"];
+  }
+  return ["-q:v", "3"];
 }
 
 module.exports = { FFmpegService };

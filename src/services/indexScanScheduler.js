@@ -79,17 +79,19 @@ class IndexScanScheduler {
     this.status.lastStartedAt = new Date().toISOString();
     this.status.lastError = null;
 
-    const before = countIndex(this.mediaIndex.index);
+    const before = await this.mediaIndex.counts();
+    before.total = totalCounts(before);
     logger.info(`[index-scan] started reason=${reason} total=${before.total}`);
 
     try {
       await this.mediaIndex.reindex();
-      const after = countIndex(this.mediaIndex.index);
+      const after = await this.mediaIndex.counts();
+      after.total = totalCounts(after);
       logger.info(`[index-scan] complete previousTotal=${before.total} total=${after.total} delta=${after.total - before.total}`);
       this.status.lastFinishedAt = new Date().toISOString();
 
       if (this.metadata && this.metadata.config.enabled && this.metadata.config.preloadOnStartup) {
-        this.metadata.preloadAll(this.mediaIndex).catch((err) => {
+        this.metadata.preloadAll(this.mediaIndex, { retryMissing: reason === "manual" }).catch((err) => {
           logger.error(`[metadata] background preload after scan failed message="${err.message}"`, err);
         });
       }
@@ -132,32 +134,8 @@ class IndexScanScheduler {
   }
 }
 
-function countIndex(index) {
-  const libraries = Array.isArray(index.libraries) ? index.libraries : [];
-  const counts = {};
-  let total = 0;
-
-  for (const library of libraries) {
-    const collection = index[library.key];
-    const count = library.type === "tv"
-      ? countEpisodes(collection)
-      : countMovies(collection);
-    counts[library.key] = count;
-    total += count;
-  }
-
-  return { ...counts, total };
-}
-
-function countEpisodes(collection) {
-  const episodeCount = (collection && collection.shows || []).reduce((count, show) => (
-    count + show.seasons.reduce((seasonCount, season) => seasonCount + season.episodes.length, 0)
-  ), 0);
-  return episodeCount + countMovies(collection);
-}
-
-function countMovies(collection) {
-  return collection && collection.items ? collection.items.length : 0;
+function totalCounts(counts) {
+  return Object.values(counts).reduce((total, count) => total + (Number(count) || 0), 0);
 }
 
 module.exports = { IndexScanScheduler };
