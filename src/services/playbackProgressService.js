@@ -89,11 +89,16 @@ class PlaybackProgressService {
       const storedPosition = current && current.status === STATUS_IN_PROGRESS
         ? Math.max(0, Number(current.positionSeconds) || 0)
         : 0;
+      const segmentStart = Math.max(0, segment.startSeconds);
       session = {
         userId: userId || "global",
         mediaType,
         mediaId,
-        confirmedSeconds: Math.min(storedPosition, Math.max(0, segment.startSeconds)),
+        confirmedSeconds: Math.min(storedPosition, segmentStart),
+        lastSegmentIndex: Number.isFinite(segment.index) ? segment.index : null,
+        initialSeekCandidate: Number.isFinite(segment.index) && segmentStart - storedPosition >= 30
+          ? { index: segment.index, startSeconds: segmentStart }
+          : null,
         lastDeliveryAt: now,
         lastActivityAt: now,
         completionTimer: null,
@@ -106,10 +111,33 @@ class PlaybackProgressService {
     const elapsedSeconds = Math.max(0, (now - session.lastDeliveryAt) / 1000);
     const maximumInterval = Math.max(15, Number(segment.durationSeconds) * 5);
     const clockPosition = session.confirmedSeconds + Math.min(elapsedSeconds, maximumInterval);
-    session.confirmedSeconds = Math.max(
-      session.confirmedSeconds,
-      Math.min(clockPosition, Math.max(0, segment.startSeconds))
-    );
+    const segmentStart = Math.max(0, segment.startSeconds);
+    const minimumSeekSegments = Math.max(4, Math.ceil(30 / Math.max(1, Number(segment.durationSeconds) || 1)));
+    const forwardSegmentJump = Number.isFinite(segment.index)
+      && Number.isFinite(session.lastSegmentIndex)
+      && segment.index - session.lastSegmentIndex >= minimumSeekSegments;
+    const forwardTimeJump = segmentStart - session.confirmedSeconds >= 30;
+    const confirmsInitialSeek = session.initialSeekCandidate
+      && Number.isFinite(segment.index)
+      && segment.index > session.initialSeekCandidate.index
+      && segment.index <= session.initialSeekCandidate.index + 2;
+    if (confirmsInitialSeek) {
+      logger.info(`[progress] confirmed initial seek mediaType=${mediaType} id=${mediaId} to=${Math.floor(session.initialSeekCandidate.startSeconds)}s`);
+      session.confirmedSeconds = Math.max(session.confirmedSeconds, session.initialSeekCandidate.startSeconds);
+      session.initialSeekCandidate = null;
+    } else if (forwardSegmentJump && forwardTimeJump) {
+      logger.info(`[progress] detected forward seek mediaType=${mediaType} id=${mediaId} from=${Math.floor(session.confirmedSeconds)}s to=${Math.floor(segmentStart)}s`);
+      session.confirmedSeconds = segmentStart;
+      session.initialSeekCandidate = null;
+    } else {
+      session.confirmedSeconds = Math.max(
+        session.confirmedSeconds,
+        Math.min(clockPosition, segmentStart)
+      );
+    }
+    if (Number.isFinite(segment.index)) {
+      session.lastSegmentIndex = segment.index;
+    }
     session.lastDeliveryAt = now;
     session.lastActivityAt = now;
     return session.confirmedSeconds;
