@@ -8,6 +8,7 @@ function createAuthMiddleware(accountService, libraryService = null) {
           req.authMode = "share";
           req.authToken = shareToken;
           req.authParamName = "shareToken";
+          req.authFromCookie = req.authCookieType === "share";
           req.shareToken = shareToken;
           req.allowedLibraryKey = share.library.key;
           req.allowedLibrary = share.library;
@@ -29,6 +30,7 @@ function createAuthMiddleware(accountService, libraryService = null) {
           req.user = user;
           req.authToken = sessionToken;
           req.authParamName = "authToken";
+          req.authFromCookie = req.authCookieType === "session";
           req.allowedLibraryKeys = user.permissions.isAdmin ? null : user.permissions.libraries;
           next();
           return;
@@ -105,6 +107,12 @@ function extractSessionToken(req) {
     return req.query.authToken;
   }
 
+  const cookieToken = cookieValue(req, "media_baker_web_session");
+  if (cookieToken) {
+    req.authCookieType = "session";
+    return cookieToken;
+  }
+
   return null;
 }
 
@@ -131,6 +139,55 @@ function extractShareToken(req) {
     return req.query.shareToken;
   }
 
+  const cookieToken = cookieValue(req, "media_baker_web_share");
+  if (cookieToken) {
+    req.authCookieType = "share";
+    return cookieToken;
+  }
+
+  return null;
+}
+
+function establishWebStreamAuthCookie(req, res) {
+  const options = {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: req.secure || req.get("x-forwarded-proto") === "https",
+    path: "/api/web-streams"
+  };
+  if (req.authMode === "share" && req.authToken) {
+    res.cookie("media_baker_web_share", req.authToken, options);
+    res.clearCookie("media_baker_web_session", options);
+    return;
+  }
+  if ((req.authMode === "user" || req.authMode === "admin") && req.authParamName === "authToken" && req.authToken) {
+    res.cookie("media_baker_web_session", req.authToken, options);
+    res.clearCookie("media_baker_web_share", options);
+  }
+}
+
+function clearWebStreamAuthCookies(req, res) {
+  const options = {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: req.secure || req.get("x-forwarded-proto") === "https",
+    path: "/api/web-streams"
+  };
+  res.clearCookie("media_baker_web_session", options);
+  res.clearCookie("media_baker_web_share", options);
+}
+
+function cookieValue(req, name) {
+  const cookies = String(req.get("cookie") || "").split(";");
+  for (const cookie of cookies) {
+    const separator = cookie.indexOf("=");
+    if (separator < 0 || cookie.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(cookie.slice(separator + 1).trim());
+    } catch (err) {
+      return null;
+    }
+  }
   return null;
 }
 
@@ -140,4 +197,9 @@ function unauthorizedError() {
   return err;
 }
 
-module.exports = { createAuthMiddleware, createStreamAuthMiddleware };
+module.exports = {
+  createAuthMiddleware,
+  createStreamAuthMiddleware,
+  establishWebStreamAuthCookie,
+  clearWebStreamAuthCookies
+};

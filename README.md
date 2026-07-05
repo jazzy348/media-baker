@@ -166,7 +166,8 @@ Live TV access is granted per user like a library permission.
 - Browser login returns a persistent session token.
 - API keys inherit the selected user's permissions.
 - Share URLs grant access to one library only and can be revoked.
-- Playback URLs use generated, stream-scoped playback tokens instead of user sessions.
+- Copying playback URLs requires the per-user `Copy playback URLs` permission.
+- Copied links use copy-scoped tokens on `/api/streams`; built-in web playback uses separate tokens on `/api/web-streams` and also requires the originating session, API key, or library share.
 - Admin API routes enforce account permissions; release-update endpoints require a full admin account.
 
 ## Updates

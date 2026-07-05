@@ -252,7 +252,12 @@ function openApiSpec() {
         })
       },
       "/api/catalog/{mediaType}/{id}/options": {
-        get: operation("Catalog", "Fresh stream options", "Probes a file and returns audio, subtitle, and quality choices.", true, {
+        get: operation("Catalog", "Fresh web playback options", "Probes a file, returns audio/subtitle/quality choices and a web-player token, and establishes the HTTP-only web-stream authentication cookie for session or share access.", true, {
+          parameters: [pathParam("mediaType"), pathParam("id")]
+        })
+      },
+      "/api/catalog/{mediaType}/{id}/copy-token": {
+        post: operation("Catalog", "Create copied-link token", "Creates a fresh copy-scoped playback token. Requires the Copy playback URLs account permission.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
@@ -461,7 +466,7 @@ function openApiSpec() {
         })
       },
       "/api/streams/{libraryKey}/{itemId}/master.m3u8": {
-        get: operation("Streams", "Prepare and serve HLS playlist", "Requires a generated playback token. Video and audio-only media are served as HLS. Query options include audio, subtitle, audioChannels, quality, 3d, and t.", true, {
+        get: operation("Streams", "Serve copied-link HLS", "Requires a copy-scoped playback token created by the copy-token endpoint. Video and audio-only media are served as HLS.", true, {
           security: [{ PlaybackToken: [] }],
           parameters: [
             pathParam("libraryKey"),
@@ -488,9 +493,19 @@ function openApiSpec() {
         })
       },
       "/api/streams/hls/{cacheKey}/{filename}": {
-        get: operation("Streams", "Serve HLS segment or playlist", "Requires an HLS-scoped playback token.", true, {
+        get: operation("Streams", "Serve copied-link HLS media", "Requires a copy-scoped HLS token.", true, {
           security: [{ PlaybackToken: [] }],
           parameters: [pathParam("cacheKey"), pathParam("filename")]
+        })
+      },
+      "/api/web-streams/{libraryKey}/{itemId}/master.m3u8": {
+        get: operation("Streams", "Serve authenticated web playback", "Requires a web-scoped playback token plus an authenticated account session, API key, or library-share session. The built-in player uses an HTTP-only cookie so account credentials are absent from its URL.", true, {
+          parameters: [pathParam("libraryKey"), pathParam("itemId"), queryParam("playbackToken")]
+        })
+      },
+      "/api/web-streams/hls/{cacheKey}/{filename}": {
+        get: operation("Streams", "Serve authenticated web HLS media", "Requires the web-scoped HLS token and the same authenticated principal that opened the stream.", true, {
+          parameters: [pathParam("cacheKey"), pathParam("filename"), queryParam("playbackToken")]
         })
       }
     }

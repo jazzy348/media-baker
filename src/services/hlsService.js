@@ -160,7 +160,10 @@ class HlsService {
       index: segmentIndex,
       startSeconds: segmentIndex * Number(manifest.segmentSeconds || this.config.hls.segmentSeconds),
       durationSeconds: segmentDuration(manifest, segmentIndex),
-      mediaDurationSeconds: Number(manifest.duration) || 0
+      mediaDurationSeconds: Number(manifest.duration) || 0,
+      segmentCount: manifest.segmentCount,
+      remainingSegments: manifest.segmentCount - segmentIndex - 1,
+      isFinalSegment: segmentIndex === manifest.segmentCount - 1
     };
   }
 

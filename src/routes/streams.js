@@ -4,12 +4,14 @@ const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const logger = require("../utils/logger");
 
-module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress }) {
+module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress }, options = {}) {
   const router = express.Router();
+  const streamSurface = options.surface === "web" ? "web" : "copy";
 
   router.get("/:mediaType/:id/image", async (req, res, next) => {
     try {
-      if (!isStreamToken(req.playbackTokenPayload, req.params.mediaType, req.params.id)) {
+      if (!isStreamToken(req.playbackTokenPayload, req.params.mediaType, req.params.id, streamSurface)
+        || !canUseWebStream(req, req.params.mediaType, streamSurface)) {
         return next(httpError(401, "Unauthorized"));
       }
       const library = mediaIndex.libraryForKey(req.params.mediaType);
@@ -32,7 +34,8 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
 
   router.get("/hls/:cacheKey/:filename", async (req, res, next) => {
     try {
-      if (!isHlsToken(req.playbackTokenPayload, req.params.cacheKey)) {
+      if (!isHlsToken(req.playbackTokenPayload, req.params.cacheKey, streamSurface)
+        || !canUseWebStream(req, req.playbackTokenPayload.mediaType, streamSurface)) {
         return next(httpError(401, "Unauthorized"));
       }
 
@@ -44,7 +47,12 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       if (path.extname(req.params.filename).toLowerCase() === ".m3u8") {
         const playlist = await hls.getPlaylist(req.params.cacheKey);
         res.type(contentTypeFor(req.params.filename));
-        res.send(rewritePlaylistUrls(playlist, `/api/streams/hls/${req.params.cacheKey}`, req.playbackToken));
+        res.send(rewritePlaylistUrls(
+          playlist,
+          `/api/${streamSurface === "web" ? "web-streams" : "streams"}/hls/${req.params.cacheKey}`,
+          req.playbackToken,
+          streamAuthQuery(req, streamSurface)
+        ));
         return;
       }
 
@@ -96,7 +104,8 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
 
   router.get("/:mediaType/:id/master.m3u8", async (req, res, next) => {
     try {
-      if (!isStreamToken(req.playbackTokenPayload, req.params.mediaType, req.params.id)) {
+      if (!isStreamToken(req.playbackTokenPayload, req.params.mediaType, req.params.id, streamSurface)
+        || !canUseWebStream(req, req.params.mediaType, streamSurface)) {
         return next(httpError(401, "Unauthorized"));
       }
 
@@ -111,9 +120,16 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       });
       logger.info(`[stream] serving playlist cacheKey=${stream.cacheKey} playlist="${stream.playlistPath}"`);
       const playlist = await hls.getPlaylist(stream.cacheKey);
-      const hlsToken = playbackTokens.createHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global");
+      const hlsToken = streamSurface === "web"
+        ? playbackTokens.createWebHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global")
+        : playbackTokens.createCopyHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global");
       res.type(contentTypeFor("master.m3u8"));
-      res.send(rewritePlaylistUrls(playlist, `/api/streams/hls/${stream.cacheKey}`, hlsToken));
+      res.send(rewritePlaylistUrls(
+        playlist,
+        `/api/${streamSurface === "web" ? "web-streams" : "streams"}/hls/${stream.cacheKey}`,
+        hlsToken,
+        streamAuthQuery(req, streamSurface)
+      ));
     } catch (err) {
       next(err);
     }
@@ -133,7 +149,7 @@ function safeUrl(req) {
   return `${url.pathname}${url.search}`;
 }
 
-function rewritePlaylistUrls(playlist, baseUrl, secret) {
+function rewritePlaylistUrls(playlist, baseUrl, secret, authQuery = null) {
   return playlist
     .split(/\r?\n/)
     .map((line) => {
@@ -145,22 +161,38 @@ function rewritePlaylistUrls(playlist, baseUrl, secret) {
         ? line
         : `${baseUrl}/${line}`;
       const separator = url.includes("?") ? "&" : "?";
-      return `${url}${separator}playbackToken=${encodeURIComponent(secret)}`;
+      const playbackUrl = `${url}${separator}playbackToken=${encodeURIComponent(secret)}`;
+      if (!authQuery) return playbackUrl;
+      return `${playbackUrl}&${encodeURIComponent(authQuery.name)}=${encodeURIComponent(authQuery.value)}`;
     })
     .join("\n");
 }
 
-function isStreamToken(payload, mediaType, mediaId) {
+function isStreamToken(payload, mediaType, mediaId, surface) {
   return payload
-    && payload.scope === "stream"
+    && payload.scope === `${surface}-stream`
     && payload.mediaType === mediaType
     && payload.mediaId === mediaId;
 }
 
-function isHlsToken(payload, cacheKey) {
+function isHlsToken(payload, cacheKey, surface) {
   return payload
-    && payload.scope === "hls"
+    && payload.scope === `${surface}-hls`
     && payload.cacheKey === cacheKey;
+}
+
+function canUseWebStream(req, mediaType, surface) {
+  if (surface !== "web") return true;
+  if (!req.authMode || !mediaType) return false;
+  if (req.user && req.playbackTokenPayload.userId !== req.user.id) return false;
+  if (req.allowedLibraryKey) return req.allowedLibraryKey === mediaType;
+  if (Array.isArray(req.allowedLibraryKeys)) return req.allowedLibraryKeys.includes(mediaType);
+  return true;
+}
+
+function streamAuthQuery(req, surface) {
+  if (surface !== "web" || req.authFromCookie || !req.authParamName || !req.authToken) return null;
+  return { name: req.authParamName, value: req.authToken };
 }
 
 function contentTypeFor(filename) {

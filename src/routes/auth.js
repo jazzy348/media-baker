@@ -1,5 +1,6 @@
 const express = require("express");
 const { httpError } = require("../utils/httpErrors");
+const { clearWebStreamAuthCookies } = require("../middleware/auth");
 
 module.exports = function createAuthRoutes({ accountService, config }) {
   const router = express.Router();
@@ -71,6 +72,11 @@ module.exports = function createAuthRoutes({ accountService, config }) {
     } catch (err) {
       next(err);
     }
+  });
+
+  router.post("/logout", (req, res) => {
+    clearWebStreamAuthCookies(req, res);
+    res.json({ ok: true });
   });
 
   return router;

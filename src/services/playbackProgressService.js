@@ -1,6 +1,7 @@
 const STATUS_IN_PROGRESS = "in_progress";
 const STATUS_WATCHED = "watched";
 const STATUS_REMOVED = "removed";
+const logger = require("../utils/logger");
 
 class PlaybackProgressService {
   constructor(config, store) {
@@ -37,16 +38,29 @@ class PlaybackProgressService {
       current,
       segment
     );
+    const tailSegmentsComplete = this.recordTailSegmentDelivery(
+      playbackSessionId,
+      userId,
+      mediaType,
+      mediaId,
+      positionSeconds,
+      durationSeconds,
+      segment
+    );
     if (positionSeconds <= 0 && !current) {
       return null;
     }
     if (current
       && current.status === STATUS_IN_PROGRESS
-      && positionSeconds <= Number(current.positionSeconds || 0)) {
+      && positionSeconds <= Number(current.positionSeconds || 0)
+      && !tailSegmentsComplete) {
+      if (segment.isFinalSegment) {
+        this.scheduleEndOfStreamSettlement(playbackSessionId, userId, mediaType, mediaId, cacheKey, current);
+      }
       return current;
     }
     const threshold = watchedThreshold(this.config);
-    const watched = positionSeconds >= durationSeconds * (1 - threshold);
+    const watched = tailSegmentsComplete || positionSeconds >= durationSeconds * (1 - threshold);
     const nextRecord = {
       ...current,
       userId: userId || "global",
@@ -60,6 +74,9 @@ class PlaybackProgressService {
     };
 
     const saved = await this.store.save(nextRecord);
+    if (!watched && segment.isFinalSegment) {
+      this.scheduleEndOfStreamSettlement(playbackSessionId, userId, mediaType, mediaId, cacheKey, saved);
+    }
     return saved;
   }
 
@@ -73,9 +90,14 @@ class PlaybackProgressService {
         ? Math.max(0, Number(current.positionSeconds) || 0)
         : 0;
       session = {
+        userId: userId || "global",
+        mediaType,
+        mediaId,
         confirmedSeconds: Math.min(storedPosition, Math.max(0, segment.startSeconds)),
         lastDeliveryAt: now,
-        lastActivityAt: now
+        lastActivityAt: now,
+        completionTimer: null,
+        tailSegmentIndexes: new Set()
       };
       this.playbackSessions.set(sessionKey, session);
       return session.confirmedSeconds;
@@ -93,16 +115,74 @@ class PlaybackProgressService {
     return session.confirmedSeconds;
   }
 
+  recordTailSegmentDelivery(playbackSessionId, userId, mediaType, mediaId, positionSeconds, durationSeconds, segment) {
+    if (!Number.isFinite(segment.index)
+      || !Number.isFinite(segment.remainingSegments)
+      || segment.remainingSegments > 2
+      || positionSeconds < durationSeconds * 0.5) {
+      return false;
+    }
+    const session = playbackSessionId
+      ? this.playbackSessions.get(playbackSessionId)
+      : [...this.playbackSessions.values()].find((entry) =>
+        entry.userId === (userId || "global") && entry.mediaType === mediaType && entry.mediaId === mediaId);
+    if (!session) return false;
+    session.tailSegmentIndexes = session.tailSegmentIndexes || new Set();
+    session.tailSegmentIndexes.add(segment.index);
+    return session.tailSegmentIndexes.size >= 2;
+  }
+
   removeExpiredPlaybackSessions(now = Date.now()) {
     const cutoff = now - 24 * 60 * 60 * 1000;
     for (const [key, session] of this.playbackSessions) {
       if (session.lastActivityAt < cutoff) {
+        if (session.completionTimer) clearTimeout(session.completionTimer);
         this.playbackSessions.delete(key);
       }
     }
   }
 
+  scheduleEndOfStreamSettlement(playbackSessionId, userId, mediaType, mediaId, cacheKey, record) {
+    const durationSeconds = Number(record.durationSeconds) || 0;
+    const positionSeconds = Number(record.positionSeconds) || 0;
+    if (durationSeconds <= 0 || positionSeconds < durationSeconds * 0.5) return;
+    const session = playbackSessionId
+      ? this.playbackSessions.get(playbackSessionId)
+      : [...this.playbackSessions.values()].find((entry) =>
+        entry.userId === (userId || "global") && entry.mediaType === mediaType && entry.mediaId === mediaId);
+    if (!session) return;
+    if (session.completionTimer) clearTimeout(session.completionTimer);
+    const remainingMs = Math.max(1000, Math.ceil(durationSeconds - positionSeconds) * 1000);
+    session.completionTimer = setTimeout(() => {
+      session.completionTimer = null;
+      this.settleEndOfStream(userId, mediaType, mediaId, cacheKey, durationSeconds)
+        .catch((err) => logger.error(`[progress] end-of-stream settlement failed mediaType=${mediaType} id=${mediaId} message="${err.message}"`, err));
+    }, remainingMs);
+    session.completionTimer.unref?.();
+  }
+
+  async settleEndOfStream(userId, mediaType, mediaId, cacheKey, durationSeconds) {
+    const current = await this.store.get(userId, mediaType, mediaId);
+    if (!current || current.status !== STATUS_IN_PROGRESS || current.cacheKey !== cacheKey) return current;
+    return this.store.save({
+      ...current,
+      status: STATUS_WATCHED,
+      positionSeconds: durationSeconds,
+      durationSeconds,
+      watchedAt: new Date().toISOString()
+    });
+  }
+
+  clearEndOfStreamSettlements(userId, mediaType, mediaId) {
+    for (const session of this.playbackSessions.values()) {
+      if (session.userId !== (userId || "global") || session.mediaType !== mediaType || session.mediaId !== mediaId) continue;
+      if (session.completionTimer) clearTimeout(session.completionTimer);
+      session.completionTimer = null;
+    }
+  }
+
   async markWatched(userId, mediaType, mediaId, durationSeconds = 0) {
+    this.clearEndOfStreamSettlements(userId, mediaType, mediaId);
     const current = await this.store.get(userId, mediaType, mediaId);
     const duration = Number(durationSeconds) || current && current.durationSeconds || 0;
     return this.store.save({
@@ -119,6 +199,7 @@ class PlaybackProgressService {
   }
 
   async markRemoved(userId, mediaType, mediaId) {
+    this.clearEndOfStreamSettlements(userId, mediaType, mediaId);
     const current = await this.store.get(userId, mediaType, mediaId);
     return this.store.save({
       ...current,
@@ -134,6 +215,7 @@ class PlaybackProgressService {
   }
 
   async markUnwatched(userId, mediaType, mediaId) {
+    this.clearEndOfStreamSettlements(userId, mediaType, mediaId);
     return this.store.save({
       userId: userId || "global",
       mediaType,

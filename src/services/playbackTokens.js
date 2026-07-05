@@ -9,18 +9,37 @@ class PlaybackTokenService {
     this.ttlSeconds = ttlSeconds;
   }
 
-  createStreamToken(mediaType, mediaId, userId = null) {
+  createCopyStreamToken(mediaType, mediaId, userId = null) {
     return this.sign({
-      scope: "stream",
+      scope: "copy-stream",
       mediaType,
       mediaId,
       userId
     });
   }
 
-  createHlsToken(cacheKey, mediaType = null, mediaId = null, userId = null) {
+  createCopyHlsToken(cacheKey, mediaType = null, mediaId = null, userId = null) {
     return this.sign({
-      scope: "hls",
+      scope: "copy-hls",
+      cacheKey,
+      mediaType,
+      mediaId,
+      userId
+    });
+  }
+
+  createWebStreamToken(mediaType, mediaId, userId = null) {
+    return this.sign({
+      scope: "web-stream",
+      mediaType,
+      mediaId,
+      userId
+    });
+  }
+
+  createWebHlsToken(cacheKey, mediaType = null, mediaId = null, userId = null) {
+    return this.sign({
+      scope: "web-hls",
       cacheKey,
       mediaType,
       mediaId,

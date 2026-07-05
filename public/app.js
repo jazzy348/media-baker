@@ -278,6 +278,7 @@ const els = {
   accountPasswordInput: document.getElementById("accountPasswordInput"),
   accountLibrariesSelect: document.getElementById("accountLibrariesSelect"),
   accountIsAdmin: document.getElementById("accountIsAdmin"),
+  accountCanCopyUrls: document.getElementById("accountCanCopyUrls"),
   accountCanShare: document.getElementById("accountCanShare"),
   accountCanLibraries: document.getElementById("accountCanLibraries"),
   accountCanMetadata: document.getElementById("accountCanMetadata"),
@@ -456,6 +457,7 @@ els.brandLink.addEventListener("click", (event) => {
 });
 
 els.lockButton.addEventListener("click", () => {
+  publicApi("/api/auth/logout", { method: "POST" }).catch(() => {});
   hideLiveTvView();
   closeAccountPanel();
   closePlayer();
@@ -2111,6 +2113,7 @@ function editAccount(account) {
   els.accountPasswordInput.placeholder = "Leave blank to keep current password";
   const permissions = account.permissions || {};
   els.accountIsAdmin.checked = Boolean(permissions.isAdmin);
+  els.accountCanCopyUrls.checked = Boolean(permissions.canCopyStreamUrls);
   els.accountCanShare.checked = Boolean(permissions.canCreateShareLinks);
   els.accountCanLibraries.checked = Boolean(permissions.canManageLibraries);
   els.accountCanMetadata.checked = Boolean(permissions.canManageMetadata);
@@ -2136,6 +2139,7 @@ function resetAccountForm() {
   els.accountPasswordInput.value = "";
   els.accountPasswordInput.placeholder = "Required for new accounts";
   els.accountIsAdmin.checked = false;
+  els.accountCanCopyUrls.checked = false;
   els.accountCanShare.checked = false;
   els.accountCanLibraries.checked = false;
   els.accountCanMetadata.checked = false;
@@ -2256,6 +2260,7 @@ function accountPermissionsFromForm() {
     || els.accountCanHistory.checked;
   return {
     isAdmin: els.accountIsAdmin.checked,
+    canCopyStreamUrls: els.accountCanCopyUrls.checked,
     canCreateShareLinks: els.accountCanShare.checked,
     canManageLibraries: els.accountCanLibraries.checked,
     canManageMetadata: els.accountCanMetadata.checked,
@@ -4611,6 +4616,7 @@ function updateDetailsAdminControls() {
   els.markWatched.classList.toggle("hidden", image || !signedIn);
   els.removeOnDeck.classList.toggle("hidden", image || !signedIn || !(state.selected && state.selected.progress && state.selected.progress.status === "in_progress" && Number(state.selected.progress.positionSeconds) > 0));
   els.playStream.classList.toggle("hidden", image);
+  els.copyUrl.classList.toggle("hidden", !hasPermission("canCopyStreamUrls"));
   els.copyUrl.textContent = image ? "Copy image URL" : "Copy URL";
   for (const select of [els.audioSelect, els.qualitySelect, els.subtitleSelect]) {
     select.closest("label").classList.toggle("hidden", image);
@@ -4889,6 +4895,10 @@ async function copyStreamUrl() {
   if (!state.selected) {
     return;
   }
+  if (!hasPermission("canCopyStreamUrls")) {
+    els.copyStatus.textContent = "Your account cannot copy playback URLs.";
+    return;
+  }
   if (!isPlaybackReady()) {
     els.copyStatus.textContent = playbackDisabledMessage();
     return;
@@ -4899,7 +4909,18 @@ async function copyStreamUrl() {
     return;
   }
 
-  const url = selectedStreamUrl({ includeProTv3d: true, resumeSeconds });
+  let copyToken;
+  try {
+    const result = await api(`/api/catalog/${encodeURIComponent(state.selected.mediaType)}/${encodeURIComponent(state.selected.id)}/copy-token`, state.token, {
+      method: "POST"
+    });
+    copyToken = result.playbackToken;
+  } catch (err) {
+    els.copyStatus.textContent = err.message || "Could not create a playback URL.";
+    return;
+  }
+
+  const url = selectedStreamUrl({ surface: "copy", playbackToken: copyToken, includeProTv3d: true, resumeSeconds });
   if (!url) {
     return;
   }
@@ -4950,7 +4971,7 @@ async function playStream() {
     return;
   }
 
-  const url = selectedStreamUrl({ includeProTv3d: false });
+  const url = selectedStreamUrl({ surface: "web", includeProTv3d: false });
   if (!url) {
     return;
   }
@@ -5651,19 +5672,20 @@ function seekNativeVideo(video, resumeSeconds) {
 }
 
 function selectedStreamUrl(options = {}) {
-  const playbackToken = state.options && state.options.playbackToken;
+  const surface = options.surface === "copy" ? "copy" : "web";
+  const playbackToken = options.playbackToken || state.options && state.options.webPlaybackToken;
   if (!playbackToken) {
     els.copyStatus.textContent = "Stream options are still loading.";
     return null;
   }
 
   if (state.selected.itemType === "image") {
-    const imageUrl = new URL(`/api/streams/${state.selected.mediaType}/${state.selected.id}/image`, window.location.origin);
+    const imageUrl = new URL(`/api/${surface === "web" ? "web-streams" : "streams"}/${state.selected.mediaType}/${state.selected.id}/image`, window.location.origin);
     imageUrl.searchParams.set("playbackToken", playbackToken);
     return imageUrl;
   }
 
-  const url = new URL(`/api/streams/${state.selected.mediaType}/${state.selected.id}/master.m3u8`, window.location.origin);
+  const url = new URL(`/api/${surface === "web" ? "web-streams" : "streams"}/${state.selected.mediaType}/${state.selected.id}/master.m3u8`, window.location.origin);
   url.searchParams.set("audio", els.audioSelect.value);
   url.searchParams.set("subtitle", els.subtitleSelect.value);
   url.searchParams.set("audioChannels", selectedAudioChannels());

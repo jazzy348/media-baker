@@ -4,6 +4,7 @@ const { getMediaPlaybackOptions } = require("../services/mediaOptions");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { createId } = require("../utils/mediaParsers");
+const { establishWebStreamAuthCookie } = require("../middleware/auth");
 
 module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, subtitles, playbackTokens }) {
   const router = express.Router();
@@ -240,6 +241,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
       assertMediaAccess(req, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const library = mediaIndex.libraryForKey(req.params.mediaType);
+      establishWebStreamAuthCookie(req, res);
       if (library && library.type === "images") {
         res.json({
           item: itemFromMediaFile(req.params.mediaType, mediaFile),
@@ -247,7 +249,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
           filePath: mediaFile.filePath,
           image: true,
           originalUrl: authenticatedImageUrl(req.params.mediaType, mediaFile.id, authContext(req)),
-          playbackToken: playbackTokens.createStreamToken(req.params.mediaType, mediaFile.id, req.user && req.user.id || "global"),
+          webPlaybackToken: playbackTokens.createWebStreamToken(req.params.mediaType, mediaFile.id, req.user && req.user.id || "global"),
           quality: [{ id: "original", label: "Original image" }],
           audio: [{ id: "none", label: "No audio" }],
           subtitles: [{ id: "none", label: "No subtitles" }]
@@ -262,8 +264,25 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
       res.json({
         item: itemFromMediaFile(req.params.mediaType, mediaFile),
         nextItem: itemFromMediaFile(req.params.mediaType, await mediaIndex.nextPlayable(req.params.mediaType, mediaFile.id)),
-        playbackToken: playbackTokens.createStreamToken(req.params.mediaType, mediaFile.id, req.user && req.user.id || "global"),
+        webPlaybackToken: playbackTokens.createWebStreamToken(req.params.mediaType, mediaFile.id, req.user && req.user.id || "global"),
         ...options
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/:mediaType/:id/copy-token", async (req, res, next) => {
+    try {
+      requireCopyStreamPermission(req);
+      assertMediaAccess(req, req.params.mediaType);
+      const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
+      res.json({
+        playbackToken: playbackTokens.createCopyStreamToken(
+          req.params.mediaType,
+          mediaFile.id,
+          req.user.id
+        )
       });
     } catch (err) {
       next(err);
@@ -1148,6 +1167,13 @@ function requireMetadataManagement(req) {
   const permissions = req.user && req.user.permissions || {};
   if (req.authMode !== "admin" && !permissions.canManageMetadata) {
     throw httpError(403, "Metadata management access required");
+  }
+}
+
+function requireCopyStreamPermission(req) {
+  const permissions = req.user && req.user.permissions || {};
+  if (!req.user || (!permissions.isAdmin && !permissions.canCopyStreamUrls)) {
+    throw httpError(403, "Copy stream URL access required");
   }
 }
 

@@ -11,6 +11,7 @@ const API_KEY_PREFIX = "st_";
 
 const DEFAULT_PERMISSIONS = {
   libraries: [],
+  canCopyStreamUrls: false,
   canCreateShareLinks: false,
   canManageLibraries: false,
   canManageMetadata: false,
@@ -115,6 +116,7 @@ class AccountService {
       permissions: {
         ...DEFAULT_PERMISSIONS,
         isAdmin: true,
+        canCopyStreamUrls: true,
         canCreateShareLinks: true,
         canManageLibraries: true,
         canManageMetadata: true,
@@ -549,6 +551,7 @@ function normalizePermissions(value = {}) {
     return {
       ...DEFAULT_PERMISSIONS,
       isAdmin: true,
+      canCopyStreamUrls: true,
       canCreateShareLinks: true,
       canManageLibraries: true,
       canManageMetadata: true,
@@ -580,6 +583,7 @@ function normalizePermissions(value = {}) {
   return {
     ...DEFAULT_PERMISSIONS,
     libraries: Array.isArray(permissions.libraries) ? permissions.libraries.map(String).filter(Boolean) : [],
+    canCopyStreamUrls: Boolean(permissions.canCopyStreamUrls),
     canCreateShareLinks: Boolean(permissions.canCreateShareLinks),
     canManageLibraries: Boolean(permissions.canManageLibraries),
     canManageMetadata: Boolean(permissions.canManageMetadata),

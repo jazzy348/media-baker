@@ -129,6 +129,12 @@ async function createApp() {
   app.use("/api/docs", createDocsRoutes());
   app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
   app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
+  app.use(
+    "/api/web-streams",
+    createAuthMiddleware(accountService, libraryService),
+    createStreamAuthMiddleware(playbackTokens),
+    createStreamRoutes(app.locals.services, { surface: "web" })
+  );
   app.use(createAuthMiddleware(accountService, libraryService));
 
   app.use("/api/admin", createAdminRoutes(app.locals.services));
@@ -144,7 +150,7 @@ async function createApp() {
     if (shouldServeFallbackStream(req, fallbackStream)) {
       logger.full(`[fallback] serving fallback playlist for missing path method=${req.method} path="${req.originalUrl}"`);
       try {
-        await fallbackStream.serve(req, res, 404);
+        await fallbackStream.serve(req, res, 404, !isWebStreamRequest(req));
       } catch (err) {
         next(err);
       }
@@ -162,7 +168,7 @@ async function createApp() {
     if (shouldServeFallbackStream(req, fallbackStream)) {
       logger.full(`[fallback] serving fallback stream for error status=${err.status || 500} path="${safeUrl(req)}"`);
       try {
-        await fallbackStream.serve(req, res, err.status || 500);
+        await fallbackStream.serve(req, res, err.status || 500, !isWebStreamRequest(req));
       } catch (fallbackErr) {
         next(fallbackErr);
       }
@@ -192,7 +198,11 @@ function shouldServeFallbackStream(req, fallbackStream) {
   return (req.method === "GET" || req.method === "HEAD")
     && fallbackStream
     && fallbackStream.ready
-    && !isBrowserRequest(req);
+    && (isWebStreamRequest(req) || !isBrowserRequest(req));
+}
+
+function isWebStreamRequest(req) {
+  return String(req.originalUrl || "").startsWith("/api/web-streams/");
 }
 
 function isBrowserRequest(req) {

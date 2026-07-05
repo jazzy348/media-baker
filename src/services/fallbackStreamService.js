@@ -101,7 +101,7 @@ class FallbackStreamService {
     }
   }
 
-  async serve(req, res, statusCode = 200) {
+  async serve(req, res, statusCode = 200, includeAuth = true) {
     if (!this.ready) {
       res.status(statusCode).json({ error: "Fallback stream is not available" });
       return;
@@ -117,7 +117,12 @@ class FallbackStreamService {
     res.status(200);
     res.type("application/vnd.apple.mpegurl");
     res.set("Cache-Control", "no-store");
-    res.send(this.rewritePlaylist(playlist, req.path, req.authParamName, req.authToken));
+    res.send(this.rewritePlaylist(
+      playlist,
+      req.path,
+      includeAuth ? req.authParamName : "",
+      includeAuth ? req.authToken : ""
+    ));
   }
 
   async serveSegment(segment, res) {
