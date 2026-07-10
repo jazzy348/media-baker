@@ -1,6 +1,14 @@
 const initialShareToken = new URLSearchParams(window.location.search).get("shareToken") || "";
 const navigation = window.MediaBakerNavigation;
 const apiClient = window.MediaBakerApi;
+const PLAYBACK_PREFERENCES_KEY = "mediaBakerPlaybackPreferences";
+const DEFAULT_PLAYBACK_PREFERENCES = {
+  audioLanguage: "",
+  subtitleLanguage: "",
+  subtitleMode: "none",
+  quality: "original",
+  audioChannels: "stereo"
+};
 
 const state = {
   token: initialShareToken ? "" : localStorage.getItem("streamToken") || "",
@@ -9,6 +17,8 @@ const state = {
   setupMode: false,
   selected: null,
   options: null,
+  playbackPreferences: readLocalPlaybackPreferences(),
+  applyingPlaybackPreferences: false,
   metadataMatchTarget: null,
   homeData: null,
   currentView: "home",
@@ -431,6 +441,7 @@ els.loginForm.addEventListener("submit", async (event) => {
     });
     state.token = result.token;
     state.user = result.user;
+    setPlaybackPreferences(result.user && result.user.preferences);
     applyFeatures(result.features);
     state.shareToken = "";
     state.setupMode = false;
@@ -464,6 +475,7 @@ els.lockButton.addEventListener("click", () => {
   localStorage.removeItem("streamToken");
   state.token = "";
   state.user = null;
+  setPlaybackPreferences(null);
   state.shareToken = "";
   els.usernameInput.value = "";
   els.secretInput.value = "";
@@ -573,7 +585,13 @@ els.randomMode.addEventListener("click", () => loadHome("random"));
 els.editPoster.addEventListener("click", openPosterEditor);
 els.cancelPosterEdit.addEventListener("click", closePosterEditor);
 els.posterForm.addEventListener("submit", savePosterUrl);
-els.audioSelect.addEventListener("change", updateAudioChannelsControl);
+els.audioSelect.addEventListener("change", () => {
+  updateAudioChannelsControl();
+  savePlaybackPreferencesFromControls();
+});
+els.qualitySelect.addEventListener("change", savePlaybackPreferencesFromControls);
+els.audioChannelsSelect.addEventListener("change", savePlaybackPreferencesFromControls);
+els.subtitleSelect.addEventListener("change", savePlaybackPreferencesFromControls);
 els.searchSubtitles.addEventListener("click", searchSubtitles);
 els.addSubtitle.addEventListener("click", addSelectedSubtitle);
 els.proTv3dSelect.addEventListener("change", updateProTv3dStatus);
@@ -753,6 +771,7 @@ async function boot() {
     if (state.token) {
       const me = await api("/api/auth/me");
       state.user = me.user;
+      setPlaybackPreferences(me.user && me.user.preferences);
       applyFeatures(me.features);
     }
     els.loginOverlay.classList.add("hidden");
@@ -767,6 +786,7 @@ async function boot() {
     }
     state.token = "";
     state.user = null;
+    setPlaybackPreferences(null);
     state.shareToken = "";
     updateAdminControls();
     els.loginOverlay.classList.remove("hidden");
@@ -1251,6 +1271,7 @@ async function openDetails(item) {
     fillSelect(els.audioSelect, options.audio);
     fillSelect(els.qualitySelect, options.quality);
     fillSelect(els.subtitleSelect, options.subtitles);
+    applyPlaybackPreferencesToControls(options);
     updateDetailsAdminControls();
     updatePlaybackControls();
     return;
@@ -1301,20 +1322,7 @@ async function openDetails(item) {
   fillSelect(els.audioSelect, options.audio);
   fillSelect(els.qualitySelect, options.quality || [{ id: "original", label: "Original" }]);
   fillSelect(els.subtitleSelect, options.subtitles);
-  els.qualitySelect.value = "original";
-
-  const japanese = options.audio.find((entry) => entry.language === "japanese");
-  if (japanese) {
-    els.audioSelect.value = japanese.id;
-  }
-
-  const englishFull = options.subtitles.find((entry) => entry.language === "english" && !entry.forced && /full|english/i.test(entry.label));
-  const englishAny = options.subtitles.find((entry) => entry.language === "english" && !entry.forced);
-  if (englishFull || englishAny) {
-    els.subtitleSelect.value = (englishFull || englishAny).id;
-  }
-
-  updateAudioChannelsControl();
+  applyPlaybackPreferencesToControls(options);
   updateSubtitleSearchControl();
   updateProTv3dControl();
   updateDetailsAdminControls();
@@ -4744,6 +4752,173 @@ function selectedQuality() {
   return els.qualitySelect.value || "original";
 }
 
+function applyPlaybackPreferencesToControls(options) {
+  const preferences = normalizePlaybackPreferences(state.playbackPreferences);
+  state.applyingPlaybackPreferences = true;
+  try {
+    selectPreferredOption(els.qualitySelect, preferredQualityValue(els.qualitySelect, preferences.quality));
+    selectPreferredOption(els.audioSelect, preferredAudioValue(options.audio || [], preferences.audioLanguage));
+    updateAudioChannelsControl();
+    if (!els.audioChannelsLabel.classList.contains("hidden")) {
+      selectPreferredOption(els.audioChannelsSelect, preferences.audioChannels || "stereo");
+    }
+    selectPreferredOption(els.subtitleSelect, preferredSubtitleValue(options.subtitles || [], preferences));
+  } finally {
+    state.applyingPlaybackPreferences = false;
+  }
+}
+
+function preferredQualityValue(select, quality) {
+  const requested = quality || "original";
+  if (hasSelectValue(select, requested)) {
+    return requested;
+  }
+  return hasSelectValue(select, "original") ? "original" : firstSelectValue(select);
+}
+
+function preferredAudioValue(audioOptions, language) {
+  const playable = audioOptions.filter((option) => option && option.id && option.id !== "none" && option.id !== "default");
+  if (!language) {
+    return playable[0] && playable[0].id || audioOptions[0] && audioOptions[0].id || "";
+  }
+  const normalized = normalizePreferenceText(language);
+  const preferred = playable.find((option) => normalizePreferenceText(option.language) === normalized)
+    || playable.find((option) => normalizePreferenceText(option.label).includes(normalized));
+  return preferred && preferred.id || playable[0] && playable[0].id || audioOptions[0] && audioOptions[0].id || "";
+}
+
+function preferredSubtitleValue(subtitleOptions, preferences) {
+  const none = subtitleOptions.find((option) => option && option.id === "none");
+  const available = subtitleOptions.filter((option) => option && option.id && option.id !== "none");
+  if (preferences.subtitleMode === "none") {
+    return none && none.id || subtitleOptions[0] && subtitleOptions[0].id || "";
+  }
+  if (available.length === 0) {
+    return none && none.id || "";
+  }
+
+  const language = normalizePreferenceText(preferences.subtitleLanguage);
+  const languageMatches = language
+    ? available.filter((option) => normalizePreferenceText(option.language) === language
+      || normalizePreferenceText(option.label).includes(language))
+    : available;
+  const candidates = languageMatches.length > 0 ? languageMatches : available;
+  if (preferences.subtitleMode === "forced") {
+    const forced = candidates.find((option) => option.forced);
+    return forced && forced.id || candidates[0].id;
+  }
+
+  const nonForced = candidates.filter((option) => !option.forced);
+  const preferred = nonForced.find((option) => /full|english/i.test(option.label || ""))
+    || nonForced[0]
+    || candidates[0];
+  return preferred && preferred.id || none && none.id || "";
+}
+
+function selectPreferredOption(select, value) {
+  if (value && hasSelectValue(select, value)) {
+    select.value = value;
+    return;
+  }
+  const first = firstSelectValue(select);
+  if (first) {
+    select.value = first;
+  }
+}
+
+function hasSelectValue(select, value) {
+  return Array.from(select.options).some((option) => option.value === value);
+}
+
+function firstSelectValue(select) {
+  return select.options.length > 0 ? select.options[0].value : "";
+}
+
+function savePlaybackPreferencesFromControls() {
+  if (state.applyingPlaybackPreferences || !state.options) {
+    return;
+  }
+  const audio = selectedAudioOption();
+  const subtitle = (state.options.subtitles || []).find((entry) => entry.id === els.subtitleSelect.value) || null;
+  const preferences = normalizePlaybackPreferences({
+    ...state.playbackPreferences,
+    audioLanguage: audio && audio.id !== "none" && audio.id !== "default" ? audio.language || "" : "",
+    subtitleLanguage: subtitle && subtitle.id !== "none" ? subtitle.language || "" : "",
+    subtitleMode: subtitleModeForOption(subtitle),
+    quality: selectedQuality(),
+    audioChannels: els.audioChannelsLabel.classList.contains("hidden")
+      ? state.playbackPreferences.audioChannels
+      : els.audioChannelsSelect.value
+  });
+  setPlaybackPreferences(preferences);
+  persistPlaybackPreferences(preferences);
+}
+
+function subtitleModeForOption(option) {
+  if (!option || option.id === "none") {
+    return "none";
+  }
+  return option.forced ? "forced" : "preferred";
+}
+
+function setPlaybackPreferences(preferences) {
+  state.playbackPreferences = normalizePlaybackPreferences(preferences);
+  localStorage.setItem(PLAYBACK_PREFERENCES_KEY, JSON.stringify(state.playbackPreferences));
+}
+
+function readLocalPlaybackPreferences() {
+  try {
+    return normalizePlaybackPreferences(JSON.parse(localStorage.getItem(PLAYBACK_PREFERENCES_KEY) || "{}"));
+  } catch (err) {
+    return { ...DEFAULT_PLAYBACK_PREFERENCES };
+  }
+}
+
+let savePlaybackPreferencesTimer = null;
+function persistPlaybackPreferences(preferences) {
+  if (!state.token || state.shareToken || !state.user) {
+    return;
+  }
+  window.clearTimeout(savePlaybackPreferencesTimer);
+  savePlaybackPreferencesTimer = window.setTimeout(() => {
+    api("/api/auth/me/preferences", state.token, {
+      method: "PUT",
+      body: JSON.stringify({ preferences })
+    }).then((result) => {
+      if (result && result.user) {
+        state.user = result.user;
+      }
+      if (result && result.preferences) {
+        setPlaybackPreferences(result.preferences);
+      }
+    }).catch(() => {});
+  }, 250);
+}
+
+function normalizePlaybackPreferences(value = {}) {
+  const preferences = {
+    ...DEFAULT_PLAYBACK_PREFERENCES,
+    ...(value || {})
+  };
+  const subtitleMode = normalizePreferenceText(preferences.subtitleMode);
+  const quality = normalizePreferenceText(preferences.quality);
+  const audioChannels = normalizePreferenceText(preferences.audioChannels);
+  return {
+    audioLanguage: normalizePreferenceText(preferences.audioLanguage),
+    subtitleLanguage: normalizePreferenceText(preferences.subtitleLanguage),
+    subtitleMode: ["none", "preferred", "forced", "any"].includes(subtitleMode) ? subtitleMode : "none",
+    quality: ["original", "medium", "low"].includes(quality) ? quality : "original",
+    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo"
+  };
+}
+
+function normalizePreferenceText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "");
+}
+
 function resetSubtitleSearch() {
   els.subtitleSearchPanel.classList.add("hidden");
   els.subtitleLanguageInput.value = "en";
@@ -4816,6 +4991,7 @@ async function addSelectedSubtitle() {
     if (option) {
       appendOrReplaceOption(els.subtitleSelect, option.id, option.label);
       els.subtitleSelect.value = option.id;
+      savePlaybackPreferencesFromControls();
       els.subtitleSearchStatus.textContent = "Subtitle synced, added, and selected.";
     }
   } catch (err) {

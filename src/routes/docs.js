@@ -105,6 +105,13 @@ function openApiSpec() {
           }))
         })
       },
+      "/api/auth/me/preferences": {
+        put: operation("Auth", "Update playback preferences", "Saves the authenticated user's preferred audio language, subtitle language/mode, quality, and audio channel mode.", true, {
+          requestBody: jsonBody(objectSchema({
+            preferences: { type: "object", additionalProperties: true }
+          }))
+        })
+      },
       "/api/health": {
         get: operation("Health", "Health check", "Returns index counts, scan state, and FFmpeg availability.")
       },

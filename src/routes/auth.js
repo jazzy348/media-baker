@@ -1,6 +1,7 @@
 const express = require("express");
 const { httpError } = require("../utils/httpErrors");
 const { clearWebStreamAuthCookies } = require("../middleware/auth");
+const { normalizePlaybackPreferences } = require("../services/accountService");
 
 module.exports = function createAuthRoutes({ accountService, config }) {
   const router = express.Router();
@@ -69,6 +70,23 @@ module.exports = function createAuthRoutes({ accountService, config }) {
         password: body.password || undefined
       });
       res.json({ user: updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/me/preferences", async (req, res, next) => {
+    try {
+      const token = extractSessionToken(req);
+      const user = token ? await accountService.verifySession(token) : null;
+      if (!user) {
+        next(httpError(401, "Unauthorized"));
+        return;
+      }
+
+      const preferences = normalizePlaybackPreferences(req.body && req.body.preferences || req.body || {});
+      const updated = await accountService.update(user.id, { preferences });
+      res.json({ preferences: updated.preferences, user: updated });
     } catch (err) {
       next(err);
     }

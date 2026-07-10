@@ -27,6 +27,14 @@ const DEFAULT_PERMISSIONS = {
   isAdmin: false
 };
 
+const DEFAULT_PLAYBACK_PREFERENCES = {
+  audioLanguage: "",
+  subtitleLanguage: "",
+  subtitleMode: "none",
+  quality: "original",
+  audioChannels: "stereo"
+};
+
 class AccountService {
   constructor(config) {
     this.config = config;
@@ -57,10 +65,12 @@ class AccountService {
           password_hash VARCHAR(255) NOT NULL,
           password_salt VARCHAR(64) NOT NULL,
           permissions_json TEXT NOT NULL,
+          preferences_json TEXT NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )
       `);
+      await ensureColumn(this.pool, "user_accounts", "preferences_json", "TEXT NULL");
 
       await this.pool.execute(`
         CREATE TABLE IF NOT EXISTS user_api_keys (
@@ -153,15 +163,16 @@ class AccountService {
       passwordHash: passwordParts.hash,
       passwordSalt: passwordParts.salt,
       permissions: normalizePermissions(input.permissions),
+      preferences: normalizePlaybackPreferences(input.preferences),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
     if (this.config.mysql.enabled) {
       await this.pool.execute(
-        `INSERT INTO user_accounts (id, username, password_hash, password_salt, permissions_json)
-         VALUES (?, ?, ?, ?, ?)`,
-        [account.id, account.username, account.passwordHash, account.passwordSalt, JSON.stringify(account.permissions)]
+        `INSERT INTO user_accounts (id, username, password_hash, password_salt, permissions_json, preferences_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [account.id, account.username, account.passwordHash, account.passwordSalt, JSON.stringify(account.permissions), JSON.stringify(account.preferences)]
       );
       return publicAccount(account);
     }
@@ -199,15 +210,16 @@ class AccountService {
       passwordHash: passwordParts.hash,
       passwordSalt: passwordParts.salt,
       permissions: input.permissions ? normalizePermissions(input.permissions) : account.permissions,
+      preferences: input.preferences ? normalizePlaybackPreferences(input.preferences) : normalizePlaybackPreferences(account.preferences),
       updatedAt: new Date().toISOString()
     };
 
     if (this.config.mysql.enabled) {
       await this.pool.execute(
         `UPDATE user_accounts
-         SET username = ?, password_hash = ?, password_salt = ?, permissions_json = ?
+         SET username = ?, password_hash = ?, password_salt = ?, permissions_json = ?, preferences_json = ?
          WHERE id = ?`,
-        [updated.username, updated.passwordHash, updated.passwordSalt, JSON.stringify(updated.permissions), updated.id]
+        [updated.username, updated.passwordHash, updated.passwordSalt, JSON.stringify(updated.permissions), JSON.stringify(updated.preferences), updated.id]
       );
       return publicAccount(updated);
     }
@@ -248,7 +260,7 @@ class AccountService {
     await this.init();
     if (this.config.mysql.enabled) {
       const [rows] = await this.pool.execute(
-        `SELECT id, username, password_hash, password_salt, permissions_json, created_at, updated_at
+        `SELECT id, username, password_hash, password_salt, permissions_json, preferences_json, created_at, updated_at
          FROM user_accounts
          ORDER BY username`
       );
@@ -484,7 +496,7 @@ class AccountService {
     const normalized = normalizeUsername(username);
     if (this.config.mysql.enabled) {
       const [rows] = await this.pool.execute(
-        `SELECT id, username, password_hash, password_salt, permissions_json, created_at, updated_at
+        `SELECT id, username, password_hash, password_salt, permissions_json, preferences_json, created_at, updated_at
          FROM user_accounts
          WHERE username = ?`,
         [normalized]
@@ -500,7 +512,7 @@ class AccountService {
     await this.init();
     if (this.config.mysql.enabled) {
       const [rows] = await this.pool.execute(
-        `SELECT id, username, password_hash, password_salt, permissions_json, created_at, updated_at
+        `SELECT id, username, password_hash, password_salt, permissions_json, preferences_json, created_at, updated_at
          FROM user_accounts
          WHERE id = ?`,
         [id]
@@ -600,6 +612,30 @@ function normalizePermissions(value = {}) {
   };
 }
 
+function normalizePlaybackPreferences(value = {}) {
+  const preferences = {
+    ...DEFAULT_PLAYBACK_PREFERENCES,
+    ...(value || {})
+  };
+  const subtitleMode = String(preferences.subtitleMode || DEFAULT_PLAYBACK_PREFERENCES.subtitleMode).toLowerCase();
+  const quality = String(preferences.quality || DEFAULT_PLAYBACK_PREFERENCES.quality).toLowerCase();
+  const audioChannels = String(preferences.audioChannels || DEFAULT_PLAYBACK_PREFERENCES.audioChannels).toLowerCase();
+  return {
+    audioLanguage: normalizePreferenceText(preferences.audioLanguage),
+    subtitleLanguage: normalizePreferenceText(preferences.subtitleLanguage),
+    subtitleMode: ["none", "preferred", "forced", "any"].includes(subtitleMode) ? subtitleMode : "none",
+    quality: ["original", "medium", "low"].includes(quality) ? quality : "original",
+    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo"
+  };
+}
+
+function normalizePreferenceText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "");
+}
+
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
   const derived = await scryptAsync(password, salt, 64);
@@ -681,6 +717,7 @@ function publicAccount(account) {
     id: account.id,
     username: account.username,
     permissions: normalizePermissions(account.permissions),
+    preferences: normalizePlaybackPreferences(account.preferences),
     createdAt: account.createdAt || null,
     updatedAt: account.updatedAt || null
   };
@@ -693,6 +730,7 @@ function fromMysqlAccount(row) {
     passwordHash: row.password_hash,
     passwordSalt: row.password_salt,
     permissions: parseJson(row.permissions_json, DEFAULT_PERMISSIONS),
+    preferences: parseJson(row.preferences_json, DEFAULT_PLAYBACK_PREFERENCES),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at)
   };
@@ -716,4 +754,19 @@ function httpError(status, message) {
   return err;
 }
 
-module.exports = { AccountService, normalizePermissions };
+async function ensureColumn(pool, table, column, definition) {
+  const [rows] = await pool.execute(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?`,
+    [table, column]
+  );
+  if (Number(rows[0].count) > 0) {
+    return;
+  }
+  await pool.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+module.exports = { AccountService, normalizePermissions, normalizePlaybackPreferences };
