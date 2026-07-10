@@ -28,6 +28,49 @@ class PlaybackProgressStore {
     return data[recordKey(userId, mediaType, mediaId)] || null;
   }
 
+  async getMany(userId, refs = []) {
+    await this.init();
+    const normalizedUserId = userId || "global";
+    const grouped = new Map();
+    for (const ref of refs || []) {
+      if (!ref || !ref.mediaType || !ref.mediaId) {
+        continue;
+      }
+      const ids = grouped.get(ref.mediaType) || new Set();
+      ids.add(String(ref.mediaId));
+      grouped.set(ref.mediaType, ids);
+    }
+
+    if (grouped.size === 0) {
+      return [];
+    }
+
+    if (this.config.mysql.enabled) {
+      const records = [];
+      for (const [mediaType, ids] of grouped) {
+        const mediaIds = [...ids];
+        if (mediaIds.length === 0) {
+          continue;
+        }
+        const placeholders = mediaIds.map(() => "?").join(", ");
+        const [rows] = await this.pool.execute(
+          `SELECT media_type, media_id, status, position_seconds, duration_seconds, cache_key,
+                  user_id, created_at, updated_at, watched_at
+           FROM playback_progress
+           WHERE user_id = ? AND media_type = ? AND media_id IN (${placeholders})`,
+          [normalizedUserId, mediaType, ...mediaIds]
+        );
+        records.push(...rows.map(fromMysqlRecord));
+      }
+      return records;
+    }
+
+    const data = await this.readJson();
+    return [...grouped].flatMap(([mediaType, ids]) => (
+      [...ids].map((mediaId) => data[recordKey(normalizedUserId, mediaType, mediaId)]).filter(Boolean)
+    ));
+  }
+
   async list(userId = null) {
     await this.init();
 

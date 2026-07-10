@@ -6,7 +6,7 @@ const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { createId } = require("../utils/mediaParsers");
 const { establishWebStreamAuthCookie } = require("../middleware/auth");
 
-module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, subtitles, playbackTokens }) {
+module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, progress, subtitles, playbackTokens }) {
   const router = express.Router();
 
   router.get("/home", async (req, res, next) => {
@@ -23,7 +23,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
           key: category.key,
           title: category.title,
           total: category.kind === "episode" ? (await libraryItemsForCategory(mediaIndex, category, collection)).length : allItems.length,
-          items: await withCachedMetadata(items, metadata, authContext(req))
+          items: await withCatalogState(items, metadata, progress, mediaIndex, req)
         };
       }));
 
@@ -51,7 +51,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
         query,
         metadataIdsByType.get(category.mediaType) || []
       )))).flat();
-      const enrichedItems = await withCachedMetadata(allItems, metadata, authContext(req));
+      const enrichedItems = await withCatalogState(allItems, metadata, progress, mediaIndex, req);
       const results = fuzzySearch(enrichedItems, query).slice(0, 60);
 
       res.json({
@@ -120,7 +120,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
         parentFolder: parentCatalogFolder(requestedFolder),
         nextOffset: offset + pageItems.length,
         hasMore: offset + pageItems.length < allItems.length,
-        items: await withCachedMetadata(pageItems, metadata, authContext(req))
+        items: await withCatalogState(pageItems, metadata, progress, mediaIndex, req)
       });
     } catch (err) {
       next(err);
@@ -1074,6 +1074,41 @@ async function withCachedMetadata(items, metadata, authContextValue) {
   });
 }
 
+async function withCatalogState(items, metadata, progress, mediaIndex, req) {
+  const withMetadata = await withCachedMetadata(items, metadata, authContext(req));
+  return withPlaybackProgress(withMetadata, progress, mediaIndex, req);
+}
+
+async function withPlaybackProgress(items, progress, mediaIndex, req) {
+  if (!progress || !progress.getMany) {
+    return items;
+  }
+
+  const refs = items
+    .filter((item) => tracksProgressForItem(mediaIndex, item))
+    .map((item) => ({ mediaType: item.mediaType, mediaId: item.id }));
+  if (refs.length === 0) {
+    return items;
+  }
+
+  const records = await progress.getMany(progressUserId(req), refs);
+  return items.map((item) => {
+    const itemProgress = records.get(`${item.mediaType}:${item.id}`);
+    return itemProgress ? { ...item, progress: itemProgress } : item;
+  });
+}
+
+function tracksProgressForItem(mediaIndex, item) {
+  if (!item || !item.mediaType || !item.id) {
+    return false;
+  }
+  if (["show", "artist", "album", "image", "image-folder", "media-folder", "playlist"].includes(item.itemType)) {
+    return false;
+  }
+  const library = mediaIndex.libraryForKey(item.mediaType);
+  return Boolean(library && library.trackProgress !== false && library.type !== "images");
+}
+
 function isEpisodeCatalogItem(item) {
   return item
     && item.itemType !== "show"
@@ -1082,6 +1117,10 @@ function isEpisodeCatalogItem(item) {
     && item.season !== undefined
     && item.episode !== null
     && item.episode !== undefined;
+}
+
+function progressUserId(req) {
+  return req.user && req.user.id || "global";
 }
 
 function metadataIdsForItem(item) {

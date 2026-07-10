@@ -594,6 +594,7 @@ h2 {
 }
 
 .poster {
+  position: relative;
   display: grid;
   place-items: center;
   aspect-ratio: 2 / 3;
@@ -608,6 +609,38 @@ h2 {
   background-position: center;
   background-size: cover;
   overflow: hidden;
+}
+
+.poster.is-watched,
+.poster-large.is-watched {
+  box-shadow:
+    0 0 0 1px rgba(0, 217, 255, 0.34),
+    0 16px 32px rgba(0, 0, 0, 0.34);
+}
+
+.watched-marker {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
+}
+
+.watched-marker::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  width: 7px;
+  height: 12px;
+  border: solid #001217;
+  border-width: 0 3px 3px 0;
+  transform: rotate(45deg);
 }
 
 .poster.with-image {
@@ -786,6 +819,7 @@ body.image-viewer-open .details .poster-panel {
 }
 
 .poster-large {
+  position: relative;
   display: grid;
   place-items: center;
   align-self: start;

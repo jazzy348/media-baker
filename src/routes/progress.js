@@ -38,6 +38,70 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
     }
   });
 
+  router.post("/:mediaType/shows/:showId/seasons/:seasonNumber/watched", async (req, res, next) => {
+    try {
+      requireAuthenticatedUser(req);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      if (!library || library.type !== "tv") {
+        next(httpError(404, "Season not found"));
+        return;
+      }
+
+      const season = await mediaIndex.getSeason(req.params.showId, req.params.seasonNumber, library.key);
+      if (!season) {
+        next(httpError(404, "Season not found"));
+        return;
+      }
+
+      const progressById = {};
+      for (const episode of season.episodes || []) {
+        const record = await progress.markWatched(progressUserId(req), req.params.mediaType, episode.id, episode.durationSeconds);
+        progressById[episode.id] = await progress.get(progressUserId(req), record.mediaType, record.mediaId);
+      }
+      res.json({
+        ok: true,
+        showId: req.params.showId,
+        season: Number.parseInt(req.params.seasonNumber, 10),
+        progress: progressById
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/:mediaType/shows/:showId/seasons/:seasonNumber/unwatched", async (req, res, next) => {
+    try {
+      requireAuthenticatedUser(req);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      if (!library || library.type !== "tv") {
+        next(httpError(404, "Season not found"));
+        return;
+      }
+
+      const season = await mediaIndex.getSeason(req.params.showId, req.params.seasonNumber, library.key);
+      if (!season) {
+        next(httpError(404, "Season not found"));
+        return;
+      }
+
+      const progressById = {};
+      for (const episode of season.episodes || []) {
+        const record = await progress.markUnwatched(progressUserId(req), req.params.mediaType, episode.id);
+        progressById[episode.id] = await progress.get(progressUserId(req), record.mediaType, record.mediaId);
+      }
+      res.json({
+        ok: true,
+        showId: req.params.showId,
+        season: Number.parseInt(req.params.seasonNumber, 10),
+        progress: progressById
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.post("/:mediaType/:id/watched", async (req, res, next) => {
     try {
       requireAuthenticatedUser(req);

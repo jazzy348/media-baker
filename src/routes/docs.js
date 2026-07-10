@@ -358,6 +358,16 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/progress/{mediaType}/shows/{showId}/seasons/{seasonNumber}/watched": {
+        post: operation("Playback Progress", "Mark season watched", "Marks every episode in one season watched for the current user.", true, {
+          parameters: [pathParam("mediaType"), pathParam("showId"), pathParam("seasonNumber")]
+        })
+      },
+      "/api/progress/{mediaType}/shows/{showId}/seasons/{seasonNumber}/unwatched": {
+        post: operation("Playback Progress", "Mark season unwatched", "Clears watched progress for every episode in one season for the current user.", true, {
+          parameters: [pathParam("mediaType"), pathParam("showId"), pathParam("seasonNumber")]
+        })
+      },
       "/api/progress/{mediaType}/{id}/remove": {
         post: operation("Playback Progress", "Remove from On Deck", "Hides one item from On Deck.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]

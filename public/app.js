@@ -1155,6 +1155,7 @@ function card(item, options = {}) {
   button.className = "card";
   button.type = "button";
   button.dataset.mediaKey = mediaKey(item);
+  button.classList.toggle("watched-card", isWatchedProgress(item.progress));
   button.innerHTML = `
     <div class="poster">${initials(item.title)}</div>
     <div class="card-progress-slot">${progressBarHtml(item.progress)}</div>
@@ -1169,6 +1170,7 @@ function card(item, options = {}) {
   if (imageUrl) {
     setPosterImage(poster, imageUrl);
   }
+  setWatchedMarker(poster, isWatchedProgress(item.progress));
   button.addEventListener("click", () => {
     if (["image-folder", "media-folder", "playlist"].includes(item.itemType)) {
       openLibraryView(item.mediaType, item.category, item.folderPath);
@@ -1233,6 +1235,7 @@ async function openDetails(item) {
   if (detailsImageUrl) {
     setPosterImage(els.detailsPoster, detailsImageUrl);
   }
+  setWatchedMarker(els.detailsPoster, isWatchedProgress(item.progress));
   els.detailsOverview.textContent = "";
   setFilePathVisible(false);
   els.filePath.value = "Loading fresh stream options...";
@@ -1351,6 +1354,20 @@ function rowSection(title, count, items, libraryKey, options = {}) {
   return section;
 }
 
+function appendSectionAction(section, label, onClick) {
+  const actions = section.querySelector(".section-actions");
+  if (!actions) {
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.className = "text-button";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  actions.appendChild(button);
+}
+
 function renderHierarchyNav(item) {
   els.hierarchyNav.innerHTML = "";
   if (item && item.artistId && item.albumId) {
@@ -1405,6 +1422,7 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
     subtitle: `${season.episodes.length} episodes`,
     actions: [
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
+      ...(state.user && !state.shareToken ? [{ label: seasonWatchedActionLabel(season), onClick: (event) => markSeasonWatched(mediaType, show, season, event.currentTarget) }] : []),
       { label: "Show", onClick: () => openShowView(mediaType, showId) },
       { label: "Home", onClick: () => loadHome() }
     ],
@@ -1420,13 +1438,18 @@ async function openShowView(mediaType, showId) {
   closeDetails();
   const fragment = document.createDocumentFragment();
   for (const season of show.seasons) {
-    fragment.appendChild(rowSection(
+    const section = rowSection(
       season.name || `Season ${pad(season.season)}`,
       `${season.episodes.length} episodes`,
       season.episodes.map((episode) => episodeItem(mediaType, show, episode)),
       null,
       { episodeArtwork: "thumbnail" }
-    ));
+    );
+    appendSectionAction(section, "View season", () => openSeasonView(mediaType, showId, season.season));
+    if (state.user && !state.shareToken) {
+      appendSectionAction(section, seasonWatchedActionLabel(season), (event) => markSeasonWatched(mediaType, show, season, event.currentTarget));
+    }
+    fragment.appendChild(section);
   }
   showContentView({
     title: show.name,
@@ -4157,6 +4180,7 @@ function episodeItem(mediaType, show, episode) {
     episode: episode.episode,
     filePath: episode.filePath,
     thumbnailUrl: thumbnailUrlForEpisode(mediaType, episode.id),
+    progress: episode.progress || null,
     searchText: `${show.name} ${episode.title || ""} ${episode.filename || ""}`
   };
 }
@@ -4177,6 +4201,7 @@ function trackItem(mediaType, artist, album, track) {
     track: track.track,
     filePath: track.filePath,
     posterUrl: album.posterUrl || null,
+    progress: track.progress || null,
     searchText: `${artist.name} ${album.name} ${track.title || ""}`
   };
 }
@@ -4521,10 +4546,13 @@ function applyMetadataResult(result) {
     els.detailsPoster.style.removeProperty("--poster-image");
     els.detailsPoster.textContent = initials(title);
   }
+  setWatchedMarker(els.detailsPoster, isWatchedProgress(state.selected.progress));
 }
 
 function setPosterImage(element, url) {
-  element.textContent = "";
+  [...element.childNodes]
+    .filter((child) => child.nodeType === Node.TEXT_NODE)
+    .forEach((child) => child.remove());
   element.style.setProperty("--poster-image", `url("${url.replace(/"/g, "%22")}")`);
   element.classList.add("with-image");
 }
@@ -4575,7 +4603,48 @@ function progressBarHtml(progress) {
   return `<div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${Math.max(0, Math.min(progress.percent, 100))}%"></span></div>`;
 }
 
+function updateRenderedCardsProgress(item, progress) {
+  const key = mediaKey(item);
+  if (!key) {
+    return;
+  }
+  document.querySelectorAll(`.card[data-media-key="${cssEscape(key)}"]`).forEach((cardElement) => {
+    cardElement.classList.toggle("watched-card", isWatchedProgress(progress));
+    const poster = cardElement.querySelector(".poster");
+    setWatchedMarker(poster, isWatchedProgress(progress));
+    const progressSlot = cardElement.querySelector(".card-progress-slot");
+    if (progressSlot) {
+      progressSlot.innerHTML = progressBarHtml(progress);
+    }
+  });
+}
+
+function isWatchedProgress(progress) {
+  return Boolean(progress && progress.status === "watched");
+}
+
+function setWatchedMarker(element, watched) {
+  if (!element) {
+    return;
+  }
+  let marker = element.querySelector(".watched-marker");
+  if (!watched) {
+    marker?.remove();
+    element.classList.remove("is-watched");
+    return;
+  }
+  if (!marker) {
+    marker = document.createElement("span");
+    marker.className = "watched-marker";
+    marker.setAttribute("aria-label", "Watched");
+    marker.title = "Watched";
+    element.appendChild(marker);
+  }
+  element.classList.add("is-watched");
+}
+
 function renderDetailsProgress(progress) {
+  setWatchedMarker(els.detailsPoster, isWatchedProgress(progress));
   if (!progress || !progress.percent || progress.status === "watched") {
     els.detailsProgress.classList.add("hidden");
     els.detailsProgressFill.style.removeProperty("--progress");
@@ -4672,6 +4741,7 @@ async function refreshSelectedProgress() {
       };
       renderDetailsProgress(progress);
       updateManagementActions(progress);
+      updateRenderedCardsProgress(state.selected, progress);
       return progress;
     })
     .catch(() => null)
@@ -5763,6 +5833,7 @@ function clampFloatingPlayersToViewport() {
 
 async function handleWebPlayerEnded() {
   stopOnDeckPolling();
+  await refreshSelectedProgress().catch(() => null);
   const nextItem = els.webPlayer.dataset.autoAdvance === "true" && state.options && state.options.nextItem;
   if (!nextItem || autoAdvanceInFlight) {
     return;
@@ -5935,6 +6006,7 @@ async function markSelectedWatched() {
     };
     renderDetailsProgress(result.progress);
     updateManagementActions(result.progress);
+    updateRenderedCardsProgress(state.selected, result.progress);
     removeOnDeckCard(state.selected);
     await refreshOnDeckRow({ force: true }).catch(() => {});
     els.copyStatus.textContent = "Marked watched.";
@@ -5943,6 +6015,64 @@ async function markSelectedWatched() {
   } finally {
     els.markWatched.disabled = false;
   }
+}
+
+async function markSeasonWatched(mediaType, show, season, button = null) {
+  const episodes = season && Array.isArray(season.episodes) ? season.episodes : [];
+  if (!state.user || state.shareToken || episodes.length === 0) {
+    return;
+  }
+  const watched = seasonFullyWatched(season);
+  const nextWatched = !watched;
+  const action = nextWatched ? "watched" : "unwatched";
+  if (!window.confirm(`Mark ${season.name || `Season ${pad(season.season)}`} as ${action}?`)) {
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const result = await api(
+      `/api/progress/${encodeURIComponent(mediaType)}/shows/${encodeURIComponent(show.id)}/seasons/${encodeURIComponent(season.season)}/${nextWatched ? "watched" : "unwatched"}`,
+      state.token,
+      { method: "POST", body: JSON.stringify({}) }
+    );
+    for (const episode of episodes) {
+      const item = episodeItem(mediaType, show, episode);
+      const progress = result.progress && result.progress[episode.id];
+      if (!progress) {
+        continue;
+      }
+      episode.progress = progress;
+      updateRenderedCardsProgress(item, progress);
+      removeOnDeckCard(item);
+      if (state.selected && state.selected.mediaType === mediaType && state.selected.id === episode.id) {
+        state.selected = { ...state.selected, progress };
+        renderDetailsProgress(progress);
+        updateManagementActions(progress);
+      }
+    }
+    if (button) {
+      button.textContent = seasonWatchedActionLabel(season);
+    }
+    await refreshOnDeckRow({ force: true }).catch(() => {});
+  } catch (err) {
+    els.copyStatus.textContent = err.message || `Failed to mark season ${action}.`;
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+function seasonWatchedActionLabel(season) {
+  return seasonFullyWatched(season) ? "Mark unwatched" : "Mark watched";
+}
+
+function seasonFullyWatched(season) {
+  const episodes = season && Array.isArray(season.episodes) ? season.episodes : [];
+  return episodes.length > 0 && episodes.every((episode) => isWatchedProgress(episode.progress));
 }
 
 async function removeSelectedOnDeck() {
@@ -5963,6 +6093,7 @@ async function removeSelectedOnDeck() {
     };
     renderDetailsProgress(result.progress);
     updateManagementActions(result.progress);
+    updateRenderedCardsProgress(state.selected, result.progress);
     removeOnDeckCard(state.selected);
     await refreshOnDeckRow({ force: true }).catch(() => {});
     els.copyStatus.textContent = "Removed from On Deck.";

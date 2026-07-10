@@ -15,6 +15,14 @@ class PlaybackProgressService {
     return record ? toPublicProgress(record) : emptyProgress(mediaType, mediaId);
   }
 
+  async getMany(userId, refs = []) {
+    const records = await this.store.getMany(userId, refs);
+    return new Map(records.map((record) => [
+      recordKey(record.mediaType, record.mediaId),
+      toPublicProgress(record)
+    ]));
+  }
+
   async recordSegmentDelivery(userId, mediaType, mediaId, cacheKey, playbackSessionId, segment) {
     if (!segment || !Number.isFinite(segment.startSeconds) || !Number.isFinite(segment.durationSeconds)) {
       return null;

@@ -3,7 +3,7 @@ const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
-module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, libraryService, indexScanScheduler }) {
+module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, progress, libraryService, indexScanScheduler }) {
   const router = express.Router();
 
   router.get("/", requireAnyPermission(["canManageLibraries", "canCreateShareLinks", "canReindex"]), async (req, res, next) => {
@@ -168,9 +168,10 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
         return;
       }
 
-      res.json(library.type === "music" && item.albums
+      const withArtwork = library.type === "music" && item.albums
         ? await withMusicArtwork(item, library.key, metadata, req)
-        : item);
+        : item;
+      res.json(await withLibraryProgress(withArtwork, library, progress, req));
     } catch (err) {
       next(err);
     }
@@ -190,7 +191,7 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
         return;
       }
 
-      res.json(season);
+      res.json(await withSeasonProgress(season, library, progress, req));
     } catch (err) {
       next(err);
     }
@@ -209,7 +210,8 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, li
         next(httpError(404, `${library.title} album not found`));
         return;
       }
-      res.json(await withAlbumArtwork(album, library.key, metadata, req));
+      const withArtwork = await withAlbumArtwork(album, library.key, metadata, req);
+      res.json(await withAlbumProgress(withArtwork, library, progress, req));
     } catch (err) {
       next(err);
     }
@@ -244,6 +246,71 @@ function albumWithArtwork(album, mediaType, metadata, req, records) {
     ...album,
     posterUrl: record ? metadata.posterUrl(record.posterFilename, req.authToken, req.authParamName || "authToken") : null
   };
+}
+
+async function withLibraryProgress(item, library, progress, req) {
+  if (!item || !progress || !progress.getMany || !tracksProgress(library)) {
+    return item;
+  }
+  if (library.type === "tv" && item.seasons) {
+    return {
+      ...item,
+      seasons: await Promise.all((item.seasons || []).map((season) => withSeasonProgress(season, library, progress, req)))
+    };
+  }
+  if (library.type === "music" && item.albums) {
+    return {
+      ...item,
+      albums: await Promise.all((item.albums || []).map((album) => withAlbumProgress(album, library, progress, req)))
+    };
+  }
+  const records = await progress.getMany(progressUserId(req), [{ mediaType: library.key, mediaId: item.id }]);
+  const itemProgress = records.get(`${library.key}:${item.id}`);
+  return itemProgress ? { ...item, progress: itemProgress } : item;
+}
+
+async function withSeasonProgress(season, library, progress, req) {
+  if (!season || !progress || !progress.getMany || !tracksProgress(library)) {
+    return season;
+  }
+  const episodes = season.episodes || [];
+  const records = await progress.getMany(progressUserId(req), episodes.map((episode) => ({
+    mediaType: library.key,
+    mediaId: episode.id
+  })));
+  return {
+    ...season,
+    episodes: episodes.map((episode) => {
+      const episodeProgress = records.get(`${library.key}:${episode.id}`);
+      return episodeProgress ? { ...episode, progress: episodeProgress } : episode;
+    })
+  };
+}
+
+async function withAlbumProgress(album, library, progress, req) {
+  if (!album || !progress || !progress.getMany || !tracksProgress(library)) {
+    return album;
+  }
+  const tracks = album.tracks || [];
+  const records = await progress.getMany(progressUserId(req), tracks.map((track) => ({
+    mediaType: library.key,
+    mediaId: track.id
+  })));
+  return {
+    ...album,
+    tracks: tracks.map((track) => {
+      const trackProgress = records.get(`${library.key}:${track.id}`);
+      return trackProgress ? { ...track, progress: trackProgress } : track;
+    })
+  };
+}
+
+function tracksProgress(library) {
+  return Boolean(library && library.type !== "images" && library.trackProgress !== false);
+}
+
+function progressUserId(req) {
+  return req.user && req.user.id || "global";
 }
 
 async function refreshLibraryConfig(config, libraryService, mediaIndex) {
