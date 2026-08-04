@@ -1,10 +1,11 @@
 const logger = require("../utils/logger");
 
 class IndexScanScheduler {
-  constructor(config, mediaIndex, metadata) {
+  constructor(config, mediaIndex, metadata, skipDetection = null) {
     this.config = config.indexScan;
     this.mediaIndex = mediaIndex;
     this.metadata = metadata;
+    this.skipDetection = skipDetection;
     this.timer = null;
     this.running = false;
     this.pendingReason = null;
@@ -95,6 +96,11 @@ class IndexScanScheduler {
           logger.error(`[metadata] background preload after scan failed message="${err.message}"`, err);
         });
       }
+      if (this.skipDetection
+        && typeof this.skipDetection.schedule === "function"
+        && shouldScheduleSkipDetection(this.mediaIndex.config.libraries, before, after, reason)) {
+        this.skipDetection.schedule("index-scan");
+      }
     } catch (err) {
       this.status.lastError = err.message;
       throw err;
@@ -136,6 +142,14 @@ class IndexScanScheduler {
 
 function totalCounts(counts) {
   return Object.values(counts).reduce((total, count) => total + (Number(count) || 0), 0);
+}
+
+function shouldScheduleSkipDetection(libraries, before, after, reason) {
+  if (reason !== "interval") {
+    return true;
+  }
+  return (libraries || []).some((library) => library.type === "tv"
+    && Number(before[library.key] || 0) !== Number(after[library.key] || 0));
 }
 
 module.exports = { IndexScanScheduler };

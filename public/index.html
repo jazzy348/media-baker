@@ -3,16 +3,24 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#061014">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Media Baker">
+    <meta name="media-baker-version" content="__MEDIA_BAKER_VERSION__">
     <title>Media Baker</title>
     <style>html.auth-pending body { visibility: hidden; }</style>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="manifest" href="/manifest.webmanifest?v=__MEDIA_BAKER_VERSION__">
+    <link rel="icon" href="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/media-baker-180.png?v=__MEDIA_BAKER_VERSION__">
+    <link rel="stylesheet" href="/styles.css?v=__MEDIA_BAKER_VERSION__">
   </head>
   <body>
     <div class="backdrop" aria-hidden="true"></div>
 
     <header class="topbar">
       <a class="brand" href="/" aria-label="Go to home">
-        <span class="brand-mark"></span>
+        <img class="brand-mark" src="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" alt="" draggable="false">
         <span>Media Baker</span>
       </a>
       <label class="search-shell">
@@ -20,6 +28,7 @@
         <input id="searchInput" type="search" placeholder="Movies, shows, episodes">
       </label>
       <div class="topbar-actions">
+        <button id="installAppButton" class="icon-button hidden" type="button" title="Install Media Baker">Install</button>
         <button id="liveTvButton" class="icon-button hidden" type="button" title="Live TV">Live TV</button>
         <button id="downloadButton" class="icon-button hidden" type="button" title="Download URL">Download</button>
         <button id="accountButton" class="icon-button hidden" type="button" title="Account settings">Account</button>
@@ -30,10 +39,24 @@
     </header>
 
     <section id="systemBanner" class="system-banner hidden" aria-live="polite"></section>
+    <section id="appReloadBanner" class="system-banner update-banner app-reload-banner hidden" aria-live="polite">
+      <div class="update-banner-copy">
+        <strong id="appReloadTitle">Media Baker has been updated</strong>
+        <p id="appReloadMessage"></p>
+      </div>
+      <div class="update-banner-actions">
+        <button id="reloadUpdatedApp" class="primary-button compact-button" type="button">Reload</button>
+        <button id="dismissAppReload" class="secondary-button compact-button" type="button">Later</button>
+      </div>
+    </section>
     <section id="updateBanner" class="system-banner update-banner hidden" aria-live="polite">
-      <div>
+      <div class="update-banner-copy">
         <strong id="updateBannerTitle"></strong>
-        <p id="updateBannerMessage"></p>
+        <p id="updateBannerMeta"></p>
+        <div class="update-banner-changelog">
+          <span>Changelog</span>
+          <p id="updateBannerMessage"></p>
+        </div>
       </div>
       <div class="update-banner-actions">
         <a id="updateReleaseLink" class="secondary-button compact-button" href="#" target="_blank" rel="noopener noreferrer">View release</a>
@@ -145,7 +168,7 @@
           <div class="subtitle-search-row">
             <label>
               Search language
-              <input id="subtitleLanguageInput" type="text" value="en" maxlength="12">
+              <input id="subtitleLanguageInput" type="text" list="languageOptions" value="en" maxlength="12" autocomplete="off">
             </label>
             <button id="searchSubtitles" class="secondary-button" type="button">Find subtitles</button>
           </div>
@@ -234,6 +257,27 @@
       </div>
     </div>
 
+    <div id="seriesPosterOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal series-poster-modal">
+        <div>
+          <p class="eyebrow">TV series</p>
+          <h2>Edit poster</h2>
+          <p id="seriesPosterPrompt" class="status"></p>
+        </div>
+        <form id="seriesPosterForm" class="series-poster-form">
+          <label>
+            Poster URL
+            <input id="seriesPosterUrl" type="url" placeholder="https://example.com/poster.jpg" required>
+          </label>
+          <div class="action-row">
+            <button id="saveSeriesPoster" class="primary-button" type="submit">Save poster</button>
+            <button id="cancelSeriesPoster" class="secondary-button" type="button">Cancel</button>
+          </div>
+          <p id="seriesPosterStatus" class="status"></p>
+        </form>
+      </div>
+    </div>
+
     <div id="playerOverlay" class="player-overlay hidden" aria-hidden="true">
       <div class="player-shell">
         <div class="player-heading">
@@ -246,9 +290,14 @@
             <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
           </div>
         </div>
-        <div id="videoPlayerSlot" class="video-player-slot">
+          <div id="videoPlayerSlot" class="video-player-slot">
           <div id="videoPlaybackSurface" class="video-playback-surface">
             <video id="webPlayer" class="web-player" playsinline></video>
+            <div id="videoSkipPrompt" class="video-skip-prompt hidden">
+              <strong id="videoSkipPromptText">Skip intro?</strong>
+              <button id="videoSkipMarker" class="video-skip-marker" type="button">Skip</button>
+              <button id="videoContinueMarker" class="video-skip-dismiss" type="button">Keep watching</button>
+            </div>
             <div id="videoControls" class="video-controls">
               <button id="videoPlayPause" class="video-control-button" type="button" title="Pause" aria-label="Pause">&#10074;&#10074;</button>
               <span id="videoCurrentTime" class="video-time">0:00</span>
@@ -311,10 +360,37 @@
             <input id="downloadUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
           </label>
           <div class="action-row">
-            <button id="startDownload" class="primary-button" type="submit">Download</button>
+            <button id="startDownload" class="primary-button" type="submit">Check URL</button>
             <button id="closeDownloadPanel" class="secondary-button" type="button">Close</button>
           </div>
         </form>
+        <section id="liveDownloadChoice" class="live-download-choice hidden">
+          <div>
+            <p class="eyebrow">Live stream</p>
+            <strong id="liveDownloadTitle"></strong>
+            <p>Record it into the YT-DLP library, or relay it live through Media Baker.</p>
+          </div>
+          <div class="action-row">
+            <button id="recordLiveStream" class="primary-button" type="button">Record stream</button>
+            <button id="relayLiveStream" class="secondary-button" type="button">Relay live</button>
+            <button id="cancelLiveChoice" class="secondary-button" type="button">Back</button>
+          </div>
+        </section>
+        <section id="liveRelayReady" class="live-download-choice hidden">
+          <div>
+            <p class="eyebrow">Relay ready</p>
+            <strong id="liveRelayTitle"></strong>
+          </div>
+          <div class="action-row">
+            <button id="playLiveRelay" class="primary-button" type="button">Play relay</button>
+            <button id="copyLiveRelay" class="secondary-button" type="button">Copy relay URL</button>
+            <button id="closeLiveRelay" class="secondary-button" type="button">Close</button>
+          </div>
+          <div id="relayManualCopyBar" class="manual-copy-bar hidden">
+            <span>Copy failed. Select the URL manually.</span>
+            <input id="relayManualCopyUrl" type="text" readonly>
+          </div>
+        </section>
         <p id="downloadStatus" class="status"></p>
         <div id="downloadList" class="download-list"></div>
       </div>
@@ -334,6 +410,17 @@
           </div>
         </form>
         <p id="selfAccountStatus" class="status"></p>
+      </div>
+    </div>
+
+    <div id="installAppOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <div class="choice-modal install-app-modal">
+        <div>
+          <p class="eyebrow">Media Baker</p>
+          <h2>Install app</h2>
+        </div>
+        <p id="installAppInstructions" class="status"></p>
+        <button id="closeInstallApp" class="secondary-button" type="button">Close</button>
       </div>
     </div>
 
@@ -389,6 +476,8 @@
             <button id="adminLibrariesTab" class="admin-nav-button" type="button">Libraries</button>
             <button id="adminDuplicatesTab" class="admin-nav-button" type="button">Duplicates</button>
             <button id="adminBackupsTab" class="admin-nav-button" type="button">Backup &amp; Restore</button>
+            <button id="adminOptimizerTab" class="admin-nav-button" type="button">Optimise</button>
+            <button id="adminSkipDetectionTab" class="admin-nav-button" type="button">Skip Detection</button>
             <button id="adminSettingsTab" class="admin-nav-button" type="button">Settings</button>
             <button id="adminHardwareTab" class="admin-nav-button" type="button">Hardware</button>
             <button id="adminCurrentlyPlayingTab" class="admin-nav-button" type="button">Currently Playing</button>
@@ -422,6 +511,7 @@
                 <label><input id="accountCanSettings" type="checkbox"> Manage settings</label>
                 <label><input id="accountCanApiKeys" type="checkbox"> Manage API keys</label>
                 <label><input id="accountCanBackups" type="checkbox"> Manage backups</label>
+                <label><input id="accountCanOptimizer" type="checkbox"> Manage optimiser</label>
                 <label><input id="accountCanReindex" type="checkbox"> Re-index libraries</label>
                 <label><input id="accountCanUsers" type="checkbox"> Manage users</label>
                 <label><input id="accountCanHardware" type="checkbox"> View hardware</label>
@@ -591,6 +681,107 @@
             <p id="backupStatus" class="status"></p>
             <div id="backupList" class="library-manager-list"></div>
           </section>
+          <section id="adminOptimizerPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Encoding</p>
+                <h2>Re-encode &amp; Optimise</h2>
+              </div>
+            </div>
+            <form id="optimizerForm" class="settings-form">
+              <fieldset>
+                <legend>Schedule</legend>
+                <label class="settings-toggle"><input id="optimizerEnabled" type="checkbox"> Enable optimiser</label>
+                <label>Scan interval (seconds)<input id="optimizerScanInterval" type="number" min="10" step="1"></label>
+                <label>Parallel jobs<input id="optimizerParallelJobs" type="number" min="1" max="8" step="1"></label>
+              </fieldset>
+              <fieldset>
+                <legend>Libraries</legend>
+                <div id="optimizerLibraryList" class="library-manager-list"></div>
+              </fieldset>
+              <div class="action-row compact-actions">
+                <button class="primary-button" type="submit">Save optimiser settings</button>
+                <button id="toggleOptimizerWork" class="secondary-button" type="button">Current work</button>
+                <button id="toggleOptimizerFailures" class="secondary-button" type="button">Failures (0)</button>
+              </div>
+            </form>
+            <p id="optimizerStatus" class="status"></p>
+            <section id="optimizerWorkPanel" class="optimizer-work-panel hidden">
+              <div class="currently-playing-heading">
+                <div>
+                  <h3>Current Work</h3>
+                  <p id="optimizerQueueSummary" class="library-path">No optimiser work is currently running.</p>
+                </div>
+              </div>
+              <div id="optimizerCurrentJobs" class="optimizer-current-jobs"></div>
+              <div class="optimizer-queue-preview">
+                <h4>Queue</h4>
+                <div id="optimizerQueueList" class="library-manager-list"></div>
+              </div>
+            </section>
+            <section id="optimizerFailuresPanel" class="optimizer-failures-panel hidden">
+              <div class="currently-playing-heading">
+                <div>
+                  <h3>Optimiser Failures</h3>
+                  <p class="library-path">Files that failed during re-encode or replacement.</p>
+                </div>
+                <button id="clearOptimizerFailures" class="secondary-button compact-button" type="button">Retry failures</button>
+              </div>
+              <div id="optimizerFailuresList" class="library-manager-list"></div>
+            </section>
+          </section>
+          <section id="adminSkipDetectionPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Playback detection</p>
+                <h2>Intro &amp; Credits</h2>
+              </div>
+              <div class="action-row compact-actions skip-detection-actions">
+                <button id="retrySkipDetectionFailures" class="secondary-button compact-button" type="button">Retry failures</button>
+                <button id="reanalyseSkipDetection" class="secondary-button compact-button" type="button">Reanalyse markers</button>
+                <button id="rebuildSkipDetection" class="secondary-button compact-button" type="button">Rebuild fingerprints</button>
+              </div>
+            </div>
+            <div class="skip-detection-metrics" aria-label="Skip detection progress">
+              <section><strong id="skipDetectionSeasonProgress">0 / 0</strong><span>Seasons</span></section>
+              <section><strong id="skipDetectionEpisodeProgress">0 / 0</strong><span>Episodes</span></section>
+              <section><strong id="skipDetectionCachedCount">0</strong><span>Resumed this pass</span></section>
+              <section><strong id="skipDetectionMarkerCount">0</strong><span>Markers</span></section>
+              <section><strong id="skipDetectionFailureCount">0</strong><span>Failures</span></section>
+            </div>
+            <section class="skip-detection-progress-panel">
+              <div class="skip-detection-progress-heading">
+                <div>
+                  <h3 id="skipDetectionPhase">Idle</h3>
+                  <p id="skipDetectionCurrent" class="library-path">No analysis is running.</p>
+                </div>
+                <span id="skipDetectionEta" class="status"></span>
+              </div>
+              <div class="progress-track" role="progressbar" aria-label="Skip detection progress" aria-valuemin="0" aria-valuemax="100">
+                <span id="skipDetectionProgressFill" class="progress-fill"></span>
+              </div>
+              <p id="skipDetectionStatus" class="status"></p>
+            </section>
+            <section class="skip-detection-review-section">
+              <div class="currently-playing-heading">
+                <div>
+                  <h3>Failures</h3>
+                  <p class="library-path">Episodes that could not be probed or fingerprinted.</p>
+                </div>
+              </div>
+              <div id="skipDetectionFailures" class="library-manager-list"></div>
+            </section>
+            <section class="skip-detection-review-section">
+              <div class="currently-playing-heading">
+                <div>
+                  <h3>Detected Markers</h3>
+                  <p class="library-path">Review confidence, source, and detected boundaries.</p>
+                </div>
+                <button id="refreshSkipDetectionMarkers" class="secondary-button compact-button" type="button">Refresh</button>
+              </div>
+              <div id="skipDetectionMarkers" class="library-manager-list"></div>
+            </section>
+          </section>
           <section id="adminSettingsPage" class="admin-page hidden">
             <div class="admin-page-heading">
               <div>
@@ -603,7 +794,7 @@
                 <legend>General</legend>
                 <label>Log level<select id="settingsLogLevel"><option value="errors">Errors</option><option value="info">Info</option><option value="full">Full</option></select></label>
                 <label>Log retention days<input id="settingsLogRetentionDays" type="number" min="1" step="1"></label>
-                <label>Preferred audio language<input id="settingsPreferredAudio" type="text" autocomplete="off"></label>
+                <label>Preferred audio language<input id="settingsPreferredAudio" type="text" list="languageOptions" autocomplete="off"></label>
                 <label><input id="settingsEnableGpu" type="checkbox"> Enable GPU encoding</label>
               </fieldset>
               <fieldset id="updatesSettingsFieldset">
@@ -621,10 +812,23 @@
               </fieldset>
               <fieldset>
                 <legend>Metadata</legend>
-                <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable TMDb and MusicBrainz metadata</label>
+                <label class="settings-toggle"><input id="settingsMetadataEnabled" type="checkbox"> Enable metadata</label>
                 <div id="metadataSettingsBody" class="settings-feature-body">
-                  <label>TMDb API key<input id="settingsTmdbApiKey" type="password" autocomplete="off"></label>
-                  <label>TMDb read access token<input id="settingsTmdbReadToken" type="password" autocomplete="off"></label>
+                  <div class="metadata-source-setting">
+                    <span>Metadata source</span>
+                    <div class="segmented-control metadata-source-control" role="group" aria-label="Metadata source">
+                      <button id="settingsMetadataProvidersMode" class="active" type="button" aria-pressed="true">TMDb and MusicBrainz</button>
+                      <button id="settingsMetadataCustomMode" type="button" aria-pressed="false">Custom</button>
+                    </div>
+                  </div>
+                  <div id="providerMetadataSettings" class="settings-feature-body compact-feature-body">
+                    <label>TMDb API key<input id="settingsTmdbApiKey" type="password" autocomplete="off"></label>
+                    <label>TMDb read access token<input id="settingsTmdbReadToken" type="password" autocomplete="off"></label>
+                  </div>
+                  <div id="customMetadataSettings" class="settings-feature-body compact-feature-body hidden">
+                    <label>Metadata cacher URL<input id="settingsCustomMetadataUrl" type="url" autocomplete="off" placeholder="http://metadata-cacher:5051"></label>
+                    <label>Metadata cacher API key<input id="settingsCustomMetadataApiKey" type="password" autocomplete="off"></label>
+                  </div>
                   <label>Language<input id="settingsMetadataLanguage" type="text" autocomplete="off"></label>
                   <label>Poster size<input id="settingsPosterSize" type="text" autocomplete="off"></label>
                   <label>Thumbnail size<input id="settingsThumbnailSize" type="text" autocomplete="off"></label>
@@ -640,7 +844,7 @@
                   <label>Provider<input id="settingsSubtitleProvider" type="text" autocomplete="off"></label>
                   <label>SubDL API key<input id="settingsSubdlApiKey" type="password" autocomplete="off"></label>
                   <label>User agent<input id="settingsSubtitleUserAgent" type="text" autocomplete="off"></label>
-                  <label>Default language<input id="settingsSubtitleLanguage" type="text" autocomplete="off"></label>
+                  <label>Default language<input id="settingsSubtitleLanguage" type="text" list="languageOptions" autocomplete="off"></label>
                   <label class="settings-toggle"><input id="settingsSubtitleSyncEnabled" type="checkbox"> Auto-sync downloaded subtitles</label>
                   <div id="subtitleSyncSettingsBody" class="settings-feature-body compact-feature-body">
                     <label>Max offset seconds<input id="settingsSubtitleMaxOffset" type="number" min="1" step="1"></label>
@@ -681,6 +885,10 @@
                 <label><input id="settingsForceTranscode" type="checkbox"> Force compatible video transcode</label>
                 <label>On-deck TTL seconds<input id="settingsOnDeckTtl" type="number" min="1" step="1"></label>
                 <label>Watched threshold %<input id="settingsWatchedThreshold" type="number" min="1" max="100" step="1"></label>
+              </fieldset>
+              <fieldset>
+                <legend>Playback detection</legend>
+                <label class="settings-toggle"><input id="settingsSkipDetectionEnabled" type="checkbox"> Detect TV intros and credits</label>
               </fieldset>
               <fieldset>
                 <legend>Scanning and fallback</legend>
@@ -756,7 +964,32 @@
                 <h2>User Watch History</h2>
               </div>
             </div>
-            <div id="userHistoryList" class="library-manager-list"></div>
+            <div class="history-filter-bar">
+              <label>User or share
+                <select id="userHistoryUserFilter">
+                  <option value="">All users and shares</option>
+                </select>
+              </label>
+              <label>Timespan
+                <select id="userHistoryTimespanFilter">
+                  <option value="24h">Last 24 hours</option>
+                  <option value="7d" selected>Last week</option>
+                  <option value="all">All time</option>
+                  <option value="custom">Custom range</option>
+                </select>
+              </label>
+              <div id="userHistoryCustomRange" class="history-custom-range hidden">
+                <label>Start date
+                  <input id="userHistoryStartDate" type="date">
+                </label>
+                <label>End date
+                  <input id="userHistoryEndDate" type="date">
+                </label>
+              </div>
+            </div>
+            <p id="userHistoryStatus" class="status"></p>
+            <div id="userHistoryList" class="history-timeline"></div>
+            <button id="loadMoreUserHistory" class="secondary-button history-load-more hidden" type="button">Load more</button>
           </section>
         </main>
       </div>
@@ -764,7 +997,7 @@
 
     <div id="loginOverlay" class="login-overlay hidden">
       <form id="loginForm" class="login-modal">
-        <div class="login-mark"></div>
+        <img class="login-mark" src="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" alt="" draggable="false">
         <h1 id="loginTitle">Media Baker</h1>
         <p id="loginPrompt">Sign in to browse your library.</p>
         <input id="usernameInput" type="text" autocomplete="username" placeholder="Username" required>
@@ -774,9 +1007,33 @@
       </form>
     </div>
 
-    <script src="/vendor/hls.js/hls.min.js"></script>
-    <script src="/js/api-client.js"></script>
-    <script src="/js/navigation.js"></script>
-    <script src="/app.js"></script>
+    <datalist id="languageOptions">
+      <option value="English"></option>
+      <option value="Japanese"></option>
+      <option value="French"></option>
+      <option value="German"></option>
+      <option value="Spanish"></option>
+      <option value="Italian"></option>
+      <option value="Portuguese"></option>
+      <option value="Dutch"></option>
+      <option value="Chinese"></option>
+      <option value="Korean"></option>
+      <option value="Russian"></option>
+      <option value="Arabic"></option>
+      <option value="Polish"></option>
+      <option value="Swedish"></option>
+      <option value="Danish"></option>
+      <option value="Finnish"></option>
+      <option value="Norwegian"></option>
+      <option value="Turkish"></option>
+      <option value="Czech"></option>
+      <option value="Hungarian"></option>
+    </datalist>
+
+    <script src="/vendor/hls.js/hls.min.js?v=__MEDIA_BAKER_VERSION__"></script>
+    <script src="/js/api-client.js?v=__MEDIA_BAKER_VERSION__"></script>
+    <script src="/js/navigation.js?v=__MEDIA_BAKER_VERSION__"></script>
+    <script src="/js/pwa.js?v=__MEDIA_BAKER_VERSION__"></script>
+    <script src="/app.js?v=__MEDIA_BAKER_VERSION__"></script>
   </body>
 </html>

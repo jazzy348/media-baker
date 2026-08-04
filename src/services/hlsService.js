@@ -11,6 +11,7 @@ class HlsService {
     this.ffmpeg = ffmpeg;
     this.progress = progress;
     this.activeSetups = new Map();
+    this.activeTranscodes = new Map();
   }
 
   async prepare(mediaFile, options = {}) {
@@ -24,7 +25,6 @@ class HlsService {
     const cacheKey = await this.buildCacheKey(mediaFile.filePath, normalizedOptions);
     const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
     const playlistPath = path.join(cacheDir, "master.m3u8");
-    const manifestPath = path.join(cacheDir, "stream.json");
 
     if (this.activeSetups.has(cacheKey)) {
       logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey}`);
@@ -32,13 +32,32 @@ class HlsService {
       return this.result(cacheKey, cacheDir, playlistPath);
     }
 
-    if (await this.isUsableCache(manifestPath)) {
+    if (this.activeTranscodes.has(cacheKey)) {
+      this.touchTranscode(cacheKey);
+      logger.info(`[hls] joining active transcode cacheKey=${cacheKey}`);
+      return this.result(cacheKey, cacheDir, playlistPath);
+    }
+
+    if (await this.isUsableCache(cacheKey)) {
       logger.info(`[hls] cache hit cacheKey=${cacheKey} playlist="${playlistPath}"`);
       return this.result(cacheKey, cacheDir, playlistPath);
     }
 
+    const existingManifest = await this.readManifestIfPresent(cacheKey);
+    const resumeState = existingManifest ? await this.resumeState(cacheDir, existingManifest) : { complete: false, resumeFromSegment: 0 };
+    if (resumeState.complete) {
+      logger.info(`[hls] segment cache complete cacheKey=${cacheKey} playlist="${playlistPath}"`);
+      return this.result(cacheKey, cacheDir, playlistPath);
+    }
+    const effectiveResumeState = canResumePartialTranscode(normalizedOptions)
+      ? resumeState
+      : { complete: false, resumeFromSegment: 0 };
+
     logger.info(`[hls] cache miss cacheKey=${cacheKey}; starting ffmpeg setup`);
-    const setup = this.startHls(mediaFile, normalizedOptions, cacheDir, playlistPath)
+    const setup = this.startHls(mediaFile, normalizedOptions, cacheDir, playlistPath, cacheKey, {
+      resumeFromSegment: effectiveResumeState.resumeFromSegment,
+      resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(existingManifest && existingManifest.segmentSeconds || this.config.hls.segmentSeconds)
+    })
       .finally(() => this.activeSetups.delete(cacheKey));
     this.activeSetups.set(cacheKey, setup);
 
@@ -57,8 +76,12 @@ class HlsService {
   async getPlaylist(cacheKey) {
     const manifest = await this.readManifest(cacheKey);
     const publishedPlaylist = await readPublishedPlaylist(cacheKey, this.config.hls.cachePath);
-    if (publishedPlaylist && isCompletePlaylist(publishedPlaylist)) {
-      return publishedPlaylist;
+    if (!publishedPlaylist || !isCompletePlaylist(publishedPlaylist)) {
+      const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+      const resumeState = await this.resumeState(cacheDir, manifest);
+      if (!resumeState.complete) {
+        await this.ensureActiveForCache(cacheKey, manifest, resumeState);
+      }
     }
 
     return buildVodPlaylist(manifest);
@@ -88,8 +111,16 @@ class HlsService {
       };
     }
 
+    if (manifest && !await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
+      await this.ensureActiveForCache(cacheKey, manifest);
+    } else {
+      this.touchTranscode(cacheKey);
+    }
+
     while (Date.now() - startedAt < timeoutMs) {
+      this.touchTranscode(cacheKey);
       if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
+        this.touchTranscode(cacheKey);
         return {
           status: "ready",
           filePath
@@ -180,7 +211,7 @@ class HlsService {
     return crypto
       .createHash("sha1")
       .update(JSON.stringify({
-        hlsFormatVersion: "synthetic-vod-h264-compat-v15-audio-progressive",
+        hlsFormatVersion: "synthetic-vod-h264-compat-v17-resume-timestamps",
         filePath,
         size: stat.size,
         mtimeMs: stat.mtimeMs,
@@ -191,11 +222,17 @@ class HlsService {
       .slice(0, 24);
   }
 
-  async isUsableCache(playlistPath) {
+  async isUsableCache(cacheKey) {
+    const playlistPath = path.join(this.config.hls.cachePath, cacheKey, "master.m3u8");
     try {
       const stat = await fs.stat(playlistPath);
       const ttlMs = this.config.hls.ttlSeconds * 1000;
-      return Date.now() - stat.mtimeMs <= ttlMs;
+      if (Date.now() - stat.mtimeMs > ttlMs) {
+        return false;
+      }
+
+      const playlist = await fs.readFile(playlistPath, "utf8");
+      return isCompletePlaylist(playlist);
     } catch (err) {
       if (err.code === "ENOENT") {
         return false;
@@ -205,20 +242,187 @@ class HlsService {
     }
   }
 
-  async startHls(mediaFile, options, cacheDir, playlistPath) {
+  async ensureActiveForCache(cacheKey, manifest = null, knownResumeState = null) {
+    if (this.activeTranscodes.has(cacheKey)) {
+      this.touchTranscode(cacheKey);
+      return true;
+    }
+
+    if (this.activeSetups.has(cacheKey)) {
+      logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey}`);
+      await this.activeSetups.get(cacheKey);
+      this.touchTranscode(cacheKey);
+      return true;
+    }
+
+    const currentManifest = manifest || await this.readManifestIfPresent(cacheKey);
+    if (!currentManifest || !currentManifest.inputPath || !currentManifest.options) {
+      return false;
+    }
+
+    const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+    const playlistPath = path.join(cacheDir, "master.m3u8");
+    const resumeState = knownResumeState || await this.resumeState(cacheDir, currentManifest);
+    if (resumeState.complete) {
+      return true;
+    }
+    const effectiveResumeState = canResumePartialTranscode(currentManifest.options)
+      ? resumeState
+      : { complete: false, resumeFromSegment: 0 };
+
+    logger.info(`[hls] restarting partial transcode cacheKey=${cacheKey} input="${currentManifest.inputPath}" resumeSegment=${effectiveResumeState.resumeFromSegment}`);
+    const setup = this.startHls(
+      { filePath: currentManifest.inputPath },
+      currentManifest.options,
+      cacheDir,
+      playlistPath,
+      cacheKey,
+      {
+        resumeFromSegment: effectiveResumeState.resumeFromSegment,
+        resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(currentManifest.segmentSeconds || this.config.hls.segmentSeconds)
+      }
+    ).finally(() => this.activeSetups.delete(cacheKey));
+    this.activeSetups.set(cacheKey, setup);
+    await setup;
+    this.touchTranscode(cacheKey);
+    return true;
+  }
+
+  async resumeState(cacheDir, manifest) {
+    if (!manifest || !Number.isFinite(Number(manifest.segmentCount))) {
+      return { complete: false, resumeFromSegment: 0 };
+    }
+
+    let entries;
+    try {
+      entries = await fs.readdir(cacheDir);
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return { complete: false, resumeFromSegment: 0 };
+      }
+
+      throw err;
+    }
+
+    const existingSegments = new Set(entries
+      .map(segmentFilenameIndex)
+      .filter((index) => index !== null));
+    let resumeFromSegment = 0;
+    while (existingSegments.has(resumeFromSegment)) {
+      resumeFromSegment += 1;
+    }
+
+    const segmentCount = Number(manifest.segmentCount);
+    return {
+      complete: resumeFromSegment >= segmentCount,
+      resumeFromSegment: Math.min(resumeFromSegment, Math.max(0, segmentCount - 1))
+    };
+  }
+
+  touchTranscode(cacheKey) {
+    const active = this.activeTranscodes.get(cacheKey);
+    if (!active) {
+      return;
+    }
+
+    active.lastAccessAt = Date.now();
+    this.armTranscodeIdleTimer(cacheKey, active);
+  }
+
+  registerTranscode(cacheKey, state, armTimer = true) {
+    this.activeTranscodes.set(cacheKey, state);
+    if (armTimer) {
+      this.armTranscodeIdleTimer(cacheKey, state);
+    }
+  }
+
+  armTranscodeIdleTimer(cacheKey, active = this.activeTranscodes.get(cacheKey)) {
+    if (!active || active.completed) {
+      return;
+    }
+
+    if (active.idleTimer) {
+      clearTimeout(active.idleTimer);
+    }
+
+    const timeoutMs = this.transcodeIdleTimeoutMs();
+    active.idleTimer = setTimeout(() => {
+      const current = this.activeTranscodes.get(cacheKey);
+      if (!current || current !== active || current.completed) {
+        return;
+      }
+
+      if (Date.now() - current.lastAccessAt >= timeoutMs) {
+        this.stopTranscodeForIdle(cacheKey, current);
+        return;
+      }
+
+      this.armTranscodeIdleTimer(cacheKey, current);
+    }, timeoutMs);
+    active.idleTimer.unref && active.idleTimer.unref();
+  }
+
+  stopTranscodeForIdle(cacheKey, active = this.activeTranscodes.get(cacheKey)) {
+    if (!active || active.completed || active.stoppedForIdle) {
+      return false;
+    }
+
+    active.stoppedForIdle = true;
+    logger.info(`[hls] stopping idle transcode cacheKey=${cacheKey} input="${active.inputPath}" idleSeconds=${Math.round((Date.now() - active.lastAccessAt) / 1000)}`);
+    try {
+      active.child.kill("SIGTERM");
+    } catch (err) {
+      logger.full(`[hls] idle transcode stop ignored cacheKey=${cacheKey} message="${err.message}"`);
+    }
+    const killTimer = setTimeout(() => {
+      if (!active.completed) {
+        try {
+          active.child.kill("SIGKILL");
+        } catch (err) {
+          logger.full(`[hls] idle transcode force-stop ignored cacheKey=${cacheKey} message="${err.message}"`);
+        }
+      }
+    }, 5000);
+    killTimer.unref && killTimer.unref();
+    return true;
+  }
+
+  transcodeIdleTimeoutMs() {
+    const configuredSeconds = Number(this.config.hls.inactiveTranscodeTimeoutSeconds);
+    if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
+      return Math.max(15, configuredSeconds) * 1000;
+    }
+
+    const segmentSeconds = Number(this.config.hls.segmentSeconds) || 6;
+    return Math.max(30, segmentSeconds * 8) * 1000;
+  }
+
+  async startHls(mediaFile, options, cacheDir, playlistPath, cacheKey = path.basename(cacheDir), resume = {}) {
     const inputPath = mediaFile.filePath;
-    logger.info(`[hls] start input="${inputPath}" cacheDir="${cacheDir}" playlist="${playlistPath}" audio=${options.audio} audioChannels=${options.audioChannels} quality=${options.quality}`);
+    const resumeFromSegment = Math.max(0, Number.parseInt(resume.resumeFromSegment, 10) || 0);
+    const resumeFromSeconds = Math.max(0, Number(resume.resumeFromSeconds) || 0);
+    logger.info(`[hls] start input="${inputPath}" cacheDir="${cacheDir}" playlist="${playlistPath}" audio=${options.audio} audioChannels=${options.audioChannels} quality=${options.quality} resumeSegment=${resumeFromSegment}`);
     await this.cleanupExpired();
-    await fs.rm(cacheDir, { recursive: true, force: true });
-    await fs.mkdir(cacheDir, { recursive: true });
+    if (resumeFromSegment > 0) {
+      await fs.mkdir(cacheDir, { recursive: true });
+      await fs.rm(playlistPath, { force: true });
+    } else {
+      await fs.rm(cacheDir, { recursive: true, force: true });
+      await fs.mkdir(cacheDir, { recursive: true });
+    }
 
     const probe = await this.ffmpeg.probe(inputPath, isAudioFile(inputPath)
       ? { analyzeduration: "1M", probesize: "1M" }
       : {});
-    const hlsBuild = await this.buildFfmpegArgs(inputPath, probe, options, playlistPath);
+    const hlsBuild = await this.buildFfmpegArgs(inputPath, probe, options, playlistPath, {
+      resumeFromSegment,
+      resumeFromSeconds
+    });
     const manifest = buildManifest(probe, hlsBuild.segmentSeconds || this.config.hls.segmentSeconds, {
       independentSegments: hlsBuild.independentSegments,
-      splitByTime: hlsBuild.splitByTime
+      splitByTime: hlsBuild.splitByTime,
+      inputPath,
+      options
     });
     await fs.writeFile(path.join(cacheDir, "stream.json"), JSON.stringify(manifest, null, 2));
     const args = hlsBuild.args;
@@ -253,38 +457,70 @@ class HlsService {
     });
 
     logger.info(`[hls] transcode launched input="${inputPath}" playlist="${playlistPath}"`);
+    const active = {
+      child,
+      inputPath,
+      cacheDir,
+      resumeFromSegment,
+      lastAccessAt: Date.now(),
+      stoppedForIdle: false,
+      completed: false,
+      idleTimer: null
+    };
+    this.registerTranscode(cacheKey, active, !hlsBuild.audioOnly);
+    const cleanupActiveTranscode = () => {
+      active.completed = true;
+      if (active.idleTimer) {
+        clearTimeout(active.idleTimer);
+      }
+      if (this.activeTranscodes.get(cacheKey) === active) {
+        this.activeTranscodes.delete(cacheKey);
+      }
+    };
+    exitPromise
+      .then(() => {
+        cleanupActiveTranscode();
+        logger.info(`[hls] transcode complete cacheKey=${cacheKey} input="${inputPath}"`);
+      })
+      .catch(async (err) => {
+        cleanupActiveTranscode();
+        if (active.stoppedForIdle) {
+          logger.info(`[hls] transcode paused after idle cacheKey=${cacheKey} input="${inputPath}"`);
+          return;
+        }
+
+        logger.error(`[hls] ffmpeg failed after launch input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
+        await fs.rm(cacheDir, { recursive: true, force: true });
+      })
+      .catch((err) => {
+        logger.error(`[hls] ffmpeg exit cleanup failed cacheKey=${cacheKey} input="${inputPath}" message="${err.message}"`, err);
+      });
+
     if (hlsBuild.audioOnly) {
       try {
         await waitForInitialHlsSegment(
-          path.join(cacheDir, "segment_00000.ts"),
+          path.join(cacheDir, `segment_${String(resumeFromSegment).padStart(5, "0")}.ts`),
           exitPromise,
           this.config.hls.segmentWaitTimeoutSeconds * 1000
         );
         logger.info(`[hls] audio HLS started input="${inputPath}" playlist="${playlistPath}"`);
+        this.armTranscodeIdleTimer(cacheKey, active);
       } catch (err) {
         logger.error(`[hls] audio ffmpeg failed before playback input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
+        cleanupActiveTranscode();
         await fs.rm(cacheDir, { recursive: true, force: true });
         throw err;
       }
-      exitPromise.catch(async (err) => {
-        logger.error(`[hls] audio ffmpeg failed after launch input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
-        await fs.rm(cacheDir, { recursive: true, force: true });
-      });
       return;
     }
-
-    exitPromise.catch(async (err) => {
-      logger.error(`[hls] ffmpeg failed after launch input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
-      await fs.rm(cacheDir, { recursive: true, force: true });
-    });
   }
 
-  async buildFfmpegArgs(inputPath, probe, options, playlistPath) {
+  async buildFfmpegArgs(inputPath, probe, options, playlistPath, resume = {}) {
     const videoStream = isAudioFile(inputPath) ? null : selectVideoStream(probe);
     const audioStream = selectAudioStream(probe, options.audio);
     const audioMode = selectAudioMode(audioStream, options.audioChannels);
     if (!videoStream) {
-      return this.buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath);
+      return this.buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume);
     }
     const subtitle = await this.selectSubtitle(inputPath, probe, options, audioStream);
     const qualityProfile = qualityProfileForProbe(probe, options.quality);
@@ -293,14 +529,16 @@ class HlsService {
     const forceCompatibleTranscode = this.config.hls.forceTranscodeCompatibleVideo && compatibleH264 && !scaleFilter;
     const needsTranscode = {
       video: !compatibleH264 || Boolean(scaleFilter) || forceCompatibleTranscode || qualityProfile.forceTranscode,
-      audio: audioStream.codec_name !== "aac" || audioMode.forceTranscode
+      audio: true
     };
     const hardwareProfile = await this.ffmpeg.detectHardwareProfile();
     const hardwareEncoder = hardwareProfile.encoder;
     const videoCodec = needsTranscode.video || subtitle
       ? hardwareEncoder || "libx264"
       : "copy";
-    const audioCodec = needsTranscode.audio ? "aac" : "copy";
+    // MPEG-TS segments must carry independently usable AAC configuration. Some
+    // container AAC tracks only provide that configuration in their first frame.
+    const audioCodec = "aac";
     const useHardwareFrames = hardwareProfile.hardwareFrames === "cuda" && videoCodec === hardwareProfile.encoder && Boolean(scaleFilter || subtitle);
     const hardwareDownloadFilter = useHardwareFrames ? hardwareFrameDownloadFilter(hardwareProfile.hardwareFrames, videoStream) : null;
     const hardwareUploadFilter = videoCodec === hardwareProfile.encoder ? hardwareProfile.uploadFilter : null;
@@ -308,6 +546,8 @@ class HlsService {
     const args = [
       "-hide_banner",
       "-y",
+      "-fflags",
+      "+genpts",
       "-analyzeduration",
       "100M",
       "-probesize",
@@ -324,6 +564,10 @@ class HlsService {
 
     if (useHardwareFrames && hardwareProfile.hwaccelArgs.length > 0) {
       args.push(...hardwareProfile.hwaccelArgs);
+    }
+
+    if (resume.resumeFromSeconds > 0) {
+      args.push("-ss", formatFfmpegSeconds(resume.resumeFromSeconds));
     }
 
     args.push("-i", inputPath);
@@ -372,9 +616,10 @@ class HlsService {
     }
 
     if (audioCodec === "aac") {
-      if (audioMode.filter) {
-        args.push("-af", audioMode.filter);
-      }
+      args.push("-af", composeFilters([
+        audioMode.filter,
+        "aresample=async=1000:first_pts=0"
+      ]));
       if (audioMode.channels) {
         args.push("-ac", String(audioMode.channels));
       }
@@ -415,7 +660,15 @@ class HlsService {
       ? ["split_by_time", "temp_file"]
       : ["independent_segments", "temp_file"];
 
+    if (resume.resumeFromSeconds > 0) {
+      args.push("-output_ts_offset", formatFfmpegSeconds(resume.resumeFromSeconds));
+    } else {
+      args.push("-avoid_negative_ts", "make_zero");
+    }
+
     args.push(
+      "-max_interleave_delta",
+      "0",
       "-f",
       "hls",
       "-hls_time",
@@ -424,6 +677,8 @@ class HlsService {
       "0",
       "-hls_flags",
       hlsFlags.join("+"),
+      "-start_number",
+      String(Math.max(0, Number.parseInt(resume.resumeFromSegment, 10) || 0)),
       "-hls_segment_filename",
       path.join(path.dirname(playlistPath), "segment_%05d.ts"),
       playlistPath
@@ -436,18 +691,23 @@ class HlsService {
     };
   }
 
-  buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath) {
+  buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume = {}) {
     const audioCodec = audioStream.codec_name === "aac" && !audioMode.forceTranscode ? "copy" : "aac";
     const segmentSeconds = Math.min(2, this.config.hls.segmentSeconds);
     const args = [
       "-hide_banner", "-y",
       "-analyzeduration", "1M",
-      "-probesize", "1M",
+      "-probesize", "1M"
+    ];
+    if (resume.resumeFromSeconds > 0) {
+      args.push("-ss", formatFfmpegSeconds(resume.resumeFromSeconds));
+    }
+    args.push(
       "-i", inputPath,
       "-map", `0:${audioStream.index}`,
       "-vn", "-sn",
       "-c:a", audioCodec
-    ];
+    );
     if (audioCodec === "aac") {
       if (audioMode.filter) {
         args.push("-af", audioMode.filter);
@@ -458,12 +718,16 @@ class HlsService {
       const channels = audioMode.channels || Number.parseInt(audioStream.channels, 10) || 2;
       args.push("-b:a", channels > 2 ? "512k" : "320k");
     }
+    if (resume.resumeFromSeconds > 0) {
+      args.push("-output_ts_offset", formatFfmpegSeconds(resume.resumeFromSeconds));
+    }
     args.push(
       "-muxdelay", "0",
       "-f", "hls",
       "-hls_time", String(segmentSeconds),
       "-hls_list_size", "0",
       "-hls_flags", "split_by_time+temp_file",
+      "-start_number", String(Math.max(0, Number.parseInt(resume.resumeFromSegment, 10) || 0)),
       "-hls_segment_filename", path.join(path.dirname(playlistPath), "segment_%05d.ts"),
       playlistPath
     );
@@ -1139,7 +1403,9 @@ function buildManifest(probe, segmentSeconds, options = {}) {
     segmentCount,
     targetDuration: Math.ceil(segmentSeconds),
     independentSegments: Boolean(options.independentSegments),
-    splitByTime: Boolean(options.splitByTime)
+    splitByTime: Boolean(options.splitByTime),
+    inputPath: options.inputPath || null,
+    options: options.options || null
   };
 }
 
@@ -1200,6 +1466,19 @@ function escapeSubtitleFilterPath(filePath) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatFfmpegSeconds(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0";
+  }
+
+  return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function canResumePartialTranscode(options) {
+  return options && options.subtitle === "none";
 }
 
 async function waitForInitialHlsSegment(filePath, exitPromise, timeoutMs) {

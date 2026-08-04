@@ -71,23 +71,59 @@ class PlaybackProgressStore {
     ));
   }
 
-  async list(userId = null) {
+  async list(userId = null, options = {}) {
     await this.init();
+    const filters = normalizeListOptions(options);
 
     if (this.config.mysql.enabled) {
+      const clauses = [];
+      const params = [];
+      if (userId) {
+        clauses.push("user_id = ?");
+        params.push(userId);
+      }
+      if (filters.excludedUserIds.length > 0) {
+        clauses.push(`user_id NOT IN (${filters.excludedUserIds.map(() => "?").join(", ")})`);
+        params.push(...filters.excludedUserIds);
+      }
+      if (filters.statuses.length > 0) {
+        clauses.push(`status IN (${filters.statuses.map(() => "?").join(", ")})`);
+        params.push(...filters.statuses);
+      }
+      if (filters.since) {
+        clauses.push("updated_at >= ?");
+        params.push(new Date(filters.since));
+      }
+      if (filters.before) {
+        clauses.push("updated_at < ?");
+        params.push(new Date(filters.before));
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+      const limit = filters.limit ? `LIMIT ${filters.limit} OFFSET ${filters.offset}` : "";
       const [rows] = await this.pool.execute(
         `SELECT user_id, media_type, media_id, status, position_seconds, duration_seconds, cache_key,
                 created_at, updated_at, watched_at
          FROM playback_progress
-         ${userId ? "WHERE user_id = ?" : ""}
-         ORDER BY updated_at DESC`
-        , userId ? [userId] : []
+         ${where}
+         ORDER BY updated_at DESC, user_id ASC, media_type ASC, media_id ASC
+         ${limit}`,
+        params
       );
       return rows.map(fromMysqlRecord);
     }
 
     const data = await this.readJson();
-    return Object.values(data).filter((record) => !userId || (record.userId || "global") === userId);
+    return Object.values(data)
+      .filter((record) => !userId || (record.userId || "global") === userId)
+      .filter((record) => !filters.excludedUserIds.includes(record.userId || "global"))
+      .filter((record) => filters.statuses.length === 0 || filters.statuses.includes(record.status))
+      .filter((record) => !filters.since || timeMs(record.updatedAt) >= filters.since)
+      .filter((record) => !filters.before || timeMs(record.updatedAt) < filters.before)
+      .sort((first, second) => timeMs(second.updatedAt) - timeMs(first.updatedAt)
+        || String(first.userId || "global").localeCompare(String(second.userId || "global"))
+        || String(first.mediaType || "").localeCompare(String(second.mediaType || ""))
+        || String(first.mediaId || "").localeCompare(String(second.mediaId || "")))
+      .slice(filters.offset, filters.limit ? filters.offset + filters.limit : undefined);
   }
 
   async save(record) {
@@ -131,6 +167,37 @@ class PlaybackProgressStore {
     return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
   }
 
+  async removeUser(userId) {
+    await this.init();
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedUserId) {
+      return 0;
+    }
+
+    if (this.config.mysql.enabled) {
+      const [result] = await this.pool.execute(
+        "DELETE FROM playback_progress WHERE user_id = ?",
+        [normalizedUserId]
+      );
+      return Number(result.affectedRows) || 0;
+    }
+
+    const data = await this.readJson();
+    let removed = 0;
+    for (const [key, record] of Object.entries(data)) {
+      if ((record.userId || "global") !== normalizedUserId) {
+        continue;
+      }
+      delete data[key];
+      removed += 1;
+    }
+    if (removed > 0) {
+      await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
+      await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
+    }
+    return removed;
+  }
+
   async init() {
     if (this.initialized) {
       return;
@@ -166,6 +233,12 @@ class PlaybackProgressStore {
       `);
       await ensureColumn(this.pool, "playback_progress", "user_id", "VARCHAR(64) NOT NULL DEFAULT 'global'");
       await ensureUserPrimaryKey(this.pool);
+      await ensureIndex(
+        this.pool,
+        "playback_progress",
+        "idx_playback_progress_user_updated",
+        ["user_id", "updated_at"]
+      );
     }
 
     this.initialized = true;
@@ -198,6 +271,22 @@ function normalizeRecord(record) {
   };
 }
 
+function normalizeListOptions(options) {
+  const statuses = [...new Set((Array.isArray(options.statuses) ? options.statuses : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+  return {
+    statuses,
+    excludedUserIds: [...new Set((Array.isArray(options.excludedUserIds) ? options.excludedUserIds : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))],
+    since: validTime(options.since),
+    before: validTime(options.before),
+    limit: Math.max(0, Math.min(Number.parseInt(options.limit, 10) || 0, 500)),
+    offset: Math.max(0, Number.parseInt(options.offset, 10) || 0)
+  };
+}
+
 function fromMysqlRecord(row) {
   return {
     mediaType: row.media_type,
@@ -211,6 +300,15 @@ function fromMysqlRecord(row) {
     updatedAt: toIso(row.updated_at),
     watchedAt: toIso(row.watched_at)
   };
+}
+
+function validTime(value) {
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function timeMs(value) {
+  return validTime(value) || 0;
 }
 
 function toIso(value) {
@@ -247,6 +345,23 @@ async function ensureUserPrimaryKey(pool) {
   }
 
   await pool.execute("ALTER TABLE playback_progress DROP PRIMARY KEY, ADD PRIMARY KEY (user_id, media_type, media_id)");
+}
+
+async function ensureIndex(pool, table, indexName, columns) {
+  const [rows] = await pool.execute(
+    `SELECT COUNT(*) AS count
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND INDEX_NAME = ?`,
+    [table, indexName]
+  );
+  if (Number(rows[0].count) > 0) {
+    return;
+  }
+  await pool.execute(
+    `CREATE INDEX ${indexName} ON ${table} (${columns.join(", ")})`
+  );
 }
 
 function recordKey(userId, mediaType, mediaId) {

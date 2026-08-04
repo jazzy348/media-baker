@@ -4,17 +4,18 @@ Use this guide for Docker deployments. The image includes Node.js, Linux FFmpeg 
 
 ## Features
 
-- WebUI with accounts, permissions, API keys, share URLs, self-service account settings, and per-user watch state.
+- Installable HTTPS WebUI with accounts, permissions, API keys, share URLs, self-service account settings, per-user watch state, cache-safe asset updates, and server-update reload notices.
 - Dynamic library creation, removal, ordering, folder browsing, and background re-indexing from the admin panel.
 - TV, movie, music, image, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
 - Recently added and randomized home rows, lazy library browsing, metadata-first search, show/season views, and random episode selection.
 - On Deck, next-episode handling, watch history, resume playback, and currently-playing admin view.
 - Browser playback and copyable HLS URLs for external players, with automatic next-episode and next-track playback, a movable themed music player, and minimizable floating video.
+- Optional background TV intro and credit detection with in-player skip controls, chapter support, recurring-theme matching, and post-credit scene preservation.
 - HLS cache reuse, one-transcode-per-file locking, pre-generation, quality presets, and fallback error stream.
 - Audio/subtitle selection, subtitle burn-in, SubDL search, subtitle sync, preserved 5.1, stereo mixdown, and Stabby Cinema 5.1 remapping.
 - ProTV and VRChat URL support including resume time and stereoscopic 3D mode parameters.
 - TMDb video metadata and MusicBrainz music metadata with 1024px WebP artwork caching, aliases, season artwork, episode thumbnails, manual matching, poster editing, and duplicate detection.
-- YT-DLP downloads with progress, automatic indexing, and generated thumbnails.
+- YT-DLP downloads, playlists, live recording or HLS relay, progress, automatic indexing, and generated thumbnails.
 - M3U and HDHomeRun Live TV with EPG refresh/matching, cached logos, deinterlacing, and rolling HLS.
 - MySQL storage or local JSON fallback for indexes, settings, accounts, sessions, metadata, and playback progress.
 - Admin settings, database backup/restore, hardware/network graphs, currently playing, live logs, history, and rotating log files.
@@ -108,6 +109,12 @@ On first launch, create the first admin account, then add libraries using contai
 
 Configure manual or scheduled database snapshots in `Admin > Backup & Restore`. The default destination is `/cache/backups`, which persists through the existing `./cache:/cache` mount. A restore replaces the configured MySQL database or JSON stores and restarts the supervised app process.
 
+When intro and credit detection is enabled, `Admin > Skip Detection` shows live progress, ETA, persisted failures, marker confidence, previews, retries, and reanalysis controls.
+
+## Custom Metadata Services
+
+Select `Custom` in `Admin > Settings > Metadata`, then enter the compatible service's base URL and API key. For containers on the same Docker network, use the service's container hostname and port; `localhost` inside the Media Baker container refers to Media Baker itself. See the [Custom Metadata API specification](README.metadata-service-api.md) to implement a compatible service.
+
 ## SMB And NAS Media
 
 Mount SMB/NAS shares on the Docker host, then bind-mount the mounted folder:
@@ -189,7 +196,7 @@ The image already includes Intel QSV/VAAPI and AMD VAAPI userspace drivers plus 
 
 ## YT-DLP
 
-Enable YT-DLP in `Admin > Settings`, choose the `/downloads` path or another mounted container folder, and use the Download button in the WebUI. Completed files are indexed automatically and receive generated thumbnails.
+Enable YT-DLP in `Admin > Settings`, choose the `/downloads` path or another mounted container folder, and use the Download button in the WebUI. Completed files are indexed automatically and receive generated thumbnails. Live URLs can be recorded into the library or relayed as rolling HLS for the WebUI or a unique third-party playback URL; completed live recordings receive 48 kHz AAC timestamp normalisation before indexing.
 
 ## Live TV
 
@@ -209,6 +216,8 @@ The supplied Compose file reserves 512 MB of shared memory.
 Configure release checks, prereleases, and automatic installation in `Admin > Settings > Updates`. Only admins see release notifications.
 
 The supervisor installs source releases under `/cache/app/current`, stops its server child, and starts the new version. The `/cache` mount preserves source updates across container recreation. Active streams stop during an update.
+
+When served over HTTPS, the WebUI offers installation as an app. The browser that starts an update reloads automatically when the new server is ready; other open clients show a reload notice after they reconnect. Plain HTTP remains available as a normal WebUI but does not advertise installation.
 
 Rebuild the image when a release changes Node.js, FFmpeg, system packages, the supervisor, or Docker configuration:
 

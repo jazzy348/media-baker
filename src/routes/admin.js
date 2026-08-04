@@ -5,8 +5,9 @@ const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
 const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
+const { shareProgressUserId } = require("../utils/progressIdentity");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, backups, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, iptv, updates }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -61,6 +62,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
         next(httpError(404, "Account not found"));
         return;
       }
+      await progress.removeUserHistory(req.params.id);
       res.json({ ok: true });
     } catch (err) {
       next(err);
@@ -115,7 +117,9 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
-      res.json({ settings: await appSettings.get() });
+      res.json({
+        settings: await appSettings.get()
+      });
     } catch (err) {
       next(err);
     }
@@ -154,18 +158,119 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
       if (ytdlpChanged && ytdlp && typeof ytdlp.restart === "function") {
         ytdlp.restart();
       }
+      if (ytdlpChanged && ytdlpRelay && typeof ytdlpRelay.restart === "function") {
+        ytdlpRelay.restart();
+      }
       if (iptvChanged && iptv && typeof iptv.restart === "function") {
         iptv.restart();
       }
       if (updatesChanged && updates && typeof updates.restart === "function") {
         updates.restart();
       }
+      if (optimizer && typeof optimizer.restart === "function") {
+        optimizer.restart();
+      }
+      if (skipDetection && typeof skipDetection.restart === "function") {
+        skipDetection.restart();
+      }
       if (ytdlpChanged && indexScanScheduler && typeof indexScanScheduler.run === "function") {
         indexScanScheduler.run("settings-update").catch((scanErr) => {
           logger.error(`[index-scan] settings update scan failed message="${scanErr.message}"`, scanErr);
         });
       }
-      res.json({ settings });
+      res.json({
+        settings
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/optimizer", requirePermission("canManageOptimizer"), (req, res) => {
+    res.json(optimizer.status());
+  });
+
+  router.put("/optimizer", requirePermission("canManageOptimizer"), async (req, res, next) => {
+    try {
+      const settings = await appSettings.save({
+        optimizer: {
+          enabled: Boolean(req.body && req.body.enabled),
+          scanIntervalSeconds: Number.parseInt(req.body && req.body.scanIntervalSeconds, 10) || 60,
+          parallelJobs: Number.parseInt(req.body && req.body.parallelJobs, 10) || 1,
+          libraries: req.body && req.body.libraries || {}
+        }
+      });
+      if (optimizer && typeof optimizer.restart === "function") {
+        optimizer.restart();
+      }
+      res.json({
+        settings: settings.optimizer,
+        status: optimizer.status()
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/optimizer/libraries/:libraryKey/full-scan", requirePermission("canManageOptimizer"), (req, res, next) => {
+    try {
+      const library = config.libraries.find((entry) => entry.key === req.params.libraryKey);
+      if (!library || (library.type !== "tv" && library.type !== "movies")) {
+        const err = new Error("Optimiser library not found");
+        err.status = 404;
+        throw err;
+      }
+      res.json(optimizer.startFullScan(library.key));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/optimizer/failures", requirePermission("canManageOptimizer"), async (req, res, next) => {
+    try {
+      res.json(await optimizer.clearFailures());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/skip-detection", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      res.json(await skipDetection.getStatus());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/skip-detection/markers", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      res.json({ items: await skipDetection.markerReviews(req.query.limit) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/skip-detection/retry-failures", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      res.status(202).json(await skipDetection.retryFailures());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/skip-detection/reanalyse", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      const mediaType = req.body && req.body.mediaType ? String(req.body.mediaType) : null;
+      const groupId = req.body && req.body.groupId ? String(req.body.groupId) : null;
+      if (mediaType && !config.libraries.some((library) => library.key === mediaType && library.type === "tv")) {
+        next(httpError(400, "TV library not found"));
+        return;
+      }
+      res.status(202).json(await skipDetection.reanalyse({
+        mediaType,
+        groupId,
+        includeFingerprints: Boolean(req.body && req.body.includeFingerprints)
+      }));
     } catch (err) {
       next(err);
     }
@@ -253,20 +358,53 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/history", requirePermission("canViewUserHistory"), async (req, res, next) => {
     try {
-      const accounts = await accountService.list();
-      const items = [];
-      for (const account of accounts) {
-        const userItems = await progress.history(mediaIndex, metadata, req.authToken, req.authParamName, null, account.id);
-        items.push(...userItems.map((item) => ({
-          ...item,
-          user: {
-            id: account.id,
-            username: account.username
-          }
-        })));
+      const { accounts, accountsById, shareSubjects, sharesById } = await loadHistorySubjects(accountService, libraryService);
+      const userId = String(req.query.userId || "").trim() || null;
+      if (userId && !accountsById.has(userId) && !sharesById.has(userId)) {
+        next(httpError(400, "Unknown history user"));
+        return;
       }
-      items.sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0));
-      res.json({ items });
+      const timespan = String(req.query.timespan || "7d").trim().toLowerCase();
+      const range = historyRange(timespan, req.query.from, req.query.to);
+      if (!range) {
+        next(httpError(400, "Invalid history timespan"));
+        return;
+      }
+      const limit = Math.max(1, Math.min(Number.parseInt(req.query.limit, 10) || 100, 250));
+      const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+      const page = await progress.adminHistory(
+        mediaIndex,
+        metadata,
+        req.authToken,
+        req.authParamName,
+        { userId, since: range.since, before: range.before, limit, offset }
+      );
+      res.json({
+        ...page,
+        items: page.items.map((item) => {
+          const account = accountsById.get(item.userId);
+          const share = sharesById.get(item.userId);
+          return {
+            ...item,
+            user: {
+              id: item.userId,
+              username: account ? account.username : share ? share.username : item.userId
+            }
+          };
+        }),
+        users: [
+          ...accounts.map((account) => ({ id: account.id, username: account.username })),
+          ...shareSubjects
+        ],
+        filters: {
+          userId,
+          timespan,
+          from: range.since,
+          to: range.before,
+          limit,
+          offset
+        }
+      });
     } catch (err) {
       next(err);
     }
@@ -274,17 +412,17 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/currently-playing", requirePermission("canViewUserHistory"), async (req, res, next) => {
     try {
-      const accounts = await accountService.list();
-      const accountsById = new Map(accounts.map((account) => [account.id, account]));
+      const { accountsById, sharesById } = await loadHistorySubjects(accountService, libraryService);
       const items = await progress.currentlyPlaying(mediaIndex, metadata, req.authToken, req.authParamName);
       res.json({
         items: items.map((item) => {
           const account = accountsById.get(item.userId);
+          const share = sharesById.get(item.userId);
           return {
             ...item,
             user: {
               id: item.userId,
-              username: account ? account.username : item.userId || "global"
+              username: account ? account.username : share ? share.username : item.userId
             }
           };
         })
@@ -601,6 +739,55 @@ function mediaSubtitle(item) {
 
 function pad(value) {
   return String(value || 0).padStart(2, "0");
+}
+
+function historyRange(timespan, from, to) {
+  if (timespan === "custom") {
+    const since = validHistoryTime(from);
+    const before = validHistoryTime(to);
+    return since && before && since < before ? { since, before } : null;
+  }
+  if (timespan === "all") {
+    return { since: null, before: null };
+  }
+  const milliseconds = {
+    "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000
+  }[timespan];
+  return milliseconds
+    ? { since: new Date(Date.now() - milliseconds).toISOString(), before: null }
+    : null;
+}
+
+function validHistoryTime(value) {
+  const time = Date.parse(String(value || ""));
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+function shareHistoryLabel(share, libraryTitles) {
+  const title = libraryTitles.get(share.libraryKey) || share.libraryKey;
+  const suffix = String(share.id || "").slice(0, 8);
+  return `Share: ${title} (${suffix}${share.revokedAt ? ", revoked" : ""})`;
+}
+
+async function loadHistorySubjects(accountService, libraryService) {
+  const [accounts, shares, libraries] = await Promise.all([
+    accountService.list(),
+    libraryService.listShares(),
+    libraryService.list()
+  ]);
+  const accountsById = new Map(accounts.map((account) => [account.id, account]));
+  const libraryTitles = new Map(libraries.map((library) => [library.key, library.title]));
+  const shareSubjects = shares.map((share) => ({
+    id: shareProgressUserId(share.id),
+    username: shareHistoryLabel(share, libraryTitles)
+  }));
+  return {
+    accounts,
+    accountsById,
+    shareSubjects,
+    sharesById: new Map(shareSubjects.map((share) => [share.id, share]))
+  };
 }
 
 function requirePermission(permission) {

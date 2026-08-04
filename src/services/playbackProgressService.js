@@ -1,6 +1,7 @@
 const STATUS_IN_PROGRESS = "in_progress";
 const STATUS_WATCHED = "watched";
 const STATUS_REMOVED = "removed";
+const WATCHED_PREFETCH_GRACE_SECONDS = 30;
 const logger = require("../utils/logger");
 
 class PlaybackProgressService {
@@ -23,7 +24,26 @@ class PlaybackProgressService {
     ]));
   }
 
-  async recordSegmentDelivery(userId, mediaType, mediaId, cacheKey, playbackSessionId, segment) {
+  async removeUserHistory(userId) {
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedUserId) {
+      return 0;
+    }
+
+    for (const [key, session] of this.playbackSessions) {
+      if (session.userId !== normalizedUserId) {
+        continue;
+      }
+      if (session.completionTimer) {
+        clearTimeout(session.completionTimer);
+      }
+      this.playbackSessions.delete(key);
+    }
+
+    return this.store.removeUser(normalizedUserId);
+  }
+
+  async recordSegmentDelivery(userId, mediaType, mediaId, cacheKey, playbackSessionId, segment, options = {}) {
     if (!segment || !Number.isFinite(segment.startSeconds) || !Number.isFinite(segment.durationSeconds)) {
       return null;
     }
@@ -33,10 +53,8 @@ class PlaybackProgressService {
       return null;
     }
 
-    const current = await this.store.get(userId, mediaType, mediaId);
-    if (current && current.status === STATUS_REMOVED) {
-      return current;
-    }
+    const trackProgress = options.trackProgress !== false;
+    const current = trackProgress ? await this.store.get(userId, mediaType, mediaId) : null;
 
     const positionSeconds = this.confirmedPosition(
       playbackSessionId,
@@ -44,8 +62,16 @@ class PlaybackProgressService {
       mediaType,
       mediaId,
       current,
-      segment
+      segment,
+      cacheKey,
+      durationSeconds
     );
+    if (!trackProgress) {
+      return null;
+    }
+    if (current && current.status === STATUS_REMOVED) {
+      return current;
+    }
     const tailSegmentsComplete = this.recordTailSegmentDelivery(
       playbackSessionId,
       userId,
@@ -58,17 +84,21 @@ class PlaybackProgressService {
     if (positionSeconds <= 0 && !current) {
       return null;
     }
+    const threshold = watchedThreshold(this.config);
+    const completionPositionSeconds = watchedCompletionPosition(positionSeconds, durationSeconds, segment);
+    const markerCompletionSeconds = positiveCompletionSeconds(options.completionStartSeconds, durationSeconds);
+    const watched = tailSegmentsComplete
+      || (markerCompletionSeconds !== null && completionPositionSeconds >= markerCompletionSeconds)
+      || completionPositionSeconds >= durationSeconds * (1 - threshold);
     if (current
       && current.status === STATUS_IN_PROGRESS
       && positionSeconds <= Number(current.positionSeconds || 0)
-      && !tailSegmentsComplete) {
+      && !watched) {
       if (segment.isFinalSegment) {
         this.scheduleEndOfStreamSettlement(playbackSessionId, userId, mediaType, mediaId, cacheKey, current);
       }
       return current;
     }
-    const threshold = watchedThreshold(this.config);
-    const watched = tailSegmentsComplete || positionSeconds >= durationSeconds * (1 - threshold);
     const nextRecord = {
       ...current,
       userId: userId || "global",
@@ -88,7 +118,7 @@ class PlaybackProgressService {
     return saved;
   }
 
-  confirmedPosition(playbackSessionId, userId, mediaType, mediaId, current, segment) {
+  confirmedPosition(playbackSessionId, userId, mediaType, mediaId, current, segment, cacheKey, durationSeconds) {
     const now = Date.now();
     this.removeExpiredPlaybackSessions(now);
     const sessionKey = playbackSessionId || `${userId || "global"}:${mediaType}:${mediaId}:${segment.startSeconds}`;
@@ -102,6 +132,8 @@ class PlaybackProgressService {
         userId: userId || "global",
         mediaType,
         mediaId,
+        cacheKey: cacheKey || null,
+        durationSeconds,
         confirmedSeconds: Math.min(storedPosition, segmentStart),
         lastSegmentIndex: Number.isFinite(segment.index) ? segment.index : null,
         initialSeekCandidate: Number.isFinite(segment.index) && segmentStart - storedPosition >= 30
@@ -146,6 +178,8 @@ class PlaybackProgressService {
     if (Number.isFinite(segment.index)) {
       session.lastSegmentIndex = segment.index;
     }
+    session.cacheKey = cacheKey || session.cacheKey || null;
+    session.durationSeconds = Math.max(Number(session.durationSeconds) || 0, Number(durationSeconds) || 0);
     session.lastDeliveryAt = now;
     session.lastActivityAt = now;
     return session.confirmedSeconds;
@@ -215,6 +249,55 @@ class PlaybackProgressService {
       if (session.completionTimer) clearTimeout(session.completionTimer);
       session.completionTimer = null;
     }
+  }
+
+  async recordPlaybackPosition(userId, mediaType, mediaId, positionSeconds, durationSeconds, options = {}) {
+    const duration = Math.max(0, Number(durationSeconds) || 0);
+    const position = Math.max(0, Math.min(duration, Number(positionSeconds) || 0));
+    if (duration <= 0) {
+      return null;
+    }
+
+    const normalizedUserId = userId || "global";
+    const current = await this.store.get(normalizedUserId, mediaType, mediaId);
+    const now = Date.now();
+    const sessionKey = `web:${normalizedUserId}:${mediaType}:${mediaId}`;
+    const session = this.playbackSessions.get(sessionKey) || {
+      userId: normalizedUserId,
+      mediaType,
+      mediaId,
+      cacheKey: current && current.cacheKey || null,
+      completionTimer: null,
+      tailSegmentIndexes: new Set()
+    };
+    session.confirmedSeconds = position;
+    session.durationSeconds = duration;
+    session.lastDeliveryAt = now;
+    session.lastActivityAt = now;
+    this.playbackSessions.set(sessionKey, session);
+
+    if (current && current.status === STATUS_REMOVED) {
+      return current;
+    }
+    if (position <= 0 && !current) {
+      return null;
+    }
+
+    const markerCompletionSeconds = positiveCompletionSeconds(options.completionStartSeconds, duration);
+    const watched = Boolean(current && current.status === STATUS_WATCHED)
+      || (markerCompletionSeconds !== null && position >= markerCompletionSeconds)
+      || position >= duration * (1 - watchedThreshold(this.config));
+    return this.store.save({
+      ...current,
+      userId: normalizedUserId,
+      mediaType,
+      mediaId,
+      status: watched ? STATUS_WATCHED : STATUS_IN_PROGRESS,
+      positionSeconds: watched ? duration : position,
+      durationSeconds: duration,
+      cacheKey: current && current.cacheKey || null,
+      watchedAt: watched ? current && current.watchedAt || new Date().toISOString() : null
+    });
   }
 
   async markWatched(userId, mediaType, mediaId, durationSeconds = 0) {
@@ -352,17 +435,71 @@ class PlaybackProgressService {
     return items.sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
   }
 
-  async currentlyPlaying(mediaIndex, metadata, authToken, authParamName = "authToken", activeSeconds = 120) {
-    const cutoff = Date.now() - Math.max(15, Number(activeSeconds) || 120) * 1000;
-    const records = await this.store.list();
+  async adminHistory(mediaIndex, metadata, authToken, authParamName = "authToken", options = {}) {
+    const limit = Math.max(1, Math.min(Number.parseInt(options.limit, 10) || 100, 250));
+    const records = await this.store.list(options.userId || null, {
+      statuses: [STATUS_WATCHED, STATUS_IN_PROGRESS],
+      excludedUserIds: ["global"],
+      since: options.since,
+      before: options.before,
+      offset: options.offset,
+      limit: limit + 1
+    });
+    const pageRecords = records.slice(0, limit);
     const items = [];
-
-    for (const record of records) {
-      if (record.status !== STATUS_IN_PROGRESS || timeMs(record.updatedAt) < cutoff) {
+    for (const record of pageRecords) {
+      const mediaFile = await mediaFileForRecord(mediaIndex, record);
+      if (!mediaFile) {
         continue;
       }
+      items.push({
+        ...await this.cardForRecord(
+          mediaIndex,
+          metadata,
+          authToken,
+          authParamName,
+          record,
+          mediaFile,
+          "history"
+        ),
+        userId: record.userId || "global"
+      });
+    }
 
-      const mediaFile = await mediaFileForRecord(mediaIndex, record);
+    return {
+      items,
+      hasMore: records.length > limit,
+      nextOffset: records.length > limit
+        ? Math.max(0, Number.parseInt(options.offset, 10) || 0) + limit
+        : null
+    };
+  }
+
+  async currentlyPlaying(mediaIndex, metadata, authToken, authParamName = "authToken", activeSeconds = 120) {
+    const now = Date.now();
+    const cutoff = now - Math.max(15, Number(activeSeconds) || 120) * 1000;
+    this.removeExpiredPlaybackSessions(now);
+    const sessions = [...this.playbackSessions.values()]
+      .filter((session) => Number(session.lastActivityAt) >= cutoff);
+    const items = [];
+
+    for (const session of sessions) {
+      const stored = await this.store.get(session.userId, session.mediaType, session.mediaId);
+      const record = {
+        ...stored,
+        userId: session.userId || "global",
+        mediaType: session.mediaType,
+        mediaId: session.mediaId,
+        status: STATUS_IN_PROGRESS,
+        positionSeconds: Math.max(0, Number(session.confirmedSeconds) || 0),
+        durationSeconds: Math.max(
+          Number(session.durationSeconds) || 0,
+          Number(stored && stored.durationSeconds) || 0
+        ),
+        cacheKey: session.cacheKey || stored && stored.cacheKey || null,
+        updatedAt: new Date(session.lastActivityAt).toISOString()
+      };
+      const mediaFile = await mediaFileForRecord(mediaIndex, record, false);
       if (!mediaFile) {
         continue;
       }
@@ -371,7 +508,7 @@ class PlaybackProgressService {
         ...await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "active"),
         userId: record.userId || "global",
         cacheKey: record.cacheKey || null,
-        activeAgoSeconds: Math.max(0, Math.round((Date.now() - timeMs(record.updatedAt)) / 1000))
+        activeAgoSeconds: Math.max(0, Math.round((now - session.lastActivityAt) / 1000))
       });
     }
 
@@ -417,22 +554,31 @@ class PlaybackProgressService {
 
   async cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason) {
     const item = itemFromMediaFile(mediaIndex, record.mediaType, mediaFile);
-    const cached = metadata && metadata.getCachedForMedia
-      ? await metadata.getCachedForMedia(record.mediaType, metadataIdForMediaFile(mediaFile))
+    const [cached, seriesCached] = metadata && metadata.getCachedForMedia
+      ? await Promise.all([
+        metadata.getCachedForMedia(record.mediaType, metadataIdForMediaFile(mediaFile)),
+        mediaFile.showId ? metadata.getCachedForMedia(record.mediaType, mediaFile.showId) : null
+      ])
+      : [null, null];
+    const preservePlayableTitle = Boolean(mediaFile.showId || mediaFile.artistId);
+    const title = !preservePlayableTitle && cached && cached.available && cached.title
+      ? cached.title
+      : item.title;
+    const seriesPosterUrl = seriesCached && seriesCached.available && seriesCached.posterFilename
+      ? metadata.posterUrl(seriesCached.posterFilename, authToken, authParamName)
       : null;
-    const title = cached && cached.available && cached.title ? cached.title : item.title;
     return {
       ...item,
       title,
       metadataTitle: cached && cached.available ? cached.title : null,
       metadataAliases: cached && cached.available ? cached.aliases || [] : [],
-      posterUrl: cached && cached.posterFilename ? metadata.posterUrl(cached.posterFilename, authToken, authParamName) : item.posterUrl,
+      posterUrl: seriesPosterUrl || (cached && cached.posterFilename ? metadata.posterUrl(cached.posterFilename, authToken, authParamName) : item.posterUrl),
       thumbnailUrl: (item.showId || item.localThumbnail) && metadata
         ? metadata.thumbnailUrl(record.mediaType, item.id, authToken, authParamName)
         : item.thumbnailUrl,
-      seasonPosterUrl: item.showId && metadata
+      seasonPosterUrl: seriesPosterUrl || (item.showId && metadata
         ? metadata.seasonPosterUrl(record.mediaType, item.id, authToken, authParamName)
-        : null,
+        : null),
       progress: toPublicProgress(record),
       onDeckReason: reason,
       updatedAt: record.updatedAt || null
@@ -488,9 +634,9 @@ function itemFromMediaFile(mediaIndex, mediaType, mediaFile) {
   };
 }
 
-async function mediaFileForRecord(mediaIndex, record) {
+async function mediaFileForRecord(mediaIndex, record, requireProgressTracking = true) {
   const library = mediaIndex.libraryForKey(record.mediaType);
-  if (!library || library.trackProgress === false) {
+  if (!library || requireProgressTracking && library.trackProgress === false) {
     return null;
   }
 
@@ -559,6 +705,24 @@ function emptyProgress(mediaType, mediaId) {
 function watchedThreshold(config) {
   const percent = Math.max(1, Math.min(Number(config.playback.watchedThresholdPercent) || 10, 95));
   return percent / 100;
+}
+
+function watchedCompletionPosition(positionSeconds, durationSeconds, segment) {
+  const deliveredThroughSeconds = Math.min(
+    durationSeconds,
+    Math.max(0, Number(segment.startSeconds) || 0) + Math.max(0, Number(segment.durationSeconds) || 0)
+  );
+  return Math.max(
+    positionSeconds,
+    Math.min(deliveredThroughSeconds, positionSeconds + WATCHED_PREFETCH_GRACE_SECONDS)
+  );
+}
+
+function positiveCompletionSeconds(value, durationSeconds) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 && seconds < durationSeconds
+    ? seconds
+    : null;
 }
 
 function recordMap(records) {

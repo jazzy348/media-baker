@@ -1,10 +1,11 @@
 const express = require("express");
+const { safeRequestUrl } = require("../utils/safeRequestUrl");
 const path = require("path");
 const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const logger = require("../utils/logger");
 
-module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress }, options = {}) {
+module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress, skipDetection }, options = {}) {
   const router = express.Router();
   const streamSurface = options.surface === "web" ? "web" : "copy";
 
@@ -81,8 +82,8 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
 
         const progressLibrary = mediaIndex.libraryForKey(req.playbackTokenPayload.mediaType);
         if (progress
+          && streamSurface !== "web"
           && progressLibrary
-          && progressLibrary.trackProgress !== false
           && req.playbackTokenPayload.mediaType
           && req.playbackTokenPayload.mediaId) {
           hls.segmentProgress(req.params.cacheKey, req.params.filename)
@@ -92,7 +93,11 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
               req.playbackTokenPayload.mediaId,
               req.params.cacheKey,
               req.playbackTokenPayload.jti,
-              segmentProgress
+              segmentProgress,
+              {
+                trackProgress: progressLibrary.trackProgress !== false,
+                completionStartSeconds: req.playbackTokenPayload.completionStartSeconds
+              }
             ))
             .catch((progressErr) => logger.error(`[progress] segment delivery update failed message="${progressErr.message}"`, progressErr));
         }
@@ -109,7 +114,7 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
         return next(httpError(401, "Unauthorized"));
       }
 
-      logger.info(`[stream] request mediaType=${req.params.mediaType} id=${req.params.id} audio=${req.query.audio || "default"} subtitle=${req.query.subtitle || "auto"} audioChannels=${req.query.audioChannels || req.query.audioMode || req.query.channelMode || "preserve"} quality=${req.query.quality || "original"} url="${safeUrl(req)}"`);
+      logger.info(`[stream] request mediaType=${req.params.mediaType} id=${req.params.id} audio=${req.query.audio || "default"} subtitle=${req.query.subtitle || "auto"} audioChannels=${req.query.audioChannels || req.query.audioMode || req.query.channelMode || "preserve"} quality=${req.query.quality || "original"} url="${safeRequestUrl(req)}"`);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       logger.info(`[stream] resolved file id=${req.params.id} title="${mediaFile.title || mediaFile.showName || mediaFile.filename}" file="${mediaFile.filePath}"`);
       const stream = await hls.prepare(mediaFile, {
@@ -120,9 +125,23 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       });
       logger.info(`[stream] serving playlist cacheKey=${stream.cacheKey} playlist="${stream.playlistPath}"`);
       const playlist = await hls.getPlaylist(stream.cacheKey);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      const completionStartSeconds = streamSurface !== "web"
+        && library
+        && library.type === "tv"
+        && skipDetection
+        && typeof skipDetection.completionStartSeconds === "function"
+        ? await skipDetection.completionStartSeconds(req.params.mediaType, mediaFile)
+        : null;
       const hlsToken = streamSurface === "web"
         ? playbackTokens.createWebHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global")
-        : playbackTokens.createCopyHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global");
+        : playbackTokens.createCopyHlsToken(
+          stream.cacheKey,
+          req.params.mediaType,
+          req.params.id,
+          req.playbackTokenPayload.userId || "global",
+          completionStartSeconds
+        );
       res.type(contentTypeFor("master.m3u8"));
       res.send(rewritePlaylistUrls(
         playlist,
@@ -137,17 +156,6 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
 
   return router;
 };
-
-function safeUrl(req) {
-  const url = new URL(req.originalUrl, "http://localhost");
-  for (const key of ["secret", "authToken", "apiKey", "shareToken", "playbackSecret", "playbackToken"]) {
-    if (url.searchParams.has(key)) {
-      url.searchParams.set(key, "[redacted]");
-    }
-  }
-
-  return `${url.pathname}${url.search}`;
-}
 
 function rewritePlaylistUrls(playlist, baseUrl, secret, authQuery = null) {
   return playlist

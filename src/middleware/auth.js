@@ -1,3 +1,5 @@
+const { shareProgressUserId } = require("../utils/progressIdentity");
+
 function createAuthMiddleware(accountService, libraryService = null) {
   return async (req, res, next) => {
     const shareToken = extractShareToken(req);
@@ -10,6 +12,8 @@ function createAuthMiddleware(accountService, libraryService = null) {
           req.authParamName = "shareToken";
           req.authFromCookie = req.authCookieType === "share";
           req.shareToken = shareToken;
+          req.share = share.share;
+          req.progressUserId = shareProgressUserId(share.share.id);
           req.allowedLibraryKey = share.library.key;
           req.allowedLibrary = share.library;
           next();
@@ -28,6 +32,7 @@ function createAuthMiddleware(accountService, libraryService = null) {
         if (user) {
           req.authMode = user.permissions.isAdmin ? "admin" : "user";
           req.user = user;
+          req.progressUserId = user.id;
           req.authToken = sessionToken;
           req.authParamName = "authToken";
           req.authFromCookie = req.authCookieType === "session";
@@ -48,6 +53,7 @@ function createAuthMiddleware(accountService, libraryService = null) {
         if (user) {
           req.authMode = user.permissions.isAdmin ? "admin" : "user";
           req.user = user;
+          req.progressUserId = user.id;
           req.authToken = apiKey;
           req.authParamName = "apiKey";
           req.allowedLibraryKeys = user.permissions.isAdmin ? null : user.permissions.libraries;
@@ -76,6 +82,26 @@ function createStreamAuthMiddleware(playbackTokens) {
     req.playbackToken = provided;
     req.playbackTokenPayload = payload;
     next();
+  };
+}
+
+function createApiKeyAuthMiddleware(accountService) {
+  return async (req, res, next) => {
+    const apiKey = extractApiKey(req);
+    if (!apiKey || !accountService) return next(unauthorizedError());
+    try {
+      const user = await accountService.verifyApiKey(apiKey);
+      if (!user) return next(unauthorizedError());
+      req.authMode = user.permissions.isAdmin ? "admin" : "user";
+      req.user = user;
+      req.progressUserId = user.id;
+      req.authToken = apiKey;
+      req.authParamName = "apiKey";
+      req.allowedLibraryKeys = user.permissions.isAdmin ? null : user.permissions.libraries;
+      next();
+    } catch (err) {
+      next(err);
+    }
   };
 }
 
@@ -199,6 +225,7 @@ function unauthorizedError() {
 
 module.exports = {
   createAuthMiddleware,
+  createApiKeyAuthMiddleware,
   createStreamAuthMiddleware,
   establishWebStreamAuthCookie,
   clearWebStreamAuthCookies

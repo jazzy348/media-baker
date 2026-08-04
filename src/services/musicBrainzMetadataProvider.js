@@ -6,9 +6,10 @@ const COVER_ART_BASE = "https://coverartarchive.org";
 const USER_AGENT = "MediaBaker/0.2.0 (https://github.com/jazzy348/media-baker)";
 
 class MusicBrainzMetadataProvider {
-  constructor(posterDir, cachedImages) {
+  constructor(posterDir, cachedImages, customMetadata = null) {
     this.posterDir = posterDir;
     this.cachedImages = cachedImages;
+    this.customMetadata = customMetadata;
     this.requestQueue = Promise.resolve();
     this.lastRequestAt = 0;
   }
@@ -22,6 +23,17 @@ class MusicBrainzMetadataProvider {
     const album = String(input.title || input.album || mediaFile.albumName || "").trim();
     const artist = String(input.artist || mediaFile.artistName || "").trim();
     const year = Number.parseInt(input.year || mediaFile.year, 10) || null;
+    if (this.customMetadata && this.customMetadata.active()) {
+      const recordingSearch = isUnknownAlbum(album);
+      const response = await this.customMetadata.search({
+        mediaType: "music",
+        title: recordingSearch ? String(mediaFile.title || mediaFile.filename || "").trim() : album,
+        artist,
+        year,
+        searchType: recordingSearch ? "track" : "album"
+      });
+      return response.items.map(customRelease);
+    }
     if (isUnknownAlbum(album)) {
       return this.searchRecordings(mediaFile, artist);
     }
@@ -74,14 +86,20 @@ class MusicBrainzMetadataProvider {
   }
 
   async lookup(providerId) {
+    if (this.customMetadata && this.customMetadata.active()) {
+      return customRelease((await this.customMetadata.media("music", providerId)).item);
+    }
     const params = new URLSearchParams({ inc: "artist-credits+release-groups+recordings", fmt: "json" });
     return this.fetchJson(`${API_BASE}/release/${encodeURIComponent(providerId)}?${params.toString()}`);
   }
 
   async createRecord(mediaType, mediaFile, release) {
+    if (this.customMetadata && this.customMetadata.active() && release.id) {
+      release = await this.lookup(release.id);
+    }
     const providerId = String(release.id || "");
     const artistName = artistCredit(release) || mediaFile.artistName;
-    const posterPath = providerId ? `${COVER_ART_BASE}/release/${providerId}/front-500` : null;
+    const posterPath = release.__customPosterPath || (providerId ? `${COVER_ART_BASE}/release/${providerId}/front-500` : null);
     const posterFilename = posterPath ? await this.cacheCover(providerId, posterPath) : null;
     const date = release.date || release["release-group"] && release["release-group"]["first-release-date"];
     return {
@@ -111,7 +129,11 @@ class MusicBrainzMetadataProvider {
     if (!record.providerId || record.posterFilename) {
       return record;
     }
-    const posterPath = `${COVER_ART_BASE}/release/${record.providerId}/front-500`;
+    let posterPath = `${COVER_ART_BASE}/release/${record.providerId}/front-500`;
+    if (this.customMetadata && this.customMetadata.active()) {
+      const release = await this.lookup(record.providerId);
+      posterPath = release.__customPosterPath || posterPath;
+    }
     const posterFilename = await this.cacheCover(record.providerId, posterPath);
     return {
       ...record,
@@ -132,7 +154,9 @@ class MusicBrainzMetadataProvider {
       year: date ? Number.parseInt(String(date).slice(0, 4), 10) || null : null,
       overview: [artistCredit(release), release.country, release.status].filter(Boolean).join(" - "),
       posterPath: release.id ? `${COVER_ART_BASE}/release/${release.id}/front-250` : null,
-      posterUrl: release.id ? `${COVER_ART_BASE}/release/${release.id}/front-250` : null,
+      posterUrl: release.__customPosterPath
+        ? `/api/catalog/metadata/custom-poster/${encodeURIComponent(release.__customPosterPath.slice("custom-asset:".length))}`
+        : release.id ? `${COVER_ART_BASE}/release/${release.id}/front-250` : null,
       score: Number(release.score) || 0,
       popularity: 0,
       voteCount: 0
@@ -147,6 +171,16 @@ class MusicBrainzMetadataProvider {
       return filename;
     } catch (err) {
       if (err.code !== "ENOENT") {
+        throw err;
+      }
+    }
+
+    if (String(url).startsWith("custom-asset:") && this.customMetadata && this.customMetadata.active()) {
+      try {
+        const buffer = await this.customMetadata.artwork(String(url).slice("custom-asset:".length));
+        return this.cachedImages.cacheBuffer(buffer, this.posterDir, filename, ".webp");
+      } catch (err) {
+        if (/HTTP 404\b/.test(err.message)) return null;
         throw err;
       }
     }
@@ -182,6 +216,17 @@ class MusicBrainzMetadataProvider {
     this.requestQueue = task.catch(() => {});
     return task;
   }
+}
+
+function customRelease(item) {
+  return {
+    id: item.id,
+    title: item.title,
+    date: item.releaseDate || (item.releaseYear ? `${item.releaseYear}-01-01` : null),
+    __customPosterPath: item.artwork && item.artwork.id ? `custom-asset:${item.artwork.id}` : null,
+    "artist-credit": item.artist ? [{ name: item.artist }] : [],
+    score: Number(item.popularity) || 0
+  };
 }
 
 function artistCredit(release) {

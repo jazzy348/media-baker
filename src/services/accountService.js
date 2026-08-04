@@ -18,6 +18,7 @@ const DEFAULT_PERMISSIONS = {
   canManageSettings: false,
   canManageApiKeys: false,
   canManageBackups: false,
+  canManageOptimizer: false,
   canReindex: false,
   canManageUsers: false,
   canViewAdmin: false,
@@ -133,6 +134,7 @@ class AccountService {
         canManageSettings: true,
         canManageApiKeys: true,
         canManageBackups: true,
+        canManageOptimizer: true,
         canReindex: true,
         canManageUsers: true,
         canViewAdmin: true,
@@ -570,6 +572,7 @@ function normalizePermissions(value = {}) {
       canManageSettings: true,
       canManageApiKeys: true,
       canManageBackups: true,
+      canManageOptimizer: true,
       canReindex: true,
       canManageUsers: true,
       canViewAdmin: true,
@@ -587,6 +590,7 @@ function normalizePermissions(value = {}) {
     || permissions.canManageSettings
     || permissions.canManageApiKeys
     || permissions.canManageBackups
+    || permissions.canManageOptimizer
     || permissions.canManageUsers
     || permissions.canReindex
     || permissions.canViewHardware
@@ -602,6 +606,7 @@ function normalizePermissions(value = {}) {
     canManageSettings: Boolean(permissions.canManageSettings),
     canManageApiKeys: Boolean(permissions.canManageApiKeys),
     canManageBackups: Boolean(permissions.canManageBackups),
+    canManageOptimizer: Boolean(permissions.canManageOptimizer),
     canReindex: Boolean(permissions.canReindex),
     canManageUsers: Boolean(permissions.canManageUsers),
     canViewAdmin,

@@ -138,7 +138,8 @@ class UpdateService {
       url: String(release.html_url),
       archiveUrl: String(release.zipball_url),
       prerelease: Boolean(release.prerelease),
-      publishedAt: release.published_at || null
+      publishedAt: release.published_at || null,
+      changelog: String(release.body || "").trim().slice(0, 20000)
     };
     this.error = null;
     logger.info(`[updates] release check complete current=${packageJson.version} latest=${version} prerelease=${this.latest.prerelease} available=${this.updateAvailable()}`);
@@ -274,7 +275,8 @@ class UpdateService {
         name: this.latest.name,
         url: this.latest.url,
         prerelease: this.latest.prerelease,
-        publishedAt: this.latest.publishedAt
+        publishedAt: this.latest.publishedAt,
+        changelog: this.latest.changelog
       } : null,
       updateAvailable: this.updateAvailable(),
       error: this.error,

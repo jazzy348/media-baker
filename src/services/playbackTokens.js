@@ -18,14 +18,19 @@ class PlaybackTokenService {
     });
   }
 
-  createCopyHlsToken(cacheKey, mediaType = null, mediaId = null, userId = null) {
-    return this.sign({
+  createCopyHlsToken(cacheKey, mediaType = null, mediaId = null, userId = null, completionStartSeconds = null) {
+    const payload = {
       scope: "copy-hls",
       cacheKey,
       mediaType,
       mediaId,
       userId
-    });
+    };
+    const completionStart = Number(completionStartSeconds);
+    if (Number.isFinite(completionStart) && completionStart > 0) {
+      payload.completionStartSeconds = completionStart;
+    }
+    return this.sign(payload);
   }
 
   createWebStreamToken(mediaType, mediaId, userId = null) {
@@ -43,6 +48,14 @@ class PlaybackTokenService {
       cacheKey,
       mediaType,
       mediaId,
+      userId
+    });
+  }
+
+  createRelayToken(relayId, userId = null) {
+    return this.sign({
+      scope: "relay-hls",
+      relayId,
       userId
     });
   }

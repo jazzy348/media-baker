@@ -13,6 +13,8 @@ class FFmpegService {
     this.enableGpu = options.enableGpu;
     this.cachedHardwareEncoder = null;
     this.cachedHardwareProfile = null;
+    this.cachedHevcHardwareEncoder = null;
+    this.cachedHevcHardwareProfile = null;
     this.cachedVaapiDevice = null;
     this.cachedValidation = null;
     this.cachedValidationAt = 0;
@@ -25,6 +27,8 @@ class FFmpegService {
     this.enableGpu = options.enableGpu;
     this.cachedHardwareEncoder = null;
     this.cachedHardwareProfile = null;
+    this.cachedHevcHardwareEncoder = null;
+    this.cachedHevcHardwareProfile = null;
     this.cachedVaapiDevice = null;
     this.cachedValidation = null;
     this.cachedValidationAt = 0;
@@ -85,6 +89,7 @@ class FFmpegService {
       "json",
       "-show_format",
       "-show_streams",
+      ...(options.showChapters ? ["-show_chapters"] : []),
       filePath
     ];
 
@@ -92,6 +97,218 @@ class FFmpegService {
     const result = JSON.parse(stdout);
     logger.full(`[ffprobe] found ${result.streams ? result.streams.length : 0} streams for file="${filePath}"`);
     return result;
+  }
+
+  async probePacketTimeline(filePath, streamSpecifier, expectedDurationSeconds, options = {}) {
+    const expectedDuration = Math.max(1, Number(expectedDurationSeconds) || 1);
+    const edgeWindowSeconds = Math.min(120, Math.max(30, expectedDuration / 4));
+    const inactivityTimeoutMs = options.inactivityTimeoutMs || 2 * 60 * 1000;
+    if (expectedDuration <= edgeWindowSeconds * 2) {
+      const timeline = await this.probePacketWindow(
+        filePath,
+        streamSpecifier,
+        0,
+        expectedDuration + 5,
+        inactivityTimeoutMs,
+        { onProgress: options.onProgress }
+      );
+      if (!timeline) {
+        throw new Error(`No packet timestamps were returned for stream ${streamSpecifier}`);
+      }
+      options.onProgress?.({ percent: 100, packetCount: timeline.packetCount });
+      return timeline;
+    }
+
+    const beginningTimeline = await this.probePacketWindow(
+      filePath,
+      streamSpecifier,
+      0,
+      edgeWindowSeconds,
+      inactivityTimeoutMs,
+      { onProgress: rangedProgress(options.onProgress, 0, 50) }
+    );
+    const endingTimeline = await this.probeEndingPacketWindow(
+      filePath,
+      streamSpecifier,
+      expectedDuration,
+      edgeWindowSeconds,
+      inactivityTimeoutMs,
+      { onProgress: rangedProgress(options.onProgress, 50, 100) }
+    );
+    const timeline = combinePacketTimelines(beginningTimeline, endingTimeline);
+    if (!timeline) {
+      throw new Error(`No packet timestamps were returned for stream ${streamSpecifier}`);
+    }
+    options.onProgress?.({ percent: 100, packetCount: timeline.packetCount });
+    return timeline;
+  }
+
+  async probePacketContentTimeline(filePath, streamSpecifier, options = {}) {
+    const inactivityTimeoutMs = options.inactivityTimeoutMs || 10 * 60 * 1000;
+    const timeline = await this.probePacketWindow(
+      filePath,
+      streamSpecifier,
+      0,
+      0,
+      inactivityTimeoutMs,
+      {
+        fullFile: true,
+        expectedDurationSeconds: options.expectedDurationSeconds,
+        onProgress: options.onProgress
+      }
+    );
+    if (!timeline || timeline.packetDurationSeconds <= 0) {
+      throw new Error(`Could not determine packet content duration for stream ${streamSpecifier}`);
+    }
+    options.onProgress?.({ percent: 100, packetCount: timeline.packetCount });
+    return timeline;
+  }
+
+  async probeEndingPacketWindow(
+    filePath,
+    streamSpecifier,
+    expectedDuration,
+    edgeWindowSeconds,
+    inactivityTimeoutMs,
+    options = {}
+  ) {
+    const searchStepSeconds = Math.max(
+      edgeWindowSeconds * 2,
+      Math.min(15 * 60, expectedDuration / 8)
+    );
+    const maximumAttempts = Math.min(16, Math.ceil(expectedDuration / searchStepSeconds) + 1);
+    let windowStartSeconds = Math.max(0, expectedDuration - edgeWindowSeconds);
+    const reportProgress = monotonicProgress(options.onProgress);
+
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      const windowDurationSeconds = attempt === 0
+        ? edgeWindowSeconds * 2
+        : searchStepSeconds + edgeWindowSeconds;
+      const timeline = await this.probePacketWindow(
+        filePath,
+        streamSpecifier,
+        windowStartSeconds,
+        windowDurationSeconds,
+        inactivityTimeoutMs,
+        {
+          onProgress: reportProgress,
+          expectedDurationSeconds: expectedDuration
+        }
+      );
+      if (timeline) {
+        return timeline;
+      }
+      if (windowStartSeconds === 0) {
+        break;
+      }
+      windowStartSeconds = Math.max(0, windowStartSeconds - searchStepSeconds);
+    }
+
+    throw new Error(`Could not find the end packets for stream ${streamSpecifier}`);
+  }
+
+  async probePacketWindow(
+    filePath,
+    streamSpecifier,
+    startSeconds,
+    durationSeconds,
+    inactivityTimeoutMs,
+    options = {}
+  ) {
+    const args = [
+      "-v", "error",
+      ...(options.fullFile
+        ? []
+        : ["-read_intervals", `${Math.max(0, startSeconds)}%+${Math.ceil(durationSeconds)}`]),
+      "-select_streams", String(streamSpecifier),
+      "-show_packets",
+      "-show_entries", "packet=pts_time,dts_time,duration_time",
+      "-of", "compact=p=0:nk=0",
+      filePath
+    ];
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.ffprobePath, args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const accumulator = createPacketTimelineAccumulator();
+      const errors = [];
+      let buffered = "";
+      let inactive = false;
+      let settled = false;
+      let inactivityTimer = null;
+      let lastProgressAt = 0;
+      const resetInactivityTimer = () => {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+          inactive = true;
+          child.kill();
+        }, inactivityTimeoutMs);
+        inactivityTimer.unref?.();
+      };
+      const reportProgress = (force = false) => {
+        if (!options.onProgress || accumulator.packetCount === 0) {
+          return;
+        }
+        const now = Date.now();
+        if (!force && now - lastProgressAt < 250) {
+          return;
+        }
+        lastProgressAt = now;
+        options.onProgress(packetWindowProgress(
+          accumulator,
+          startSeconds,
+          durationSeconds,
+          options.expectedDurationSeconds,
+          options.fullFile
+        ));
+      };
+      resetInactivityTimer();
+
+      child.stdout.on("data", (chunk) => {
+        resetInactivityTimer();
+        buffered += chunk.toString();
+        const lines = buffered.split(/\r?\n/);
+        buffered = lines.pop() || "";
+        lines.forEach((line) => addCompactPacketLine(accumulator, line));
+        reportProgress();
+      });
+      child.stderr.on("data", (chunk) => {
+        resetInactivityTimer();
+        errors.push(chunk.toString());
+        if (errors.length > 8) {
+          errors.shift();
+        }
+      });
+      child.once("error", (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(inactivityTimer);
+        reject(err);
+      });
+      child.once("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(inactivityTimer);
+        addCompactPacketLine(accumulator, buffered);
+        reportProgress(true);
+        if (inactive) {
+          reject(new Error(
+            `FFprobe produced no output for ${Math.round(inactivityTimeoutMs / 1000)} seconds `
+            + `while reading stream ${streamSpecifier} near ${Math.max(0, startSeconds).toFixed(3)} seconds`
+          ));
+          return;
+        }
+        if (code !== 0) {
+          reject(new Error(
+            errors.join("").trim()
+            || `FFprobe exited with code ${code} while reading packet timestamps for stream ${streamSpecifier}`
+          ));
+          return;
+        }
+        resolve(packetTimelineFromAccumulator(accumulator));
+      });
+    });
   }
 
   async probeStream(source, timeoutMs = 3500) {
@@ -209,44 +426,51 @@ class FFmpegService {
     return 30;
   }
 
-  async detectHardwareEncoder() {
+  async detectHardwareEncoder(codec = "h264") {
+    const hevc = codec === "hevc";
+    const cachedEncoderKey = hevc ? "cachedHevcHardwareEncoder" : "cachedHardwareEncoder";
     if (!this.enableGpu) {
       logger.info("[ffmpeg] GPU disabled by config; using CPU encoder when transcoding is required");
-      this.cachedHardwareEncoder = "";
+      this[cachedEncoderKey] = "";
       return null;
     }
 
-    if (this.cachedHardwareEncoder !== null) {
-      logger.info(`[ffmpeg] cached hardware encoder=${this.cachedHardwareEncoder || "none"}`);
-      return this.cachedHardwareEncoder || null;
+    if (this[cachedEncoderKey] !== null) {
+      logger.info(`[ffmpeg] cached ${codec} hardware encoder=${this[cachedEncoderKey] || "none"}`);
+      return this[cachedEncoderKey] || null;
     }
 
     try {
       const output = await this.exec(this.ffmpegPath, ["-hide_banner", "-encoders"]);
-      const preferred = ["h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf", "h264_videotoolbox"];
+      const preferred = hevc
+        ? ["hevc_nvenc", "hevc_qsv", "hevc_vaapi", "hevc_amf", "hevc_videotoolbox"]
+        : ["h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf", "h264_videotoolbox"];
       const listed = preferred.filter((encoder) => output.includes(encoder));
-      logger.full(`[ffmpeg] listed hardware encoders=${listed.length ? listed.join(",") : "none"}`);
-      this.cachedHardwareEncoder = await this.firstUsableEncoder(listed) || "";
-      logger.info(`[ffmpeg] selected hardware encoder=${this.cachedHardwareEncoder || "none"} vendor=${hardwareVendor(this.cachedHardwareEncoder) || "none"}`);
-      return this.cachedHardwareEncoder || null;
+      logger.full(`[ffmpeg] listed ${codec} hardware encoders=${listed.length ? listed.join(",") : "none"}`);
+      this[cachedEncoderKey] = await this.firstUsableEncoder(listed) || "";
+      logger.info(`[ffmpeg] selected ${codec} hardware encoder=${this[cachedEncoderKey] || "none"} vendor=${hardwareVendor(this[cachedEncoderKey]) || "none"}`);
+      return this[cachedEncoderKey] || null;
     } catch (err) {
       logger.info(`[ffmpeg] failed to inspect hardware encoders: ${err.message}`);
-      this.cachedHardwareEncoder = "";
+      this[cachedEncoderKey] = "";
       return null;
     }
   }
 
-  async detectHardwareProfile() {
-    if (this.cachedHardwareProfile) {
-      return this.cachedHardwareProfile;
+  async detectHardwareProfile(codec = "h264") {
+    const hevc = codec === "hevc";
+    const cachedProfileKey = hevc ? "cachedHevcHardwareProfile" : "cachedHardwareProfile";
+    if (this[cachedProfileKey]) {
+      return this[cachedProfileKey];
     }
 
-    const encoder = await this.detectHardwareEncoder();
-    this.cachedHardwareProfile = hardwareProfileForEncoder(encoder, {
+    const encoder = await this.detectHardwareEncoder(codec);
+    this[cachedProfileKey] = hardwareProfileForEncoder(encoder, {
       vaapiDevice: this.cachedVaapiDevice || null
     });
-    logger.info(`[ffmpeg] hardware profile vendor=${this.cachedHardwareProfile.vendor || "none"} encoder=${this.cachedHardwareProfile.encoder || "none"} decoder=${this.cachedHardwareProfile.decoder || "software"} hwaccelArgs=${this.cachedHardwareProfile.hwaccelArgs.length ? this.cachedHardwareProfile.hwaccelArgs.join(" ") : "none"}`);
-    return this.cachedHardwareProfile;
+    const profile = this[cachedProfileKey];
+    logger.info(`[ffmpeg] ${codec} hardware profile vendor=${profile.vendor || "none"} encoder=${profile.encoder || "none"} decoder=${profile.decoder || "software"} hwaccelArgs=${profile.hwaccelArgs.length ? profile.hwaccelArgs.join(" ") : "none"}`);
+    return profile;
   }
 
   async firstUsableEncoder(encoders) {
@@ -260,8 +484,8 @@ class FFmpegService {
   }
 
   async canEncodeWith(encoder) {
-    if (encoder === "h264_vaapi") {
-      return Boolean(await this.findUsableVaapiDevice());
+    if (encoder.endsWith("_vaapi")) {
+      return Boolean(await this.findUsableVaapiDevice(encoder));
     }
 
     try {
@@ -275,12 +499,11 @@ class FFmpegService {
     }
   }
 
-  async findUsableVaapiDevice() {
-    if (this.cachedVaapiDevice !== null) {
-      return this.cachedVaapiDevice || null;
-    }
-
-    const devices = await this.listVaapiDevices();
+  async findUsableVaapiDevice(encoder = "h264_vaapi") {
+    const discovered = await this.listVaapiDevices();
+    const devices = this.cachedVaapiDevice
+      ? [this.cachedVaapiDevice, ...discovered.filter((device) => device !== this.cachedVaapiDevice)]
+      : discovered;
     if (devices.length === 0) {
       logger.full("[ffmpeg] no VAAPI render devices found under /dev/dri");
       this.cachedVaapiDevice = "";
@@ -290,7 +513,7 @@ class FFmpegService {
     for (const device of devices) {
       try {
         logger.full(`[ffmpeg] testing VAAPI device=${device}`);
-        await this.exec(this.ffmpegPath, hardwareEncoderTestArgs("h264_vaapi", device));
+        await this.exec(this.ffmpegPath, hardwareEncoderTestArgs(encoder, device));
         logger.info(`[ffmpeg] selected VAAPI device=${device}`);
         this.cachedVaapiDevice = device;
         return device;
@@ -299,7 +522,9 @@ class FFmpegService {
       }
     }
 
-    this.cachedVaapiDevice = "";
+    if (encoder === "h264_vaapi") {
+      this.cachedVaapiDevice = "";
+    }
     return null;
   }
 
@@ -319,6 +544,13 @@ class FFmpegService {
     return spawn(this.ffmpegPath, args, {
       windowsHide: true,
       stdio: ["ignore", "ignore", "pipe"]
+    });
+  }
+
+  spawnWithOutput(args) {
+    return spawn(this.ffmpegPath, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
     });
   }
 
@@ -355,8 +587,137 @@ class FFmpegService {
   }
 }
 
+function createPacketTimelineAccumulator() {
+  return {
+    startSeconds: Number.POSITIVE_INFINITY,
+    endSeconds: Number.NEGATIVE_INFINITY,
+    maximumPacketDurationSeconds: 0,
+    packetDurationSeconds: 0,
+    packetCount: 0
+  };
+}
+
+function addCompactPacketLine(accumulator, line) {
+  const values = {};
+  for (const field of String(line || "").trim().split("|")) {
+    const separator = field.indexOf("=");
+    if (separator > 0) {
+      values[field.slice(0, separator)] = field.slice(separator + 1);
+    }
+  }
+  const timestamp = finiteNumber(values.pts_time, values.dts_time);
+  if (!Number.isFinite(timestamp)) {
+    return;
+  }
+  const packetDuration = Math.max(0, finiteNumber(values.duration_time, 0));
+  accumulator.startSeconds = Math.min(accumulator.startSeconds, timestamp);
+  accumulator.endSeconds = Math.max(accumulator.endSeconds, timestamp + packetDuration);
+  accumulator.maximumPacketDurationSeconds = Math.max(
+    accumulator.maximumPacketDurationSeconds,
+    packetDuration
+  );
+  accumulator.packetDurationSeconds += packetDuration;
+  accumulator.packetCount += 1;
+}
+
+function packetTimelineFromAccumulator(accumulator) {
+  if (!Number.isFinite(accumulator.startSeconds)
+    || !Number.isFinite(accumulator.endSeconds)
+    || accumulator.endSeconds <= accumulator.startSeconds) {
+    return null;
+  }
+  return {
+    startSeconds: accumulator.startSeconds,
+    endSeconds: accumulator.endSeconds,
+    durationSeconds: accumulator.endSeconds - accumulator.startSeconds,
+    maximumPacketDurationSeconds: accumulator.maximumPacketDurationSeconds,
+    packetDurationSeconds: accumulator.packetDurationSeconds,
+    packetCount: accumulator.packetCount
+  };
+}
+
+function combinePacketTimelines(first, second) {
+  if (!first) return second || null;
+  if (!second) return first;
+  const startSeconds = Math.min(first.startSeconds, second.startSeconds);
+  const endSeconds = Math.max(first.endSeconds, second.endSeconds);
+  return {
+    startSeconds,
+    endSeconds,
+    durationSeconds: endSeconds - startSeconds,
+    maximumPacketDurationSeconds: Math.max(
+      first.maximumPacketDurationSeconds,
+      second.maximumPacketDurationSeconds
+    ),
+    packetDurationSeconds: first.packetDurationSeconds + second.packetDurationSeconds,
+    packetCount: first.packetCount + second.packetCount
+  };
+}
+
+function packetWindowProgress(
+  accumulator,
+  startSeconds,
+  durationSeconds,
+  expectedDurationSeconds,
+  fullFile
+) {
+  const processedSeconds = Math.max(
+    0,
+    accumulator.endSeconds - accumulator.startSeconds
+  );
+  const expectedSeconds = fullFile
+    ? Math.max(0, Number(expectedDurationSeconds) || 0)
+    : Math.max(0, Number(durationSeconds) || 0);
+  const percent = expectedSeconds > 0
+    ? Math.max(0, Math.min(100, processedSeconds / expectedSeconds * 100))
+    : 0;
+  return {
+    percent: Math.round(percent * 10) / 10,
+    processedSeconds,
+    expectedSeconds,
+    packetCount: accumulator.packetCount,
+    startSeconds: Math.max(0, Number(startSeconds) || 0)
+  };
+}
+
+function rangedProgress(onProgress, rangeStart, rangeEnd) {
+  if (typeof onProgress !== "function") {
+    return null;
+  }
+  const report = monotonicProgress(onProgress);
+  const start = Number(rangeStart) || 0;
+  const width = Math.max(0, (Number(rangeEnd) || 0) - start);
+  return (progress) => report({
+    ...progress,
+    percent: start + Math.max(0, Math.min(Number(progress && progress.percent) || 0, 100)) / 100 * width
+  });
+}
+
+function monotonicProgress(onProgress) {
+  if (typeof onProgress !== "function") {
+    return null;
+  }
+  let lastPercent = 0;
+  return (progress) => {
+    const percent = Math.max(lastPercent, Math.max(0, Math.min(Number(progress && progress.percent) || 0, 100)));
+    lastPercent = percent;
+    onProgress({ ...progress, percent });
+  };
+}
+
+function finiteNumber(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return Number.NaN;
+}
+
 function hardwareEncoderTestArgs(encoder, vaapiDevice = "/dev/dri/renderD128") {
-  if (encoder === "h264_vaapi") {
+  const hevc = encoder.startsWith("hevc_");
+  if (encoder.endsWith("_vaapi")) {
     return [
       "-hide_banner",
       "-loglevel",
@@ -368,11 +729,12 @@ function hardwareEncoderTestArgs(encoder, vaapiDevice = "/dev/dri/renderD128") {
       "-vaapi_device",
       vaapiDevice,
       "-vf",
-      "format=nv12,hwupload",
+      `format=${hevc ? "p010le" : "nv12"},hwupload`,
       "-frames:v",
       "1",
       "-c:v",
       encoder,
+      ...(hevc ? ["-profile:v", "main10"] : []),
       "-f",
       "null",
       "-"
@@ -391,6 +753,7 @@ function hardwareEncoderTestArgs(encoder, vaapiDevice = "/dev/dri/renderD128") {
     "1",
     "-c:v",
     encoder,
+    ...(hevc ? ["-pix_fmt", "p010le", "-profile:v", "main10"] : []),
     "-f",
     "null",
     "-"
@@ -398,7 +761,8 @@ function hardwareEncoderTestArgs(encoder, vaapiDevice = "/dev/dri/renderD128") {
 }
 
 function hardwareProfileForEncoder(encoder, options = {}) {
-  if (encoder === "h264_nvenc") {
+  const hevc = String(encoder || "").startsWith("hevc_");
+  if (encoder === "h264_nvenc" || encoder === "hevc_nvenc") {
     return {
       vendor: "nvidia",
       encoder,
@@ -410,7 +774,7 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     };
   }
 
-  if (encoder === "h264_qsv") {
+  if (encoder === "h264_qsv" || encoder === "hevc_qsv") {
     return {
       vendor: "intel",
       encoder,
@@ -422,7 +786,7 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     };
   }
 
-  if (encoder === "h264_vaapi") {
+  if (encoder === "h264_vaapi" || encoder === "hevc_vaapi") {
     const vaapiDevice = options.vaapiDevice || "/dev/dri/renderD128";
     return {
       vendor: "vaapi",
@@ -430,12 +794,12 @@ function hardwareProfileForEncoder(encoder, options = {}) {
       decoder: null,
       inputArgs: ["-vaapi_device", vaapiDevice],
       hwaccelArgs: [],
-      uploadFilter: "format=nv12,hwupload",
+      uploadFilter: `format=${hevc ? "p010le" : "nv12"},hwupload`,
       hardwareFrames: null
     };
   }
 
-  if (encoder === "h264_amf") {
+  if (encoder === "h264_amf" || encoder === "hevc_amf") {
     return {
       vendor: "amd",
       encoder,
@@ -447,7 +811,7 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     };
   }
 
-  if (encoder === "h264_videotoolbox") {
+  if (encoder === "h264_videotoolbox" || encoder === "hevc_videotoolbox") {
     return {
       vendor: "apple",
       encoder,

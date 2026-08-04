@@ -9,11 +9,18 @@ const installedAppPath = dockerMode() ? "/cache/app/current" : sourceAppPath;
 let child = null;
 let pendingUpdate = null;
 let shuttingDown = false;
+let childStartedAt = 0;
+let consecutiveCrashes = 0;
+let restartTimer = null;
+
+const STABLE_UPTIME_MS = 30 * 1000;
+const MAX_RESTART_DELAY_MS = 30 * 1000;
 
 startServer();
 
 function startServer() {
   const appPath = selectedAppPath();
+  childStartedAt = Date.now();
   child = fork(path.join(appPath, "src", "server.js"), [], {
     cwd: appPath,
     env: process.env,
@@ -55,8 +62,11 @@ async function handleServerExit(code, signal) {
     return;
   }
   if (!pendingUpdate) {
-    console.error(`[supervisor] Media Baker exited code=${code} signal=${signal || "none"}`);
-    process.exit(code || 1);
+    const uptimeMs = Math.max(0, Date.now() - childStartedAt);
+    consecutiveCrashes = uptimeMs >= STABLE_UPTIME_MS ? 0 : consecutiveCrashes + 1;
+    const delayMs = Math.min(1000 * (2 ** Math.max(0, consecutiveCrashes - 1)), MAX_RESTART_DELAY_MS);
+    console.error(`[supervisor] Media Baker exited code=${code} signal=${signal || "none"}; restarting in ${delayMs}ms`);
+    scheduleServerRestart(delayMs);
     return;
   }
 
@@ -69,6 +79,16 @@ async function handleServerExit(code, signal) {
     console.error(`[supervisor] update failed message="${err.message}"`);
   }
   startServer();
+}
+
+function scheduleServerRestart(delayMs) {
+  if (shuttingDown || restartTimer) {
+    return;
+  }
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    startServer();
+  }, delayMs);
 }
 
 function selectedAppPath() {
@@ -144,6 +164,10 @@ function dockerMode() {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     shuttingDown = true;
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
     if (child) {
       child.kill(signal);
     } else {

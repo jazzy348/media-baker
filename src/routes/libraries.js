@@ -3,7 +3,7 @@ const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
-module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, progress, libraryService, indexScanScheduler }) {
+module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, progress, libraryService, appSettings, indexScanScheduler }) {
   const router = express.Router();
 
   router.get("/", requireAnyPermission(["canManageLibraries", "canCreateShareLinks", "canReindex"]), async (req, res, next) => {
@@ -41,6 +41,27 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, pr
 
   router.put("/:libraryKey", requirePermission("canManageLibraries"), async (req, res, next) => {
     try {
+      if (req.params.libraryKey === "yt-dlp") {
+        const library = config.libraries.find((entry) => entry.key === "yt-dlp" && entry.managed);
+        if (!library) {
+          next(httpError(404, "YT-DLP library not found"));
+          return;
+        }
+        const trackProgress = req.body && req.body.trackProgress === undefined
+          ? library.trackProgress !== false
+          : Boolean(req.body.trackProgress);
+        await appSettings.save({
+          ytdlp: {
+            trackProgress
+          }
+        });
+        syncYtDlpLibrary(config);
+        await mediaIndex.syncLibrariesFromConfig();
+        res.json({
+          library: config.libraries.find((entry) => entry.key === "yt-dlp")
+        });
+        return;
+      }
       const library = await libraryService.update(req.params.libraryKey, req.body || {});
       await refreshLibraryConfig(config, libraryService, mediaIndex);
       res.json({ library });
@@ -168,10 +189,15 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, pr
         return;
       }
 
-      const withArtwork = library.type === "music" && item.albums
+      let withArtwork = library.type === "music" && item.albums
         ? await withMusicArtwork(item, library.key, metadata, req)
         : item;
-      res.json(await withLibraryProgress(withArtwork, library, progress, req));
+      if (library.type === "tv" && withArtwork.seasons) {
+        withArtwork = await withVisibleTvEpisodes(withArtwork, library.key, metadata);
+        withArtwork = await withTvShowArtwork(withArtwork, library.key, metadata, req);
+      }
+      const visibleItem = withArtwork;
+      res.json(await withLibraryProgress(visibleItem, library, progress, req));
     } catch (err) {
       next(err);
     }
@@ -191,7 +217,8 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, pr
         return;
       }
 
-      res.json(await withSeasonProgress(season, library, progress, req));
+      const visibleSeason = await withVisibleTvEpisodes(season, library.key, metadata);
+      res.json(await withSeasonProgress(visibleSeason, library, progress, req));
     } catch (err) {
       next(err);
     }
@@ -269,6 +296,90 @@ async function withLibraryProgress(item, library, progress, req) {
   return itemProgress ? { ...item, progress: itemProgress } : item;
 }
 
+async function withVisibleTvEpisodes(item, mediaType, metadata) {
+  if (!item || !metadata || !metadata.getCachedForMediaItems) {
+    return item;
+  }
+
+  const seasons = item.seasons || [item];
+  const episodes = seasons.flatMap((season) => season.episodes || []);
+  if (episodes.length === 0) {
+    return item;
+  }
+
+  const records = await metadata.getCachedForMediaItems(episodes.map((episode) => ({
+    mediaType,
+    id: episode.id
+  })));
+  const visibleSeasons = seasons
+    .map((season) => ({
+      ...season,
+      episodes: (season.episodes || []).filter((episode) => {
+        const record = records.get(`${mediaType}:${episode.id}`);
+        return !record || record.episodeMatched !== false;
+      })
+    }))
+    .filter((season) => !item.seasons || season.episodes.length > 0);
+
+  return item.seasons
+    ? { ...item, seasons: visibleSeasons }
+    : visibleSeasons[0] || { ...item, episodes: [] };
+}
+
+async function withTvShowArtwork(show, mediaType, metadata, req) {
+  if (!show || !metadata || !metadata.getCachedForMediaItems) {
+    return show;
+  }
+
+  const episodes = (show.seasons || []).flatMap((season) => season.episodes || []);
+  const refs = [
+    { mediaType, id: show.id },
+    ...episodes.map((episode) => ({ mediaType, id: episode.id }))
+  ];
+  const records = await metadata.getCachedForMediaItems(refs);
+  const record = [
+    records.get(`${mediaType}:${show.id}`),
+    ...episodes.map((episode) => records.get(`${mediaType}:${episode.id}`))
+  ].find((entry) => entry && entry.available && entry.posterFilename);
+  const descriptiveRecord = records.get(`${mediaType}:${show.id}`)
+    || [...records.values()].find((entry) => entry && entry.available);
+  const seasonMetadata = metadata.ensureSeasonMetadataForShow
+    ? await metadata.ensureSeasonMetadataForShow(mediaType, show)
+    : new Map();
+  const authParamName = req.authParamName || "authToken";
+
+  return {
+    ...show,
+    name: descriptiveRecord && descriptiveRecord.title || show.name,
+    originalName: show.name,
+    overview: descriptiveRecord && descriptiveRecord.overview || "",
+    releaseYear: descriptiveRecord && descriptiveRecord.releaseYear || null,
+    posterUrl: record
+      ? metadata.posterUrl(record.posterFilename, req.authToken, authParamName)
+      : null,
+    seasons: (show.seasons || []).map((season) => {
+      const details = seasonMetadata.get(Number(season.season)) || {};
+      const representativeEpisode = (season.episodes || [])[0];
+      return {
+        ...season,
+        name: details.name || season.name || defaultSeasonName(season.season),
+        overview: details.overview || "",
+        airDate: details.airDate || null,
+        year: details.year || null,
+        providerId: details.providerId || null,
+        providerEpisodeCount: details.providerEpisodeCount || null,
+        posterUrl: representativeEpisode
+          ? metadata.seasonPosterUrl(mediaType, representativeEpisode.id, req.authToken, authParamName)
+          : null
+      };
+    })
+  };
+}
+
+function defaultSeasonName(seasonNumber) {
+  return Number(seasonNumber) === 0 ? "Specials" : `Season ${seasonNumber}`;
+}
+
 async function withSeasonProgress(season, library, progress, req) {
   if (!season || !progress || !progress.getMany || !tracksProgress(library)) {
     return season;
@@ -310,7 +421,7 @@ function tracksProgress(library) {
 }
 
 function progressUserId(req) {
-  return req.user && req.user.id || "global";
+  return req.progressUserId || req.user && req.user.id || "global";
 }
 
 async function refreshLibraryConfig(config, libraryService, mediaIndex) {

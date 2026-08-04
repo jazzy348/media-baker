@@ -3,6 +3,7 @@ const path = require("path");
 const { createId } = require("../utils/mediaParsers");
 const { MusicBrainzMetadataProvider } = require("./musicBrainzMetadataProvider");
 const { CachedImageService } = require("./cachedImageService");
+const { CustomMetadataClient, assetIdFromPath } = require("./customMetadataClient");
 const logger = require("../utils/logger");
 
 const TMDB_API_BASE = "https://api.themoviedb.org/3";
@@ -15,8 +16,9 @@ class MetadataService {
     this.store = store;
     this.ffmpeg = ffmpeg;
     this.cachedImages = cachedImages || new CachedImageService(config, ffmpeg);
+    this.customMetadata = new CustomMetadataClient(config);
     this.posterDir = path.join(this.config.cachePath, "posters");
-    this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages);
+    this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages, this.customMetadata);
     this.thumbnailDir = path.join(this.config.cachePath, "thumbnails");
     this.preloadInFlight = null;
     this.missingRecheckInFlight = null;
@@ -29,6 +31,9 @@ class MetadataService {
   async getForMedia(mediaType, mediaFile) {
     let cached = await this.store.get(mediaType, mediaFile.id);
     if (cached) {
+      if (this.customMetadata.active() && cached.found && recordNeedsCoreRefresh(cached)) {
+        cached = await this.refreshIncompleteCustomRecord(mediaType, mediaFile, cached);
+      }
       if (cached.found && !cached.posterFilename && !cached.posterUnavailable) {
         cached = await this.ensurePosterForRecord(cached);
       }
@@ -50,7 +55,7 @@ class MetadataService {
       return { available: false, cached: false, reason: `Unsupported metadata provider: ${this.config.provider}` };
     }
 
-    if (!this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
+    if (!this.customMetadata.active() && !this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
       return { available: false, cached: false, reason: "TMDb credentials are not configured." };
     }
 
@@ -74,12 +79,157 @@ class MetadataService {
     return this.store.getByPosterFilename(filename);
   }
 
+  async getCustomPoster(assetId) {
+    if (!this.customMetadata.active() || !/^[A-Za-z0-9._~-]{1,256}$/.test(String(assetId || ""))) {
+      return null;
+    }
+    return this.customMetadata.artwork(assetId);
+  }
+
+  async refreshIncompleteCustomRecord(mediaType, mediaFile, cached) {
+    try {
+      const kind = kindForMediaType(this.appConfig, mediaType);
+      let response;
+      if (kind === "music") {
+        response = await this.customMetadata.media("music", cached.providerId, {
+          language: this.config.language,
+          artworkLanguages: this.config.posterLanguages
+        });
+      } else if (kind === "tv" && isEpisodeFile(mediaFile)) {
+        response = await this.customMetadata.episode(cached.providerId, mediaFile.season, mediaFile.episode, {
+          language: this.config.language,
+          artworkLanguages: this.config.posterLanguages
+        });
+      } else {
+        response = await this.customMetadata.media(kind === "tv" ? "series" : "movie", cached.providerId, {
+          language: this.config.language,
+          artworkLanguages: this.config.posterLanguages
+        });
+      }
+      const item = response && response.item;
+      if (!item) return cached;
+
+      let posterPath = cached.posterPath;
+      let posterFilename = cached.posterFilename;
+      const customArtworkId = item.artwork && item.artwork.id;
+      if (!posterFilename && customArtworkId && !isEpisodeFile(mediaFile)) {
+        posterPath = `custom-asset:${customArtworkId}`;
+        const filename = kind === "music"
+          ? safePosterFilename(`musicbrainz-release-${cached.providerId}-500.webp`)
+          : posterFilenameFor(kind, cached.providerId, this.config.posterSize, posterPath);
+        posterFilename = await this.cachePosterFile(posterPath, filename);
+      }
+
+      const source = {
+        ...(parseSourceJson(cached.sourceJson) || {}),
+        ...item,
+        ...(kind === "music" ? {
+          artistName: item.artist || mediaFile.artistName,
+          albumName: item.title || mediaFile.albumName,
+          trackTitle: mediaFile.title,
+          aliases: [mediaFile.artistName, mediaFile.albumName].filter(Boolean)
+        } : {})
+      };
+      const updated = {
+        ...cached,
+        title: item.title || cached.title,
+        releaseYear: item.releaseYear || cached.releaseYear,
+        overview: item.overview || cached.overview,
+        posterPath,
+        posterFilename,
+        posterUnavailable: posterFilename ? false : cached.posterUnavailable,
+        posterUnavailableReason: posterFilename ? null : cached.posterUnavailableReason,
+        sourceJson: JSON.stringify(source)
+      };
+      await this.store.save(updated);
+      return updated;
+    } catch (err) {
+      logger.full(`[metadata] custom partial refresh failed mediaType=${mediaType} id=${mediaFile.id} message="${err.message}"`);
+      return cached;
+    }
+  }
+
   async getCachedForMediaItems(items) {
     const records = await this.store.getMany(items);
     return new Map(records.map((record) => [
       recordKey(record.mediaType, record.mediaId),
       toPublicRecord(record, true)
     ]));
+  }
+
+  async getCachedSeasonMetadata(mediaType, show) {
+    const all = await this.getCachedSeasonMetadataForShows([{ mediaType, show }]);
+    return all.get(recordKey(mediaType, show && show.id)) || new Map();
+  }
+
+  async ensureSeasonMetadataForShow(mediaType, show) {
+    const cached = await this.getCachedSeasonMetadata(mediaType, show);
+    if (cached.size > 0 || metadataUnavailableReason(this.config) !== null) return cached;
+
+    const episodeIds = (show && show.seasons || [])
+      .flatMap((season) => season.episodes || [])
+      .map((episode) => episode && episode.id)
+      .filter(Boolean);
+    const records = await this.store.getMany(uniqueText([show && show.id, ...episodeIds])
+      .map((id) => ({ mediaType, id })));
+    const record = records.find((entry) => entry.mediaId === show.id && entry.found && entry.provider === "tmdb")
+      || records.find((entry) => entry.found && entry.provider === "tmdb");
+    if (!record || !record.providerId) return cached;
+
+    try {
+      const details = await this.fetchTmdbDetails("tv", record.providerId);
+      const releaseDate = details.first_air_date || null;
+      await this.store.save({
+        ...record,
+        mediaType,
+        mediaId: show.id,
+        title: details.name || record.title,
+        releaseYear: releaseDate ? Number.parseInt(String(releaseDate).slice(0, 4), 10) || null : record.releaseYear,
+        overview: details.overview || record.overview,
+        sourceJson: JSON.stringify(details)
+      });
+      return seasonMetadataFromRecord({ sourceJson: JSON.stringify(details) });
+    } catch (err) {
+      logger.full(`[metadata] season metadata lookup failed mediaType=${mediaType} showId=${show.id} providerId=${record.providerId} message="${err.message}"`);
+      return cached;
+    }
+  }
+
+  async getCachedSeasonMetadataForShows(entries) {
+    const validEntries = (entries || []).filter((entry) => entry && entry.mediaType && entry.show && entry.show.id);
+    const refs = validEntries.flatMap(({ mediaType, show }) => uniqueText([
+      show.id,
+      ...(show.seasons || []).flatMap((season) => (season.episodes || []).map((episode) => episode && episode.id))
+    ]).map((id) => ({ mediaType, id })));
+    if (refs.length === 0) return new Map();
+
+    const uniqueRefs = [...new Map(refs.map((ref) => [recordKey(ref.mediaType, ref.id), ref])).values()];
+    const records = await this.store.getMany(uniqueRefs);
+    const recordsByKey = new Map(records.map((record) => [recordKey(record.mediaType, record.mediaId), record]));
+    const result = new Map();
+    for (const { mediaType, show } of validEntries) {
+      const episodeRecords = (show.seasons || [])
+        .flatMap((season) => season.episodes || [])
+        .map((episode) => recordsByKey.get(recordKey(mediaType, episode.id)));
+      const record = recordsByKey.get(recordKey(mediaType, show.id))
+        || episodeRecords.find((entry) => entry && entry.found && entry.provider === "tmdb");
+      result.set(recordKey(mediaType, show.id), seasonMetadataFromRecord(record));
+    }
+    return result;
+  }
+
+  async getCachedOriginalLanguage(mediaType, mediaIds) {
+    const ids = uniqueText((Array.isArray(mediaIds) ? mediaIds : [mediaIds]).filter(Boolean));
+    if (ids.length === 0) return null;
+    const records = await this.store.getMany(ids.map((id) => ({ mediaType, id })));
+    const byId = new Map(records.map((record) => [String(record.mediaId), record]));
+    for (const id of ids) {
+      const record = byId.get(String(id));
+      const source = parseSourceJson(record && record.sourceJson);
+      const language = String(source && source.original_language || "").trim();
+      if (language) return language;
+    }
+    return null;
   }
 
   async searchCachedRefs(query, mediaTypes, limit) {
@@ -195,6 +345,77 @@ class MetadataService {
     return toPublicRecord(record, false);
   }
 
+  async matchProviderForShow(mediaType, showId, episodes, input = {}) {
+    const unavailable = metadataUnavailableReason(this.config);
+    if (unavailable) {
+      return unavailable;
+    }
+
+    const providerId = String(input.providerId || "").trim();
+    if (!providerId) {
+      throw new Error("providerId is required");
+    }
+
+    const mediaFiles = Array.isArray(episodes) ? episodes.filter((episode) => episode && episode.id) : [];
+    if (!showId || mediaFiles.length === 0) {
+      throw new Error("TV show episodes are required");
+    }
+
+    const result = await this.fetchTmdbDetails("tv", providerId);
+    const episodeMatches = await this.fetchTmdbEpisodeMatches(providerId, mediaFiles);
+    const showRecord = await this.createFoundRecord(mediaType, showId, "tv", result);
+    const records = [
+      showRecord,
+      ...mediaFiles.map((episode) => episodeRecordForShow(showRecord, episode, episodeMatches))
+    ];
+
+    for (const record of records) {
+      await this.store.save(record);
+      this.thumbnailInFlight.delete(recordKey(mediaType, record.mediaId));
+    }
+
+    const matchedEpisodes = records.slice(1).filter((record) => episodeMatchStatus(record) === true).length;
+    const unmatchedEpisodes = records.slice(1).filter((record) => episodeMatchStatus(record) === false).length;
+    const uncheckedEpisodes = mediaFiles.length - matchedEpisodes - unmatchedEpisodes;
+    logger.info(`[metadata] matched TV show mediaType=${mediaType} showId=${showId} providerId=${providerId} matchedEpisodes=${matchedEpisodes} unmatchedEpisodes=${unmatchedEpisodes} uncheckedEpisodes=${uncheckedEpisodes}`);
+    return {
+      ...toPublicRecord(showRecord, false),
+      matchedEpisodes,
+      unmatchedEpisodes,
+      uncheckedEpisodes
+    };
+  }
+
+  async fetchTmdbEpisodeMatches(providerId, episodes) {
+    const matches = new Map();
+    const resolvedSeasons = new Set();
+    const seasons = [...new Set(episodes
+      .map((episode) => Number.parseInt(episode.season, 10))
+      .filter(Number.isFinite))];
+
+    for (const season of seasons) {
+      const params = new URLSearchParams({ language: this.config.language });
+      try {
+        const data = await this.fetchJson(`${TMDB_API_BASE}/tv/${encodeURIComponent(providerId)}/season/${season}?${params.toString()}`);
+        resolvedSeasons.add(season);
+        for (const episode of data && Array.isArray(data.episodes) ? data.episodes : []) {
+          const episodeNumber = Number.parseInt(episode.episode_number, 10);
+          if (Number.isFinite(episodeNumber)) {
+            matches.set(`${season}:${episodeNumber}`, episode);
+          }
+        }
+      } catch (err) {
+        if (/\bHTTP 404\b/.test(err.message)) {
+          resolvedSeasons.add(season);
+        } else {
+          logger.info(`[metadata] TV episode matching deferred providerId=${providerId} season=${season} message="${err.message}"`);
+        }
+      }
+    }
+
+    return { matches, resolvedSeasons };
+  }
+
   startMissingRecheck(mediaIndex, options = {}) {
     if (this.missingRecheckInFlight) {
       return {
@@ -254,16 +475,20 @@ class MetadataService {
     };
   }
 
-  async setPosterForMedia(mediaType, mediaFile, source) {
-    const posterFilename = await this.cacheManualPoster(mediaType, mediaFile.id, source);
-    const cached = await this.store.get(mediaType, mediaFile.id);
-    const record = cached || createManualRecord(mediaType, mediaFile);
+  async setPosterForMedia(mediaType, mediaFile, source, options = {}) {
+    const mediaId = options.mediaId || mediaFile.id;
+    const posterFilename = await this.cacheManualPoster(mediaType, mediaId, source);
+    const cached = await this.store.get(mediaType, mediaId);
+    const record = cached || {
+      ...createManualRecord(mediaType, { ...mediaFile, id: mediaId }),
+      title: options.title || titleForMediaFile(mediaFile)
+    };
     const updated = {
       ...record,
       mediaType,
-      mediaId: mediaFile.id,
+      mediaId,
       found: true,
-      title: record.title || titleForMediaFile(mediaFile),
+      title: record.title || options.title || titleForMediaFile(mediaFile),
       posterPath: source.url || source.filePath,
       posterFilename,
       posterUnavailable: false,
@@ -316,7 +541,7 @@ class MetadataService {
 
   async runPreload(mediaIndex, options = {}) {
     const hasMusic = (this.appConfig.libraries || []).some((library) => library.type === "music" && !library.noMetadata);
-    if (!hasMusic && !this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
+    if (!hasMusic && !this.customMetadata.active() && !this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
       logger.info("[metadata] background preload skipped: TMDb credentials are not configured");
       return;
     }
@@ -531,23 +756,45 @@ class MetadataService {
     return task;
   }
 
-  async ensureSeasonPosterForMedia(mediaType, mediaFile) {
+  async ensureSeasonPosterForMedia(mediaType, mediaFile, showEpisodes = []) {
     if (!isEpisodeFile(mediaFile)) {
       return { available: false, reason: "Season posters are only available for TV episodes." };
     }
 
-    let record = await this.store.get(mediaType, mediaFile.id);
+    const refs = uniqueText([
+      mediaFile.showId,
+      mediaFile.id,
+      ...showEpisodes.map((episode) => episode && episode.id)
+    ]).map((id) => ({ mediaType, id }));
+    const records = await this.store.getMany(refs);
+    const recordsById = new Map(records.map((entry) => [entry.mediaId, entry]));
+    const orderedRecords = uniqueText([
+      mediaFile.showId,
+      ...showEpisodes.map((episode) => episode && episode.id),
+      mediaFile.id
+    ]).map((id) => recordsById.get(id)).filter(Boolean);
+    const showRecord = recordsById.get(mediaFile.showId);
+    const episodeRecord = recordsById.get(mediaFile.id);
+    let record = showRecord && showRecord.posterFilename
+      ? showRecord
+      : orderedRecords.find((entry) => entry.found && entry.posterFilename)
+        || showRecord && showRecord.found && showRecord
+        || episodeRecord && episodeRecord.found && episodeRecord
+        || orderedRecords.find((entry) => entry.found);
     if (!record && metadataUnavailableReason(this.config) === null) {
       await this.getForMedia(mediaType, mediaFile);
       record = await this.store.get(mediaType, mediaFile.id);
     }
-    if (!record || !record.found || !record.providerId) {
+    if (!record || !record.found) {
       return { available: false, reason: "Matched show metadata is unavailable." };
     }
 
     const season = Number.parseInt(mediaFile.season, 10);
     if (!Number.isFinite(season)) {
       return { available: false, reason: "Season number is unavailable." };
+    }
+    if (!record.providerId) {
+      return { available: false, reason: "Matched show metadata is unavailable." };
     }
 
     const key = `${record.providerId}:${season}`;
@@ -564,6 +811,14 @@ class MetadataService {
       .finally(() => this.seasonPosterInFlight.delete(key));
     this.seasonPosterInFlight.set(key, task);
     return task;
+  }
+
+  async resolveShowPoster(record) {
+    const fallback = record.posterFilename ? record : await this.ensurePosterForRecord(record);
+    const filePath = fallback.posterFilename && await this.ensurePosterFile(fallback.posterFilename);
+    return filePath
+      ? { available: true, filePath, filename: fallback.posterFilename, source: "show" }
+      : { available: false, reason: "Show poster is unavailable." };
   }
 
   async resolveSeasonPoster(record, season, filename) {
@@ -588,12 +843,7 @@ class MetadataService {
       }
     }
 
-    const fallback = record.posterFilename ? record : await this.ensurePosterForRecord(record);
-    const fallbackPath = fallback.posterFilename && await this.ensurePosterFile(fallback.posterFilename);
-    if (fallbackPath) {
-      return { available: true, filePath: fallbackPath, filename: fallback.posterFilename, source: "show" };
-    }
-    return { available: false, reason: "Season and show posters are unavailable." };
+    return this.resolveShowPoster(record);
   }
 
   async resolveThumbnailForMedia(mediaType, mediaFile) {
@@ -777,10 +1027,18 @@ class MetadataService {
   }
 
   async createFoundRecord(mediaType, mediaId, kind, result) {
+    let resolvedResult = result;
     const providerId = result.id ? String(result.id) : null;
-    const title = kind === "tv" ? result.name : result.title;
-    const releaseDate = kind === "tv" ? result.first_air_date : result.release_date;
-    let posterPath = result.poster_path || await this.findPosterPath(kind, providerId);
+    if (providerId && (this.customMetadata.active() || (kind === "tv" && !Array.isArray(result.seasons)))) {
+      try {
+        resolvedResult = await this.fetchTmdbDetails(kind, providerId);
+      } catch (err) {
+        logger.full(`[metadata] TMDb details lookup failed kind=${kind} mediaType=${mediaType} id=${mediaId} providerId=${providerId} message="${err.message}"`);
+      }
+    }
+    const title = kind === "tv" ? resolvedResult.name : resolvedResult.title;
+    const releaseDate = kind === "tv" ? resolvedResult.first_air_date : resolvedResult.release_date;
+    let posterPath = resolvedResult.poster_path || await this.findPosterPath(kind, providerId);
     let posterFilename = null;
     if (posterPath) {
       try {
@@ -805,12 +1063,12 @@ class MetadataService {
       providerId,
       title: title || null,
       releaseYear: releaseDate ? Number.parseInt(String(releaseDate).slice(0, 4), 10) || null : null,
-      overview: result.overview || null,
+      overview: resolvedResult.overview || null,
       posterPath,
       posterFilename,
       posterUnavailable: !posterPath,
       posterUnavailableReason: posterPath ? null : "no-poster-path",
-      sourceJson: JSON.stringify(result)
+      sourceJson: JSON.stringify(resolvedResult)
     };
   }
 
@@ -843,7 +1101,7 @@ class MetadataService {
     if (query.kind === "music") {
       return this.fetchMusicRecord(mediaType, mediaFile, query);
     }
-    if (!this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
+    if (!this.customMetadata.active() && !this.config.tmdbReadAccessToken && !this.config.tmdbApiKey) {
       return createMissingRecord(mediaType, mediaFile.id, "tmdb");
     }
     const result = await this.searchTmdb(query);
@@ -980,6 +1238,11 @@ class MetadataService {
       }
     }
 
+    const customAssetId = assetIdFromPath(posterPath);
+    if (customAssetId) {
+      return this.cachedImages.cacheBuffer(await this.customMetadata.artwork(customAssetId), this.posterDir, safeName, ".webp");
+    }
+
     const response = await fetch(`${TMDB_IMAGE_BASE}/${this.config.posterSize}${posterPath}`);
     if (!response.ok) {
       throw new Error(`TMDb poster download failed with HTTP ${response.status}`);
@@ -999,6 +1262,11 @@ class MetadataService {
       if (err.code !== "ENOENT") {
         throw err;
       }
+    }
+
+    const customAssetId = assetIdFromPath(thumbnailPath);
+    if (customAssetId) {
+      return this.cachedImages.cacheBuffer(await this.customMetadata.artwork(customAssetId), this.thumbnailDir, safeName, ".webp");
     }
 
     const response = await fetch(`${TMDB_IMAGE_BASE}/${this.config.thumbnailSize}${thumbnailPath}`);
@@ -1026,6 +1294,9 @@ class MetadataService {
   }
 
   async fetchJson(url) {
+    if (this.customMetadata.active()) {
+      return this.customMetadata.fetchVideoUrl(url);
+    }
     const headers = {
       Accept: "application/json"
     };
@@ -1059,7 +1330,7 @@ function metadataQuery(config, mediaType, mediaFile) {
     const parsed = splitTitleYear(mediaFile.title || mediaFile.folder || mediaFile.filename);
     return {
       kind: "movie",
-      title: cleanMetadataSearchText(parsed.title),
+      title: cleanMovieMetadataTitle(parsed.title),
       year: mediaFile.year || parsed.year
     };
   }
@@ -1182,6 +1453,37 @@ function copyRecordForMedia(record, mediaType, mediaId, mediaFile = null) {
     });
   }
   return copied;
+}
+
+function episodeRecordForShow(showRecord, episode, episodeMatches) {
+  const season = Number.parseInt(episode.season, 10);
+  const episodeNumber = Number.parseInt(episode.episode, 10);
+  const seasonChecked = episodeMatches.resolvedSeasons.has(season);
+  const matchedEpisode = seasonChecked
+    ? episodeMatches.matches.get(`${season}:${episodeNumber}`) || null
+    : null;
+  const source = parseSourceJson(showRecord.sourceJson) || {};
+
+  return {
+    ...showRecord,
+    mediaId: episode.id,
+    sourceJson: JSON.stringify({
+      ...source,
+      mediaBakerEpisode: {
+        matched: seasonChecked ? Boolean(matchedEpisode) : null,
+        season,
+        episode: episodeNumber,
+        name: matchedEpisode && matchedEpisode.name || null,
+        providerId: matchedEpisode && matchedEpisode.id ? String(matchedEpisode.id) : null
+      }
+    })
+  };
+}
+
+function episodeMatchStatus(record) {
+  const source = parseSourceJson(record && record.sourceJson);
+  const matched = source && source.mediaBakerEpisode && source.mediaBakerEpisode.matched;
+  return typeof matched === "boolean" ? matched : null;
 }
 
 function mediaFileMap(index) {
@@ -1314,7 +1616,9 @@ function normalizeManualMetadataQuery(defaultQuery, input = {}) {
 
   return {
     ...defaultQuery,
-    title: cleanMetadataSearchText(split.title || defaultQuery.title),
+    title: defaultQuery.kind === "movie"
+      ? cleanMovieMetadataTitle(split.title || defaultQuery.title)
+      : cleanMetadataSearchText(split.title || defaultQuery.title),
     artist: cleanMetadataSearchText(input.artist || defaultQuery.artist || ""),
     year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : null
   };
@@ -1335,11 +1639,16 @@ function toPublicCandidate(candidate, kind) {
     year,
     overview: result.overview || "",
     posterPath: result.poster_path || null,
-    posterUrl: result.poster_path ? `${TMDB_IMAGE_BASE}/w185${result.poster_path}` : null,
+    posterUrl: customPosterUrl(result.poster_path) || (result.poster_path ? `${TMDB_IMAGE_BASE}/w185${result.poster_path}` : null),
     score: Math.round(candidate.score),
     popularity: Number(result.popularity) || 0,
     voteCount: Number(result.vote_count) || 0
   };
+}
+
+function customPosterUrl(value) {
+  const assetId = assetIdFromPath(value);
+  return assetId ? `/api/catalog/metadata/custom-poster/${encodeURIComponent(assetId)}` : null;
 }
 
 function normalizeTitle(value) {
@@ -1355,6 +1664,12 @@ function normalizeTitle(value) {
 function metadataUnavailableReason(config, music = false) {
   if (!config.enabled) {
     return { available: false, cached: false, reason: "Metadata lookup is disabled." };
+  }
+  if (config.source === "custom") {
+    if (!config.customService.baseUrl || !config.customService.apiKey) {
+      return { available: false, cached: false, reason: "Custom metadata cacher URL and API key are required." };
+    }
+    return null;
   }
   if (music) {
     return null;
@@ -1389,6 +1704,10 @@ function createMissingRecord(mediaType, mediaId, provider, sourceJson = null) {
     thumbnailUnavailableReason: null,
     sourceJson
   };
+}
+
+function recordNeedsCoreRefresh(record) {
+  return !record.title || !record.releaseYear || !record.overview;
 }
 
 function musicQueryIdentity(mediaFile, query = null) {
@@ -1449,6 +1768,17 @@ function cleanMetadataSearchText(value) {
     .trim();
 }
 
+function cleanMovieMetadataTitle(value) {
+  const original = String(value || "").trim();
+  const cleaned = original
+    .replace(/\[[^\]]*]/g, " ")
+    .replace(/\{[^}]*}/g, " ")
+    .replace(/^\s*0\d{1,2}(?:\s*[-.:_]\s*|\s+)/u, "")
+    .replace(/\b(?:complete|full)\s+(?:movie|film)\b/giu, " ")
+    .replace(/\b(?:movie|film)\s+complete\b/giu, " ");
+  return cleanMetadataSearchText(cleaned) || cleanMetadataSearchText(original);
+}
+
 function createManualRecord(mediaType, mediaFile) {
   return {
     mediaType,
@@ -1491,8 +1821,28 @@ function toPublicRecord(record, cached) {
     overview: record.overview,
     posterFilename: record.posterFilename,
     posterUnavailable: Boolean(record.posterUnavailable),
-    posterUnavailableReason: record.posterUnavailableReason || null
+    posterUnavailableReason: record.posterUnavailableReason || null,
+    episodeMatched: episodeMatchStatus(record)
   };
+}
+
+function seasonMetadataFromRecord(record) {
+  const source = parseSourceJson(record && record.sourceJson);
+  const seasons = source && Array.isArray(source.seasons) ? source.seasons : [];
+  return new Map(seasons.map((season) => {
+    const seasonNumber = Number.parseInt(season.season_number, 10);
+    if (!Number.isFinite(seasonNumber)) return null;
+    const airDate = season.air_date || null;
+    return [seasonNumber, {
+      season: seasonNumber,
+      providerId: season.id ? String(season.id) : null,
+      name: season.name || null,
+      overview: season.overview || "",
+      airDate,
+      year: airDate ? Number.parseInt(String(airDate).slice(0, 4), 10) || null : null,
+      providerEpisodeCount: Number.parseInt(season.episode_count, 10) || null
+    }];
+  }).filter(Boolean));
 }
 
 function isEpisodeFile(mediaFile) {

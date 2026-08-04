@@ -9,6 +9,13 @@
       body: options.body
     });
 
+    const serverVersion = response.headers.get("X-Media-Baker-Version");
+    if (serverVersion) {
+      global.dispatchEvent(new CustomEvent("media-baker:server-version", {
+        detail: { version: serverVersion }
+      }));
+    }
+
     if (!response.ok) {
       throw new Error(await responseErrorMessage(response));
     }

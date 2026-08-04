@@ -11,6 +11,10 @@ function createId(value) {
 }
 
 function isVideoFile(filePath) {
+  const filename = path.basename(filePath).toLowerCase();
+  if (filename.includes(".media-baker-live.tmp.") || filename.includes(".media-baker.tmp.")) {
+    return false;
+  }
   return VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
@@ -57,16 +61,38 @@ function parseEpisodeFile(filePath) {
 
 function episodeMatch(filename) {
   const patterns = [
-    { regex: /\bS\s*(\d{1,4})\s*E\s*(\d{1,3})\b/i, type: "seasonEpisode" },
+    { regex: /\bS\s*(\d{1,4})[\s._-]*E\s*(\d{1,3})\b/i, type: "seasonEpisode" },
     { regex: /(?:^|[\s._-])(\d{1,2})x(\d{1,3})(?=$|[\s._-])/i, type: "seasonEpisode" },
     { regex: /\bSeason\s*(\d{1,4})\s*(?:Episode|Ep)\s*(\d{1,3})\b/i, type: "seasonEpisode" },
+    { regex: /\b((?:19|20)\d{2})[-_. ](\d{2})[-_. ](\d{2})(?:[ T_-]+\d{2}(?:[-_. :]\d{2}){1,2})?/i, type: "datedEpisode", dated: true },
     { regex: /(?:^|[\s._-])[-_][_\s-]*(\d{1,3})(?=$|[\s._\-[\(])/i, type: "animeNumber", season: 1 },
-    { regex: /\bOVA\s*0*(\d{1,3})\b/i, type: "ova", season: 0 }
+    { regex: /\bOVA\s*0*(\d{1,3})\b/i, type: "ova", season: 0 },
+    {
+      regex: /^(?:(?:creditless|non[\s._-]*credit(?:ed)?|nc)[\s._-]*)?(?:op|opening)(?:[\s._-]*0*(\d{1,3}))?(?:[\s._-]*v\d+)?$/i,
+      type: "specialFeature",
+      season: 0,
+      defaultEpisode: 1,
+      kind: "Opening"
+    },
+    {
+      regex: /^(?:(?:creditless|non[\s._-]*credit(?:ed)?|nc)[\s._-]*)?(?:ed|ending)(?:[\s._-]*0*(\d{1,3}))?(?:[\s._-]*v\d+)?$/i,
+      type: "specialFeature",
+      season: 0,
+      defaultEpisode: 1,
+      kind: "Ending"
+    }
   ];
 
   for (const pattern of patterns) {
     const match = filename.match(pattern.regex);
     if (match) {
+      if (pattern.dated) {
+        const month = Number.parseInt(match[2], 10);
+        const day = Number.parseInt(match[3], 10);
+        if (month < 1 || month > 12 || day < 1 || day > 31) {
+          continue;
+        }
+      }
       return normalizeEpisodeMatch(match, pattern);
     }
   }
@@ -81,13 +107,18 @@ function normalizeEpisodeMatch(match, pattern) {
   }
 
   const season = pattern.season === undefined ? Number.parseInt(match[1], 10) : pattern.season;
-  const episode = Number.parseInt(pattern.season === undefined ? match[2] : match[1], 10);
+  const episode = pattern.dated
+    ? Number.parseInt(`${match[2]}${match[3]}`, 10)
+    : Number.parseInt(pattern.season === undefined ? match[2] : match[1] || pattern.defaultEpisode, 10);
   return {
     index: match.index,
     0: match[0],
     season,
     episode,
-    type: pattern.type
+    type: pattern.type,
+    kind: pattern.kind || null,
+    month: pattern.dated ? Number.parseInt(match[2], 10) : null,
+    day: pattern.dated ? Number.parseInt(match[3], 10) : null
   };
 }
 
@@ -139,8 +170,14 @@ function cleanReleaseName(value) {
 }
 
 function defaultEpisodeTitle(match) {
+  if (match.type === "specialFeature") {
+    return match.episode > 1 ? `${match.kind} ${match.episode}` : match.kind;
+  }
   if (match.type === "ova") {
     return `OVA ${String(match.episode).padStart(2, "0")}`;
+  }
+  if (match.type === "datedEpisode") {
+    return `Episode ${String(match.month).padStart(2, "0")}-${String(match.day).padStart(2, "0")}`;
   }
 
   return `Episode ${String(match.episode).padStart(2, "0")}`;

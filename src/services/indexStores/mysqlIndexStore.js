@@ -141,6 +141,19 @@ class MysqlIndexStore {
     return counts;
   }
 
+  async hasFileStats() {
+    await this.init();
+    for (const table of ["media_episodes", "media_movies", "media_tracks"]) {
+      const [[row]] = await this.pool.execute(
+        `SELECT COUNT(*) AS count FROM ${table} WHERE size_bytes IS NULL OR mtime_ms IS NULL`
+      );
+      if (Number(row.count) > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   async getMovie(collection, id) {
     await this.init();
     const [rows] = await this.pool.execute(
@@ -259,6 +272,24 @@ class MysqlIndexStore {
       return this.loadMusicCollection(collection);
     }
     return this.loadMovieCollection(collection);
+  }
+
+  async loadFileIdentities(collection, type) {
+    await this.init();
+    const table = type === "music" ? "media_tracks" : "media_movies";
+    const [rows] = await this.pool.execute(
+      `SELECT id, file_path, added_at_ms, mtime_ms, size_bytes FROM ${table} WHERE collection = ?`,
+      [collection]
+    );
+    if (type !== "tv") {
+      return rows.map(fileIdentityFromRow);
+    }
+
+    const [episodeRows] = await this.pool.execute(
+      "SELECT id, file_path, added_at_ms, mtime_ms, size_bytes FROM media_episodes WHERE collection = ?",
+      [collection]
+    );
+    return [...rows, ...episodeRows].map(fileIdentityFromRow);
   }
 
   async searchCollection(collection, type, query, metadataIds = [], limit = 240) {
@@ -508,6 +539,7 @@ class MysqlIndexStore {
         file_path TEXT NOT NULL,
         added_at_ms DOUBLE NULL,
         mtime_ms DOUBLE NULL,
+        size_bytes DOUBLE NULL,
         PRIMARY KEY (collection, id),
         INDEX idx_media_episodes_show (collection, show_id),
         INDEX idx_media_episodes_title (title)
@@ -525,6 +557,7 @@ class MysqlIndexStore {
         file_path TEXT NOT NULL,
         added_at_ms DOUBLE NULL,
         mtime_ms DOUBLE NULL,
+        size_bytes DOUBLE NULL,
         PRIMARY KEY (collection, id),
         INDEX idx_media_movies_title (title)
       )
@@ -570,6 +603,7 @@ class MysqlIndexStore {
         file_path TEXT NOT NULL,
         added_at_ms DOUBLE NULL,
         mtime_ms DOUBLE NULL,
+        size_bytes DOUBLE NULL,
         PRIMARY KEY (collection, id),
         INDEX idx_media_tracks_album (collection, album_id),
         INDEX idx_media_tracks_title (title)
@@ -580,6 +614,9 @@ class MysqlIndexStore {
     await ensureColumn(this.pool, "media_episodes", "mtime_ms", "DOUBLE NULL");
     await ensureColumn(this.pool, "media_movies", "added_at_ms", "DOUBLE NULL");
     await ensureColumn(this.pool, "media_movies", "mtime_ms", "DOUBLE NULL");
+    await ensureColumn(this.pool, "media_episodes", "size_bytes", "DOUBLE NULL");
+    await ensureColumn(this.pool, "media_movies", "size_bytes", "DOUBLE NULL");
+    await ensureColumn(this.pool, "media_tracks", "size_bytes", "DOUBLE NULL");
 
     this.initialized = true;
     logger.info(`[index] MySQL index store ready host=${this.config.host} database=${this.config.database}`);
@@ -595,7 +632,7 @@ class MysqlIndexStore {
       [collection]
     );
     const [episodeRows] = await this.pool.execute(
-      "SELECT id, show_id, show_name, season, episode, title, filename, file_path, added_at_ms, mtime_ms FROM media_episodes WHERE collection = ? ORDER BY season, episode, filename",
+      "SELECT id, show_id, show_name, season, episode, title, filename, file_path, added_at_ms, mtime_ms, size_bytes FROM media_episodes WHERE collection = ? ORDER BY season, episode, filename",
       [collection]
     );
     const movieCollection = await this.loadMovieCollection(collection);
@@ -624,7 +661,8 @@ class MysqlIndexStore {
         filename: row.filename,
         filePath: row.file_path,
         addedAtMs: numberOrNull(row.added_at_ms),
-        mtimeMs: numberOrNull(row.mtime_ms)
+        mtimeMs: numberOrNull(row.mtime_ms),
+        sizeBytes: numberOrNull(row.size_bytes)
       };
       episodesById[episode.id] = episode;
 
@@ -658,7 +696,7 @@ class MysqlIndexStore {
 
   async loadMovieCollection(collection) {
     const [rows] = await this.pool.execute(
-      "SELECT id, title, release_year, filename, folder, file_path, added_at_ms, mtime_ms FROM media_movies WHERE collection = ? ORDER BY title, release_year",
+      "SELECT id, title, release_year, filename, folder, file_path, added_at_ms, mtime_ms, size_bytes FROM media_movies WHERE collection = ? ORDER BY title, release_year",
       [collection]
     );
 
@@ -670,7 +708,8 @@ class MysqlIndexStore {
       folder: row.folder,
       filePath: row.file_path,
       addedAtMs: numberOrNull(row.added_at_ms),
-      mtimeMs: numberOrNull(row.mtime_ms)
+      mtimeMs: numberOrNull(row.mtime_ms),
+      sizeBytes: numberOrNull(row.size_bytes)
     }));
     const byId = Object.fromEntries(items.map((movie) => [movie.id, movie]));
 
@@ -688,7 +727,7 @@ class MysqlIndexStore {
     );
     const [trackRows] = await this.pool.execute(
       `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number,
-              track_number, title, filename, file_path, added_at_ms, mtime_ms
+              track_number, title, filename, file_path, added_at_ms, mtime_ms, size_bytes
        FROM media_tracks WHERE collection = ? ORDER BY disc_number, track_number, filename`,
       [collection]
     );
@@ -723,7 +762,8 @@ class MysqlIndexStore {
         filename: row.filename,
         filePath: row.file_path,
         addedAtMs: numberOrNull(row.added_at_ms),
-        mtimeMs: numberOrNull(row.mtime_ms)
+        mtimeMs: numberOrNull(row.mtime_ms),
+        sizeBytes: numberOrNull(row.size_bytes)
       };
       tracksById[track.id] = track;
       const album = albumsById.get(track.albumId);
@@ -768,7 +808,8 @@ class MysqlIndexStore {
             episode.filename,
             episode.filePath,
             episode.addedAtMs || null,
-            episode.mtimeMs || null
+            episode.mtimeMs || null,
+            episode.sizeBytes ?? null
           ]);
         }
       }
@@ -777,7 +818,7 @@ class MysqlIndexStore {
 
     await bulkInsert(connection, "media_shows", ["collection", "id", "name", "path"], shows);
     await bulkInsert(connection, "media_seasons", ["collection", "show_id", "season", "name"], seasons);
-    await bulkInsert(connection, "media_episodes", ["collection", "id", "show_id", "show_name", "season", "episode", "title", "filename", "file_path", "added_at_ms", "mtime_ms"], episodes);
+    await bulkInsert(connection, "media_episodes", ["collection", "id", "show_id", "show_name", "season", "episode", "title", "filename", "file_path", "added_at_ms", "mtime_ms", "size_bytes"], episodes);
     await this.insertMovieCollection(connection, collection, {
       items: tvIndex.items || []
     });
@@ -793,10 +834,11 @@ class MysqlIndexStore {
       movie.folder,
       movie.filePath,
       movie.addedAtMs || null,
-      movie.mtimeMs || null
+      movie.mtimeMs || null,
+      movie.sizeBytes ?? null
     ]);
 
-    await bulkInsert(connection, "media_movies", ["collection", "id", "title", "release_year", "filename", "folder", "file_path", "added_at_ms", "mtime_ms"], rows);
+    await bulkInsert(connection, "media_movies", ["collection", "id", "title", "release_year", "filename", "folder", "file_path", "added_at_ms", "mtime_ms", "size_bytes"], rows);
   }
 
   async insertMusicCollection(connection, collection, musicIndex) {
@@ -811,14 +853,14 @@ class MysqlIndexStore {
           tracks.push([
             collection, track.id, artist.id, artist.name, album.id, album.name, album.year,
             track.disc, track.track, track.title, track.filename, track.filePath,
-            track.addedAtMs || null, track.mtimeMs || null
+            track.addedAtMs || null, track.mtimeMs || null, track.sizeBytes ?? null
           ]);
         }
       }
     }
     await bulkInsert(connection, "media_artists", ["collection", "id", "name", "path"], artists);
     await bulkInsert(connection, "media_albums", ["collection", "id", "artist_id", "name", "release_year", "path"], albums);
-    await bulkInsert(connection, "media_tracks", ["collection", "id", "artist_id", "artist_name", "album_id", "album_name", "release_year", "disc_number", "track_number", "title", "filename", "file_path", "added_at_ms", "mtime_ms"], tracks);
+    await bulkInsert(connection, "media_tracks", ["collection", "id", "artist_id", "artist_name", "album_id", "album_name", "release_year", "disc_number", "track_number", "title", "filename", "file_path", "added_at_ms", "mtime_ms", "size_bytes"], tracks);
   }
 }
 
@@ -861,6 +903,16 @@ function toIsoString(value) {
 function numberOrNull(value) {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function fileIdentityFromRow(row) {
+  return {
+    id: row.id,
+    filePath: row.file_path,
+    addedAtMs: numberOrNull(row.added_at_ms),
+    mtimeMs: numberOrNull(row.mtime_ms),
+    sizeBytes: numberOrNull(row.size_bytes)
+  };
 }
 
 function collectionTables(type) {

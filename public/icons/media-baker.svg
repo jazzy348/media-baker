@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Media Baker">
+  <rect width="512" height="512" rx="112" fill="#05090d"/>
+  <rect x="108" y="108" width="296" height="296" rx="72" fill="#0d1b24" stroke="#00d9ff" stroke-width="24"/>
+  <rect x="145" y="145" width="222" height="222" rx="48" fill="none" stroke="#00d9ff" stroke-opacity=".22" stroke-width="10"/>
+</svg>

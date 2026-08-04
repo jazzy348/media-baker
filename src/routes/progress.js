@@ -2,7 +2,7 @@ const express = require("express");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const { httpError } = require("../utils/httpErrors");
 
-module.exports = function createProgressRoutes({ mediaIndex, metadata, progress }, options = {}) {
+module.exports = function createProgressRoutes({ mediaIndex, metadata, progress, skipDetection }, options = {}) {
   const router = express.Router();
 
   router.get("/on-deck", async (req, res, next) => {
@@ -33,6 +33,32 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress 
         return;
       }
       res.json(await progress.get(progressUserId(req), req.params.mediaType, req.params.id));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/:mediaType/:id/position", async (req, res, next) => {
+    try {
+      assertMediaAccess(req, req.params.mediaType);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
+      const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      const completionStartSeconds = library
+        && library.type === "tv"
+        && skipDetection
+        && typeof skipDetection.completionStartSeconds === "function"
+        ? await skipDetection.completionStartSeconds(req.params.mediaType, mediaFile)
+        : null;
+      await progress.recordPlaybackPosition(
+        progressUserId(req),
+        req.params.mediaType,
+        mediaFile.id,
+        req.body && req.body.positionSeconds,
+        req.body && req.body.durationSeconds,
+        { completionStartSeconds }
+      );
+      res.json(await progress.get(progressUserId(req), req.params.mediaType, mediaFile.id));
     } catch (err) {
       next(err);
     }
@@ -191,7 +217,7 @@ function emptyProgress(mediaType, mediaId) {
 }
 
 function progressUserId(req) {
-  return req.user && req.user.id || "global";
+  return req.progressUserId || req.user && req.user.id || "global";
 }
 
 function allowedLibraries(req) {

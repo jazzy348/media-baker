@@ -1,5 +1,7 @@
 const express = require("express");
+const fs = require("fs/promises");
 const path = require("path");
+const packageJson = require("../package.json");
 const config = require("./config");
 const { createIndexStore } = require("./services/indexStores");
 const { MediaIndex } = require("./services/mediaIndex");
@@ -8,6 +10,7 @@ const { HlsService } = require("./services/hlsService");
 const { ImageService } = require("./services/imageService");
 const { CachedImageService } = require("./services/cachedImageService");
 const { FallbackStreamService } = require("./services/fallbackStreamService");
+const { safeRequestUrl } = require("./utils/safeRequestUrl");
 const { MetadataStore } = require("./services/metadataStore");
 const { MetadataService } = require("./services/metadataService");
 const { PlaybackProgressStore } = require("./services/playbackProgressStore");
@@ -21,10 +24,16 @@ const { HardwareService } = require("./services/hardwareService");
 const { loadOrCreatePlaybackSecret } = require("./services/playbackSecret");
 const { PlaybackTokenService } = require("./services/playbackTokens");
 const { YtDlpService, syncYtDlpLibrary } = require("./services/ytdlpService");
+const { YtDlpRelayService } = require("./services/ytdlpRelayService");
 const { IptvService } = require("./services/iptvService");
 const { UpdateService } = require("./services/updateService");
 const { BackupService } = require("./services/backupService");
-const { createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
+const { OptimiserService } = require("./services/optimiserService");
+const { SkipMarkerStore } = require("./services/skipMarkerStore");
+const { SkipDetectionService } = require("./services/skipDetectionService");
+const { OpenMovieIdStore } = require("./services/openMovieIdStore");
+const { OpenMovieService } = require("./services/openMovieService");
+const { createApiKeyAuthMiddleware, createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
 const createHealthRoutes = require("./routes/health");
@@ -33,16 +42,35 @@ const createProgressRoutes = require("./routes/progress");
 const createLibraryRoutes = require("./routes/libraries");
 const createStreamRoutes = require("./routes/streams");
 const createYtDlpRoutes = require("./routes/ytdlp");
+const createYtDlpRelayPlaybackRoutes = require("./routes/ytdlpRelayPlayback");
 const createIptvRoutes = require("./routes/iptv");
 const createFallbackRoutes = require("./routes/fallback");
 const createDocsRoutes = require("./routes/docs");
+const createAppInfoRoutes = require("./routes/appInfo");
+const createOpenMovieRoutes = require("./routes/openMovie");
 const logger = require("./utils/logger");
 
 async function createApp() {
   const app = express();
+  const publicPath = path.resolve(__dirname, "..", "public");
+  const webAppHtml = injectWebAppVersion(
+    await fs.readFile(path.join(publicPath, "index.html"), "utf8"),
+    packageJson.version
+  );
+  const serveWebApp = createWebAppHandler(webAppHtml);
 
   app.use(express.json());
-  app.use(express.static(path.resolve(__dirname, "..", "public")));
+  app.use("/api", (req, res, next) => {
+    res.set("X-Media-Baker-Version", packageJson.version);
+    next();
+  });
+  app.use("/api/app", createAppInfoRoutes({ version: packageJson.version }));
+  app.use(express.static(publicPath, {
+    index: false,
+    setHeaders(res, filePath) {
+      res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    }
+  }));
 
   const libraryService = new LibraryService(config);
   config.libraries = await libraryService.list();
@@ -74,15 +102,23 @@ async function createApp() {
   }
   const metadataStore = new MetadataStore(config);
   const metadata = new MetadataService(config, metadataStore, ffmpeg, cachedImages);
+  const openMovieIdStore = new OpenMovieIdStore(config);
+  const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata);
+  mediaIndex.addUpdateListener((libraryKey) => openMovie.sync(libraryKey));
+  await openMovie.init();
   const subtitles = new SubtitleService(config);
-  const indexScanScheduler = new IndexScanScheduler(config, mediaIndex, metadata);
+  const skipMarkerStore = new SkipMarkerStore(config);
+  const skipDetection = new SkipDetectionService(config, mediaIndex, ffmpeg, skipMarkerStore);
+  const indexScanScheduler = new IndexScanScheduler(config, mediaIndex, metadata, skipDetection);
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
   const playbackTokens = new PlaybackTokenService(playbackSecret, config.hls.ttlSeconds);
-  const ytdlp = new YtDlpService(config);
+  const ytdlp = new YtDlpService(config, ffmpeg);
+  const ytdlpRelay = new YtDlpRelayService(config, ffmpeg);
   const iptv = new IptvService(config, ffmpeg, cachedImages);
   const updates = new UpdateService(config);
   const backups = new BackupService(config, appSettings);
+  const optimizer = new OptimiserService(config, ffmpeg, mediaIndex, appSettings, metadata);
   ytdlp.setCompletionHandler(async () => {
     await mediaIndex.reindexLibrary(config.ytdlp.libraryKey || "yt-dlp");
   });
@@ -98,9 +134,13 @@ async function createApp() {
     fallbackStream,
     metadataStore,
     metadata,
+    openMovieIdStore,
+    openMovie,
     progressStore,
     progress,
     subtitles,
+    skipMarkerStore,
+    skipDetection,
     indexScanScheduler,
     libraryService,
     accountService,
@@ -108,9 +148,11 @@ async function createApp() {
     hardware,
     playbackTokens,
     ytdlp,
+    ytdlpRelay,
     iptv,
     updates,
-    backups
+    backups,
+    optimizer
   };
   const imageMigration = cachedImages.migrate(metadataStore, config.iptv.cachePath);
   backups.setReadiness(imageMigration);
@@ -119,14 +161,27 @@ async function createApp() {
   });
   imageMigration.catch(() => {}).finally(() => metadata.startBackgroundPreload(mediaIndex));
   indexScanScheduler.start();
+  if (mediaIndex.requiresFileStatsRefresh()
+    && !(config.indexScan.enabled && config.indexScan.runOnStartup)) {
+    setImmediate(() => {
+      indexScanScheduler.run("file-stats").catch((err) => {
+        logger.error(`[index-scan] file stats scan failed message="${err.message}"`, err);
+      });
+    });
+  }
   ytdlp.start();
+  ytdlpRelay.start();
   imageMigration.catch(() => {}).finally(() => iptv.start());
   updates.start();
   backups.start();
+  optimizer.start();
+  skipDetection.start();
 
   app.use("/api/streams", createStreamAuthMiddleware(playbackTokens), createStreamRoutes(app.locals.services));
+  app.use("/api/relay-streams", createStreamAuthMiddleware(playbackTokens), createYtDlpRelayPlaybackRoutes(app.locals.services));
   app.use("/api/auth", createAuthRoutes(app.locals.services));
   app.use("/api/docs", createDocsRoutes());
+  app.get(["/", "/index.html"], serveWebApp);
   app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
   app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
   app.use(
@@ -134,6 +189,11 @@ async function createApp() {
     createAuthMiddleware(accountService, libraryService),
     createStreamAuthMiddleware(playbackTokens),
     createStreamRoutes(app.locals.services, { surface: "web" })
+  );
+  app.use(
+    "/api/openmovie",
+    createApiKeyAuthMiddleware(accountService),
+    createOpenMovieRoutes(app.locals.services)
   );
   app.use(createAuthMiddleware(accountService, libraryService));
 
@@ -166,7 +226,7 @@ async function createApp() {
     }
 
     if (shouldServeFallbackStream(req, fallbackStream)) {
-      logger.full(`[fallback] serving fallback stream for error status=${err.status || 500} path="${safeUrl(req)}"`);
+      logger.full(`[fallback] serving fallback stream for error status=${err.status || 500} path="${safeRequestUrl(req)}"`);
       try {
         await fallbackStream.serve(req, res, err.status || 500, !isWebStreamRequest(req));
       } catch (fallbackErr) {
@@ -175,7 +235,7 @@ async function createApp() {
       return;
     }
 
-    logger.error(`[error] ${req.method} ${safeUrl(req)} status=${err.status || 500} message="${err.message || "Internal server error"}"`, err);
+    logger.error(`[error] ${req.method} ${safeRequestUrl(req)} status=${err.status || 500} message="${err.message || "Internal server error"}"`, err);
 
     const status = err.status || 500;
     res.status(status).json({
@@ -186,12 +246,19 @@ async function createApp() {
   return app;
 }
 
-function serveWebApp(req, res, next) {
-  if (!isBrowserRequest(req)) {
-    next();
-    return;
-  }
-  res.sendFile(path.resolve(__dirname, "..", "public", "index.html"));
+function createWebAppHandler(webAppHtml) {
+  return function serveWebApp(req, res, next) {
+    if (!isBrowserRequest(req)) {
+      next();
+      return;
+    }
+    res.set("Cache-Control", "no-store");
+    res.type("html").send(webAppHtml);
+  };
+}
+
+function injectWebAppVersion(html, version) {
+  return String(html).replaceAll("__MEDIA_BAKER_VERSION__", encodeURIComponent(String(version)));
 }
 
 function shouldServeFallbackStream(req, fallbackStream) {
@@ -210,17 +277,6 @@ function isBrowserRequest(req) {
   const accept = req.get("accept") || "";
   return /\bMozilla\/\d/i.test(userAgent)
     || accept.includes("text/html");
-}
-
-function safeUrl(req) {
-  const url = new URL(req.originalUrl, "http://localhost");
-  for (const key of ["secret", "shareToken", "authToken", "apiKey", "playbackSecret", "playbackToken"]) {
-    if (url.searchParams.has(key)) {
-      url.searchParams.set(key, "[redacted]");
-    }
-  }
-
-  return `${url.pathname}${url.search}`;
 }
 
 module.exports = { createApp };

@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
+const logger = require("../utils/logger");
 
 class MetadataStore {
   constructor(config) {
@@ -9,6 +10,8 @@ class MetadataStore {
     this.initialized = false;
     this.initializationPromise = null;
     this.jsonPath = path.join(config.metadata.cachePath, "metadata.json");
+    this.jsonData = null;
+    this.jsonOperation = Promise.resolve();
   }
 
   async get(mediaType, mediaId) {
@@ -207,10 +210,9 @@ class MetadataStore {
       return;
     }
 
-    const data = await this.readJson();
-    data[recordKey(record.mediaType, record.mediaId)] = record;
-    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
-    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
+    await this.updateJson((data) => {
+      data[recordKey(record.mediaType, record.mediaId)] = { ...record };
+    });
   }
 
   async replaceCachedImageFilenames(filenameMap) {
@@ -238,13 +240,15 @@ class MetadataStore {
       return;
     }
 
-    const data = await this.readJson();
-    for (const record of Object.values(data)) {
-      record.posterFilename = filenameMap.get(record.posterFilename) || record.posterFilename;
-      record.thumbnailFilename = filenameMap.get(record.thumbnailFilename) || record.thumbnailFilename;
-    }
-    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
-    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
+    await this.updateJson((data) => {
+      for (const [key, record] of Object.entries(data)) {
+        data[key] = {
+          ...record,
+          posterFilename: filenameMap.get(record.posterFilename) || record.posterFilename,
+          thumbnailFilename: filenameMap.get(record.thumbnailFilename) || record.thumbnailFilename
+        };
+      }
+    });
   }
 
   async init() {
@@ -309,20 +313,130 @@ class MetadataStore {
       await ensureColumn(this.pool, "media_metadata", "thumbnail_unavailable", "thumbnail_unavailable TINYINT(1) NOT NULL DEFAULT 0");
       await ensureColumn(this.pool, "media_metadata", "thumbnail_unavailable_reason", "thumbnail_unavailable_reason VARCHAR(255) NULL");
       await ensureIndex(this.pool, "media_metadata", "idx_media_metadata_search", "FULLTEXT INDEX idx_media_metadata_search (title, source_json)");
+    } else {
+      await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
+      this.jsonData = await loadMetadataJson(this.jsonPath);
     }
 
     this.initialized = true;
   }
 
   async readJson() {
+    await this.jsonOperation;
+    return this.jsonData || {};
+  }
+
+  async updateJson(update) {
+    const task = this.jsonOperation.then(async () => {
+      const nextData = { ...(this.jsonData || {}) };
+      await update(nextData);
+      await atomicWriteJson(this.jsonPath, nextData);
+      this.jsonData = nextData;
+    });
+    this.jsonOperation = task.catch(() => {});
+    return task;
+  }
+}
+
+async function loadMetadataJson(filePath) {
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (parseError) {
+    const recovered = recoverMetadataJson(raw);
+    if (!recovered) throw parseError;
+
+    const backupPath = `${filePath}.corrupt-${Date.now()}`;
+    await fs.copyFile(filePath, backupPath);
+    await atomicWriteJson(filePath, recovered.data);
+    logger.error(
+      `[metadata] repaired corrupt JSON store path="${filePath}" backup="${backupPath}" `
+      + `missingQuotes=${recovered.missingQuotes} invalidEscapes=${recovered.invalidEscapes} `
+      + `trailingCharacters=${recovered.trailingCharacters}`
+    );
+    return recovered.data;
+  }
+}
+
+function recoverMetadataJson(raw) {
+  let missingQuotes = 0;
+  let invalidEscapes = 0;
+  let trailingCharacters = 0;
+  let candidate = raw.replace(/\\([A-Za-z_][A-Za-z0-9_]*)\\"(?=\s*:)/g, (match, name) => {
+    missingQuotes += 1;
+    return `\\"${name}\\"`;
+  });
+  candidate = candidate.replace(/\\(?!["\\/bfnrtu])/g, () => {
+    invalidEscapes += 1;
+    return "\\\\";
+  });
+
+  let data;
+  try {
+    data = JSON.parse(candidate);
+  } catch (err) {
+    const rootEnd = findJsonRootEnd(candidate);
+    if (rootEnd <= 0 || !candidate.slice(rootEnd).trim()) return null;
     try {
-      return JSON.parse(await fs.readFile(this.jsonPath, "utf8"));
-    } catch (err) {
-      if (err.code === "ENOENT") {
-        return {};
-      }
-      throw err;
+      data = JSON.parse(candidate.slice(0, rootEnd));
+      trailingCharacters = candidate.length - rootEnd;
+    } catch (trimmedError) {
+      return null;
     }
+  }
+
+  if (missingQuotes === 0 && invalidEscapes === 0 && trailingCharacters === 0) return null;
+  return { data, missingQuotes, invalidEscapes, trailingCharacters };
+}
+
+function findJsonRootEnd(text) {
+  let depth = 0;
+  let started = false;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === "\"") {
+      inString = true;
+      continue;
+    }
+    if (character === "{" || character === "[") {
+      depth += 1;
+      started = true;
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+      if (started && depth === 0) return index + 1;
+      if (depth < 0) return -1;
+    }
+  }
+  return -1;
+}
+
+async function atomicWriteJson(filePath, data) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(data, null, 2));
+    await fs.rename(temporaryPath, filePath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
   }
 }
 

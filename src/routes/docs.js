@@ -25,10 +25,12 @@ function openApiSpec() {
       description: "API for indexing media libraries, managing users/libraries, fetching metadata, tracking playback, and serving HLS streams."
     },
     tags: [
+      { name: "App" },
       { name: "Auth" },
       { name: "Admin" },
       { name: "Catalog" },
       { name: "Libraries" },
+      { name: "OpenMovie" },
       { name: "Playback Progress" },
       { name: "YT-DLP" },
       { name: "Streams" },
@@ -71,11 +73,64 @@ function openApiSpec() {
         }),
         SettingsRequest: objectSchema({
           settings: { type: "object", additionalProperties: true }
+        }),
+        OpenMovieMovie: objectSchema({
+          id: { type: "integer", format: "int32", minimum: 1 },
+          library: { type: "string" },
+          libraryTitle: { type: "string" },
+          title: { type: "string" },
+          originalTitle: { type: "string" },
+          year: { type: "integer", nullable: true },
+          overview: { type: "string" },
+          aliases: { type: "array", items: { type: "string" } },
+          provider: { type: "string", nullable: true },
+          providerId: { type: "string", nullable: true },
+          posterUrl: { type: "string" },
+          playbackUrl: { type: "string" }
+        }),
+        OpenMovieEpisode: objectSchema({
+          id: { type: "integer", format: "int32", minimum: 1 },
+          season: { type: "integer", nullable: true },
+          episode: { type: "integer", nullable: true },
+          title: { type: "string" },
+          overview: { type: "string" },
+          provider: { type: "string", nullable: true },
+          providerId: { type: "string", nullable: true },
+          posterUrl: { type: "string" },
+          playbackUrl: { type: "string" }
+        }),
+        OpenMovieSeason: objectSchema({
+          season: { type: "integer", nullable: true },
+          title: { type: "string" },
+          overview: { type: "string" },
+          airDate: { type: "string", nullable: true },
+          year: { type: "integer", nullable: true },
+          episodeCount: { type: "integer" },
+          providerId: { type: "string", nullable: true },
+          posterUrl: { type: "string", nullable: true },
+          episodes: { type: "array", items: { $ref: "#/components/schemas/OpenMovieEpisode" } }
+        }),
+        OpenMovieShow: objectSchema({
+          library: { type: "string" },
+          libraryTitle: { type: "string" },
+          title: { type: "string" },
+          originalTitle: { type: "string" },
+          year: { type: "integer", nullable: true },
+          overview: { type: "string" },
+          aliases: { type: "array", items: { type: "string" } },
+          provider: { type: "string", nullable: true },
+          providerId: { type: "string", nullable: true },
+          posterUrl: { type: "string", nullable: true },
+          episodeCount: { type: "integer" },
+          seasons: { type: "array", items: { $ref: "#/components/schemas/OpenMovieSeason" } }
         })
       }
     },
     security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }, { ShareToken: [] }],
     paths: {
+      "/api/app/version": {
+        get: operation("App", "Get the running application version", "Public endpoint used by web clients to detect a completed server update.", false)
+      },
       "/api/auth/status": {
         get: operation("Auth", "Check first-run setup status", "Returns whether an admin account must be created.", false)
       },
@@ -136,7 +191,7 @@ function openApiSpec() {
             libraryKeys: { type: "array", items: { type: "string" } }
           }))
         }),
-        delete: operation("Admin", "Delete account", "Requires user-management permission.", true, {
+        delete: operation("Admin", "Delete account", "Deletes the account, its playback history, sessions, and revokes its API keys. Requires user-management permission.", true, {
           parameters: [pathParam("id")]
         })
       },
@@ -158,6 +213,24 @@ function openApiSpec() {
         get: operation("Admin", "Get runtime settings", "Requires settings-management permission."),
         put: operation("Admin", "Update runtime settings", "Applies supported settings without restarting.", true, {
           requestBody: jsonBody({ $ref: "#/components/schemas/SettingsRequest" })
+        })
+      },
+      "/api/admin/skip-detection": {
+        get: operation("Admin", "Skip detection status", "Returns checkpoint progress, the current episode and phase, ETA, marker counts, and failures. Requires settings-management permission.")
+      },
+      "/api/admin/skip-detection/markers": {
+        get: operation("Admin", "Review detected skip markers", "Lists recent intro and credits markers with confidence, source, episode details, and preview data. Requires settings-management permission.")
+      },
+      "/api/admin/skip-detection/retry-failures": {
+        post: operation("Admin", "Retry skip detection failures", "Clears recorded failures and queues their seasons for another attempt. Requires settings-management permission.")
+      },
+      "/api/admin/skip-detection/reanalyse": {
+        post: operation("Admin", "Reanalyse skip markers", "Queues all markers or one season for reanalysis. Cached fingerprints are retained unless includeFingerprints is true.", true, {
+          requestBody: jsonBody(objectSchema({
+            mediaType: { type: "string", nullable: true },
+            groupId: { type: "string", nullable: true },
+            includeFingerprints: { type: "boolean", default: false }
+          }))
         })
       },
       "/api/admin/updates/status": {
@@ -196,7 +269,16 @@ function openApiSpec() {
         get: operation("Admin", "Currently playing", "Lists users with recent HLS segment activity.")
       },
       "/api/admin/history": {
-        get: operation("Admin", "User watch history", "Lists watched and in-progress items by user.")
+        get: operation("Admin", "User watch history timeline", "Lists watched and in-progress activity with server-side user, timespan, and pagination filters.", true, {
+          parameters: [
+            queryParam("userId"),
+            queryParam("timespan", "string", ["24h", "7d", "all", "custom"]),
+            queryParam("from"),
+            queryParam("to"),
+            queryParam("limit", "integer"),
+            queryParam("offset", "integer")
+          ]
+        })
       },
       "/api/admin/duplicates": {
         get: operation("Admin", "Duplicate files", "Lists likely duplicates from matched metadata.", true, {
@@ -259,7 +341,7 @@ function openApiSpec() {
         })
       },
       "/api/catalog/{mediaType}/{id}/options": {
-        get: operation("Catalog", "Fresh web playback options", "Probes a file, returns audio/subtitle/quality choices and a web-player token, and establishes the HTTP-only web-stream authentication cookie for session or share access.", true, {
+        get: operation("Catalog", "Fresh web playback options", "Probes a file, returns audio/subtitle/quality choices, detected TV skip markers, and a web-player token, and establishes the HTTP-only web-stream authentication cookie for session or share access.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
@@ -295,9 +377,9 @@ function openApiSpec() {
         })
       },
       "/api/catalog/{mediaType}/{id}/metadata/poster": {
-        post: operation("Catalog", "Attach poster", "Caches a poster from an image URL or local file path.", true, {
+        post: operation("Catalog", "Attach poster", "Caches a poster for a movie, episode, track, or TV series from an image URL or local file path.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")],
-          requestBody: jsonBody(objectSchema({ url: { type: "string" }, path: { type: "string" } }))
+          requestBody: jsonBody(objectSchema({ posterUrl: { type: "string" }, posterFilePath: { type: "string" } }))
         })
       },
       "/api/catalog/{mediaType}/{id}/metadata/thumbnail": {
@@ -353,6 +435,15 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/progress/{mediaType}/{id}/position": {
+        post: operation("Playback Progress", "Report web playback position", "Records the web player's current position and duration.", true, {
+          parameters: [pathParam("mediaType"), pathParam("id")],
+          requestBody: jsonBody(objectSchema({
+            positionSeconds: { type: "number", minimum: 0 },
+            durationSeconds: { type: "number", minimum: 0 }
+          }))
+        })
+      },
       "/api/progress/{mediaType}/{id}/watched": {
         post: operation("Playback Progress", "Mark watched", "Marks one item watched.", true, {
           parameters: [pathParam("mediaType"), pathParam("id")]
@@ -378,10 +469,41 @@ function openApiSpec() {
       },
       "/api/ytdlp/downloads": {
         get: operation("YT-DLP", "List downloads", "Returns active and recent YT-DLP download progress records."),
-        post: operation("YT-DLP", "Start download", "Starts a URL download into the managed YT-DLP library. YouTube playlist URLs are detected automatically.", true, {
+        post: operation("YT-DLP", "Start download or recording", "Starts a URL download into the managed YT-DLP library. Live recordings are normalised to a continuous 48 kHz AAC timeline before indexing.", true, {
           requestBody: jsonBody(objectSchema({
-            url: { type: "string", example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" }
+            url: { type: "string", example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+            mode: { type: "string", enum: ["download", "record"] }
           }))
+        })
+      },
+      "/api/ytdlp/inspect": {
+        post: operation("YT-DLP", "Inspect URL", "Returns the title, extractor, and current live status without downloading the media.", true, {
+          requestBody: jsonBody(objectSchema({
+            url: { type: "string" }
+          }))
+        })
+      },
+      "/api/ytdlp/relays": {
+        post: operation("YT-DLP", "Start live relay", "Starts or reuses a rolling HLS relay for a currently live URL.", true, {
+          requestBody: jsonBody(objectSchema({
+            url: { type: "string" }
+          }))
+        })
+      },
+      "/api/ytdlp/relays/{id}/master.m3u8": {
+        get: operation("YT-DLP", "Live relay playlist", "Returns an authenticated rolling HLS playlist. The relay stops after one minute without playlist or segment requests.", true, {
+          parameters: [pathParam("id")]
+        })
+      },
+      "/api/ytdlp/relays/{id}/copy-token": {
+        post: operation("YT-DLP", "Create live relay URL", "Creates a unique copy-scoped URL for third-party playback without exposing the account session.", true, {
+          parameters: [pathParam("id")]
+        })
+      },
+      "/api/relay-streams/{id}/master.m3u8": {
+        get: operation("YT-DLP", "Copied live relay playlist", "Serves a live relay using its copy-scoped playback token.", true, {
+          security: [{ PlaybackToken: [] }],
+          parameters: [pathParam("id")]
         })
       },
       "/api/iptv": {
@@ -524,9 +646,89 @@ function openApiSpec() {
         get: operation("Streams", "Serve authenticated web HLS media", "Requires the web-scoped HLS token and the same authenticated principal that opened the stream.", true, {
           parameters: [pathParam("cacheKey"), pathParam("filename"), queryParam("playbackToken")]
         })
+      },
+      "/api/openmovie/movies": {
+        get: operation("OpenMovie", "List all accessible movies", "Returns movies from every movie-capable library available to the API-key owner. Movie IDs are durable, incremental integers in a namespace separate from episode IDs.", true, {
+          security: [{ ApiKey: [] }],
+          responses: openMovieListResponse("OpenMovieMovie")
+        })
+      },
+      "/api/openmovie/tv": {
+        get: operation("OpenMovie", "List all accessible TV shows", "Returns TV shows without a show ID. Episodes retain their durable integer IDs and are grouped into season objects with season metadata and artwork URLs.", true, {
+          security: [{ ApiKey: [] }],
+          responses: openMovieListResponse("OpenMovieShow")
+        })
+      },
+      "/api/openmovie/movies/{id}/poster": {
+        get: openMoviePosterOperation("movie")
+      },
+      "/api/openmovie/episodes/{id}/poster": {
+        get: openMoviePosterOperation("episode")
+      },
+      "/api/openmovie/episodes/{id}/season-poster": {
+        get: openMoviePosterOperation("season")
+      },
+      "/api/openmovie/movies/{id}/play": {
+        get: openMoviePlaybackOperation("movie")
+      },
+      "/api/openmovie/episodes/{id}/play": {
+        get: openMoviePlaybackOperation("episode")
       }
     }
   };
+}
+
+function openMovieListResponse(schemaName) {
+  return {
+    200: {
+      description: "OK",
+      content: {
+        "application/json": {
+          schema: { type: "array", items: { $ref: `#/components/schemas/${schemaName}` } }
+        }
+      }
+    },
+    401: errorResponse(),
+    500: errorResponse()
+  };
+}
+
+function openMoviePosterOperation(kind) {
+  return operation("OpenMovie", `Serve ${kind} artwork`, "Requires an API key and enforces the key owner's library access. Episode artwork prefers its thumbnail and falls back to season/show artwork.", true, {
+    security: [{ ApiKey: [] }],
+    parameters: [pathParam("id", "integer")],
+    responses: {
+      200: {
+        description: "Poster or fallback artwork",
+        content: { "image/*": { schema: { type: "string", format: "binary" } } }
+      },
+      401: errorResponse(),
+      404: errorResponse(),
+      500: errorResponse()
+    }
+  });
+}
+
+function openMoviePlaybackOperation(kind) {
+  return operation("OpenMovie", `Play ${kind} as HLS`, "Requires an API key and Copy stream URLs permission. Returns a temporary redirect to a short-lived, media-scoped HLS URL without propagating the API key.", true, {
+    security: [{ ApiKey: [] }],
+    parameters: [
+      pathParam("id", "integer"),
+      queryParam("audio"),
+      queryParam("subtitle"),
+      queryParam("audioChannels", "string", ["preserve", "stereo", "surround51", "stabby51"]),
+      queryParam("quality", "string", ["original", "medium", "low"]),
+      queryParam("3d", "string", ["1", "2", "3", "4"]),
+      queryParam("t", "integer")
+    ],
+    responses: {
+      307: { description: "Redirect to the signed HLS master playlist" },
+      401: errorResponse(),
+      403: errorResponse(),
+      404: errorResponse(),
+      500: errorResponse()
+    }
+  });
 }
 
 function operation(tag, summary, description, secured = true, extra = {}) {

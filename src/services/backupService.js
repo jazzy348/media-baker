@@ -435,8 +435,10 @@ function jsonDataFiles(config) {
     { name: "libraries", path: config.libraryStorePath },
     { name: "settings", path: config.settingsStorePath },
     { name: "media-index", path: config.indexPath },
+    { name: "openmovie-ids", path: config.openMovieIdPath },
     { name: "metadata", path: path.join(config.metadata.cachePath, "metadata.json") },
-    { name: "playback-progress", path: config.playback.progressPath }
+    { name: "playback-progress", path: config.playback.progressPath },
+    { name: "skip-markers", path: config.skipMarkerStorePath }
   ];
 }
 

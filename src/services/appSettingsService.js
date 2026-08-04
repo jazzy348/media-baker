@@ -29,8 +29,20 @@ const DEFAULT_RUNTIME_SETTINGS = {
     days: [0, 1, 2, 3, 4, 5, 6],
     retentionCount: 7
   },
+  optimizer: {
+    enabled: false,
+    scanIntervalSeconds: 60,
+    parallelJobs: 1,
+    libraries: {},
+    failures: [],
+    retryQueue: []
+  },
+  skipDetection: {
+    enabled: false
+  },
   metadata: {
     enabled: false,
+    source: "providers",
     provider: "tmdb",
     tmdbApiKey: "",
     tmdbReadAccessToken: "",
@@ -39,13 +51,18 @@ const DEFAULT_RUNTIME_SETTINGS = {
     thumbnailSize: "w300",
     posterLanguages: ["en", "null", "ja"],
     preloadOnStartup: true,
-    requestDelayMs: 250
+    requestDelayMs: 250,
+    customService: {
+      baseUrl: "",
+      apiKey: ""
+    }
   },
   ytdlp: {
     enabled: false,
     downloadPath: "cache/yt-dlp",
     libraryTitle: "YT-DLP",
-    allowPlaylists: false
+    allowPlaylists: false,
+    trackProgress: true
   },
   iptv: {
     enabled: false,
@@ -216,8 +233,20 @@ function runtimeSettingsFromConfig(config) {
       days: config.backup && config.backup.days,
       retentionCount: config.backup && config.backup.retentionCount
     },
+    optimizer: {
+      enabled: config.optimizer && config.optimizer.enabled,
+      scanIntervalSeconds: config.optimizer && config.optimizer.scanIntervalSeconds,
+      parallelJobs: config.optimizer && config.optimizer.parallelJobs,
+      libraries: config.optimizer && config.optimizer.libraries,
+      failures: config.optimizer && config.optimizer.failures,
+      retryQueue: config.optimizer && config.optimizer.retryQueue
+    },
+    skipDetection: {
+      enabled: config.skipDetection && config.skipDetection.enabled
+    },
     metadata: {
       enabled: config.metadata && config.metadata.enabled,
+      source: config.metadata && config.metadata.source,
       provider: config.metadata && config.metadata.provider,
       tmdbApiKey: config.metadata && config.metadata.tmdbApiKey,
       tmdbReadAccessToken: config.metadata && config.metadata.tmdbReadAccessToken,
@@ -226,13 +255,15 @@ function runtimeSettingsFromConfig(config) {
       thumbnailSize: config.metadata && config.metadata.thumbnailSize,
       posterLanguages: config.metadata && config.metadata.posterLanguages,
       preloadOnStartup: config.metadata && config.metadata.preloadOnStartup,
-      requestDelayMs: config.metadata && config.metadata.requestDelayMs
+      requestDelayMs: config.metadata && config.metadata.requestDelayMs,
+      customService: config.metadata && config.metadata.customService
     },
     ytdlp: {
       enabled: config.ytdlp && config.ytdlp.enabled,
       downloadPath: config.ytdlp && config.ytdlp.downloadPath,
       libraryTitle: config.ytdlp && config.ytdlp.libraryTitle,
-      allowPlaylists: config.ytdlp && config.ytdlp.allowPlaylists
+      allowPlaylists: config.ytdlp && config.ytdlp.allowPlaylists,
+      trackProgress: config.ytdlp && config.ytdlp.trackProgress !== false
     },
     iptv: {
       enabled: config.iptv && config.iptv.enabled,
@@ -294,6 +325,8 @@ function applyRuntimeSettings(config, settings) {
   Object.assign(config.indexScan, normalized.indexScan);
   Object.assign(config.backup, normalized.backup);
   config.backup.directory = path.resolve(config.backup.directory);
+  config.optimizer = normalized.optimizer;
+  config.skipDetection = normalized.skipDetection;
   Object.assign(config.metadata, normalized.metadata);
   const ytdlpBinaryPath = config.ytdlp && config.ytdlp.binaryPath;
   Object.assign(config.ytdlp, normalized.ytdlp);
@@ -345,8 +378,20 @@ function normalizeRuntimeSettings(input = {}) {
       days: dayListValue(merged.backup.days, DEFAULT_RUNTIME_SETTINGS.backup.days),
       retentionCount: intValue(merged.backup.retentionCount, DEFAULT_RUNTIME_SETTINGS.backup.retentionCount)
     },
+    optimizer: {
+      enabled: boolValue(merged.optimizer.enabled, DEFAULT_RUNTIME_SETTINGS.optimizer.enabled),
+      scanIntervalSeconds: intValue(merged.optimizer.scanIntervalSeconds, DEFAULT_RUNTIME_SETTINGS.optimizer.scanIntervalSeconds, 10),
+      parallelJobs: Math.min(intValue(merged.optimizer.parallelJobs, DEFAULT_RUNTIME_SETTINGS.optimizer.parallelJobs, 1), 8),
+      libraries: optimizerLibrarySettingsValue(merged.optimizer.libraries),
+      failures: optimizerFailureListValue(merged.optimizer.failures),
+      retryQueue: optimizerRetryListValue(merged.optimizer.retryQueue)
+    },
+    skipDetection: {
+      enabled: boolValue(merged.skipDetection.enabled, DEFAULT_RUNTIME_SETTINGS.skipDetection.enabled)
+    },
     metadata: {
       enabled: boolValue(merged.metadata.enabled, DEFAULT_RUNTIME_SETTINGS.metadata.enabled),
+      source: merged.metadata.source === "custom" ? "custom" : "providers",
       provider: stringValue(merged.metadata.provider, DEFAULT_RUNTIME_SETTINGS.metadata.provider),
       tmdbApiKey: stringValue(merged.metadata.tmdbApiKey, ""),
       tmdbReadAccessToken: stringValue(merged.metadata.tmdbReadAccessToken, ""),
@@ -355,13 +400,18 @@ function normalizeRuntimeSettings(input = {}) {
       thumbnailSize: stringValue(merged.metadata.thumbnailSize, DEFAULT_RUNTIME_SETTINGS.metadata.thumbnailSize),
       posterLanguages: listValue(merged.metadata.posterLanguages, DEFAULT_RUNTIME_SETTINGS.metadata.posterLanguages),
       preloadOnStartup: boolValue(merged.metadata.preloadOnStartup, DEFAULT_RUNTIME_SETTINGS.metadata.preloadOnStartup),
-      requestDelayMs: intValue(merged.metadata.requestDelayMs, DEFAULT_RUNTIME_SETTINGS.metadata.requestDelayMs, 0)
+      requestDelayMs: intValue(merged.metadata.requestDelayMs, DEFAULT_RUNTIME_SETTINGS.metadata.requestDelayMs, 0),
+      customService: {
+        baseUrl: stringValue(merged.metadata.customService && merged.metadata.customService.baseUrl, ""),
+        apiKey: stringValue(merged.metadata.customService && merged.metadata.customService.apiKey, "")
+      }
     },
     ytdlp: {
       enabled: boolValue(merged.ytdlp.enabled, DEFAULT_RUNTIME_SETTINGS.ytdlp.enabled),
       downloadPath: stringValue(merged.ytdlp.downloadPath, DEFAULT_RUNTIME_SETTINGS.ytdlp.downloadPath),
       libraryTitle: stringValue(merged.ytdlp.libraryTitle, DEFAULT_RUNTIME_SETTINGS.ytdlp.libraryTitle),
-      allowPlaylists: boolValue(merged.ytdlp.allowPlaylists, DEFAULT_RUNTIME_SETTINGS.ytdlp.allowPlaylists)
+      allowPlaylists: boolValue(merged.ytdlp.allowPlaylists, DEFAULT_RUNTIME_SETTINGS.ytdlp.allowPlaylists),
+      trackProgress: boolValue(merged.ytdlp.trackProgress, DEFAULT_RUNTIME_SETTINGS.ytdlp.trackProgress)
     },
     iptv: {
       enabled: boolValue(merged.iptv.enabled, DEFAULT_RUNTIME_SETTINGS.iptv.enabled),
@@ -463,6 +513,94 @@ function stringMapValue(value) {
   return Object.fromEntries(Object.entries(value)
     .map(([key, entry]) => [String(key).trim(), String(entry || "").trim()])
     .filter(([key, entry]) => key && entry));
+}
+
+function optimizerLibrarySettingsValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+    const settings = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+    return [String(key), {
+      enabled: Boolean(settings.enabled),
+      mode: settings.mode === "all" ? "all" : "preferred",
+      downmixToStereo: Boolean(settings.downmixToStereo),
+      preserveHdr: Boolean(settings.preserveHdr),
+      allDay: Boolean(settings.allDay),
+      secondaryAudioLanguage: stringValue(settings.secondaryAudioLanguage, ""),
+      startTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(settings.startTime || "")) ? String(settings.startTime) : "01:00",
+      endTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(settings.endTime || "")) ? String(settings.endTime) : "06:00",
+      lastCheckedMs: nonNegativeNumber(settings.lastCheckedMs, 0)
+    }];
+  }));
+}
+
+function optimizerFailureListValue(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      const failure = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+      const filePath = stringValue(failure.filePath, "");
+      const message = stringValue(failure.message, "");
+      if (!filePath || !message) {
+        return null;
+      }
+      return {
+        id: stringValue(failure.id, `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+        at: validIsoDate(failure.at) || new Date().toISOString(),
+        libraryKey: stringValue(failure.libraryKey, ""),
+        libraryTitle: stringValue(failure.libraryTitle, failure.libraryKey || ""),
+        title: stringValue(failure.title, path.basename(filePath)),
+        filePath,
+        mode: failure.mode === "all" ? "all" : "preferred",
+        message
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 200);
+}
+
+function optimizerRetryListValue(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set();
+  return value
+    .map((entry) => {
+      const retry = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+      const libraryKey = stringValue(retry.libraryKey, "");
+      const filePath = stringValue(retry.filePath, "");
+      if (!libraryKey || !filePath) {
+        return null;
+      }
+      const key = `${libraryKey}\0${filePath}`;
+      if (seen.has(key)) {
+        return null;
+      }
+      seen.add(key);
+      return {
+        libraryKey,
+        filePath,
+        queuedAt: validIsoDate(retry.queuedAt) || new Date().toISOString()
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 200);
+}
+
+function validIsoDate(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function nonNegativeNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function dayListValue(value, fallback) {

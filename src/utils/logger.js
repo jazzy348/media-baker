@@ -58,6 +58,10 @@ function full(message) {
   }
 }
 
+function isFullEnabled() {
+  return currentLevel >= LEVELS.full;
+}
+
 function recent(limit = 200) {
   const safeLimit = Math.max(1, Math.min(Number.parseInt(limit, 10) || 200, MAX_ENTRIES));
   return entries.slice(-safeLimit);
@@ -141,5 +145,6 @@ module.exports = {
   error,
   info,
   full,
+  isFullEnabled,
   recent
 };

@@ -10,9 +10,10 @@ const INDEX_REFRESH_DELAY_MS = 750;
 const LIBRARY_KEY = "yt-dlp";
 
 class YtDlpService {
-  constructor(config) {
+  constructor(config, ffmpeg) {
     this.rootConfig = config;
     this.config = config.ytdlp;
+    this.ffmpeg = ffmpeg;
     this.downloads = new Map();
     this.validation = null;
     this.validationAt = 0;
@@ -158,12 +159,22 @@ class YtDlpService {
     };
   }
 
-  async startDownload(url, userId = "global") {
+  async inspect(url) {
     await this.ensureReady();
-    const inputUrl = String(url || "").trim();
-    if (!/^https?:\/\//i.test(inputUrl)) {
-      throw httpError(400, "A valid http(s) URL is required.");
-    }
+    const inputUrl = validInputUrl(url);
+    const inspection = await inspectMedia(this.config.binaryPath, inputUrl);
+    return {
+      url: inputUrl,
+      title: inspection.title,
+      isLive: inspection.isLive,
+      liveStatus: inspection.liveStatus,
+      extractor: inspection.extractor
+    };
+  }
+
+  async startDownload(url, userId = "global", options = {}) {
+    await this.ensureReady();
+    const inputUrl = validInputUrl(url);
 
     const id = crypto.randomBytes(8).toString("hex");
     const record = {
@@ -181,6 +192,8 @@ class YtDlpService {
       title: null,
       playlistTitle: null,
       isPlaylist: false,
+      isLive: Boolean(options.live),
+      liveStatus: options.live ? "is_live" : "not_live",
       items: [],
       activeItemId: null,
       message: "Reading media information...",
@@ -209,8 +222,8 @@ class YtDlpService {
       record.isPlaylist = isExplicitPlaylistUrl(inputUrl);
     }
 
-    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist);
-    logger.info(`[yt-dlp] download starting id=${record.id} playlist=${record.isPlaylist} items=${record.items.length} url="${inputUrl}" output="${this.config.downloadPath}"`);
+    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist, record.isLive);
+    logger.info(`[yt-dlp] download starting id=${record.id} playlist=${record.isPlaylist} live=${record.isLive} items=${record.items.length} url="${inputUrl}" output="${this.config.downloadPath}"`);
     logger.full(`[yt-dlp] command ${this.config.binaryPath} ${args.map(quoteArg).join(" ")}`);
 
     const child = spawn(this.config.binaryPath, args, {
@@ -234,9 +247,7 @@ class YtDlpService {
       stderr.flush();
       if (record.status === "failed") return;
       if (code === 0) {
-        markDownloadIndexing(record);
-        logger.info(`[yt-dlp] download complete id=${record.id}; indexing library`);
-        this.flushIndexRefresh(record)
+        this.finishSuccessfulDownload(record)
           .then(() => {
             finishDownload(record, "complete", null);
             logger.info(`[yt-dlp] post-download index complete id=${record.id}`);
@@ -252,10 +263,74 @@ class YtDlpService {
     });
   }
 
+  async finishSuccessfulDownload(record) {
+    if (record.isLive && record.outputPaths.length > 0) {
+      record.status = "processing";
+      record.speed = null;
+      record.eta = null;
+      record.message = "Normalising live recording audio and timestamps...";
+      const normalisedPaths = [];
+      for (const outputPath of record.outputPaths) {
+        normalisedPaths.push(await this.normaliseLiveRecording(outputPath));
+      }
+      record.outputPaths = normalisedPaths;
+      record.outputPath = normalisedPaths.at(-1) || record.outputPath;
+      record.filename = record.outputPath ? path.basename(record.outputPath) : record.filename;
+    }
+
+    markDownloadIndexing(record);
+    logger.info(`[yt-dlp] download complete id=${record.id}; indexing library`);
+    await this.flushIndexRefresh(record);
+  }
+
+  async normaliseLiveRecording(filePath) {
+    const probe = await this.ffmpeg.probe(filePath, {
+      analyzeduration: "10M",
+      probesize: "10M"
+    });
+    const streams = Array.isArray(probe && probe.streams) ? probe.streams : [];
+    if (!streams.some((stream) => stream.codec_type === "audio")) {
+      return filePath;
+    }
+
+    const extension = path.extname(filePath) || ".mkv";
+    const outputExtension = extension.toLowerCase() === ".webm" ? ".mkv" : extension;
+    const finalPath = outputExtension === extension
+      ? filePath
+      : `${filePath.slice(0, -extension.length)}${outputExtension}`;
+    const tempPath = `${finalPath}.media-baker-live.tmp${outputExtension}`;
+    const args = [
+      "-hide_banner", "-loglevel", "warning", "-y",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", filePath,
+      "-map", "0:v:0?", "-map", "0:a:0?", "-map_metadata", "0",
+      "-c:v", "copy",
+      "-c:a", "aac", "-b:a", "192k",
+      "-af", "aresample=48000:async=1000:first_pts=0",
+      "-ar", "48000",
+      "-avoid_negative_ts", "make_zero"
+    ];
+    if ([".mp4", ".m4v", ".mov"].includes(outputExtension.toLowerCase())) {
+      args.push("-movflags", "+faststart");
+    }
+    args.push(tempPath);
+
+    logger.info(`[yt-dlp] normalising live recording file="${filePath}" audioRate=48000`);
+    logger.full(`[yt-dlp] ffmpeg command ${this.ffmpeg.ffmpegPath} ${args.map(quoteArg).join(" ")}`);
+    try {
+      await this.ffmpeg.exec(this.ffmpeg.ffmpegPath, args);
+      await replaceLiveFile(filePath, tempPath, finalPath);
+      return finalPath;
+    } catch (err) {
+      await fs.rm(tempPath, { force: true }).catch(() => {});
+      throw err;
+    }
+  }
+
   handleProgress(record, lines) {
     const completedFiles = record.outputPaths.length;
     updateProgress(record, lines);
-    if (record.outputPaths.length > completedFiles) {
+    if (!record.isLive && record.outputPaths.length > completedFiles) {
       this.scheduleIndexRefresh(record);
     }
   }
@@ -340,7 +415,8 @@ function ytDlpLibrary(settings) {
     managed: true,
     noMetadata: true,
     noSubtitles: true,
-    localThumbnails: true
+    localThumbnails: true,
+    trackProgress: settings.trackProgress !== false
   };
 }
 
@@ -362,6 +438,9 @@ async function inspectDownload(binaryPath, url, allowPlaylist) {
   return {
     isPlaylist,
     title: data.title || data.playlist_title || data.id || null,
+    isLive: Boolean(data.is_live) || data.live_status === "is_live",
+    liveStatus: data.live_status || (data.is_live ? "is_live" : "not_live"),
+    extractor: data.extractor_key || data.extractor || null,
     entries: entries.map((entry, index) => ({
       id: String(entry.id || entry.url || index + 1),
       index: Number(entry.playlist_index) || index + 1,
@@ -378,21 +457,40 @@ async function inspectDownload(binaryPath, url, allowPlaylist) {
   };
 }
 
+async function inspectMedia(binaryPath, url) {
+  const stdout = await execOutput(binaryPath, [
+    "--dump-single-json",
+    "--skip-download",
+    "--no-warnings",
+    "--no-playlist",
+    url
+  ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
+  const data = JSON.parse(stdout);
+  return {
+    title: data.title || data.fulltitle || data.id || null,
+    isLive: Boolean(data.is_live) || data.live_status === "is_live",
+    liveStatus: data.live_status || (data.is_live ? "is_live" : "not_live"),
+    extractor: data.extractor_key || data.extractor || null
+  };
+}
+
 function applyInspection(record, inspection) {
   record.isPlaylist = Boolean(inspection.isPlaylist);
   record.playlistTitle = record.isPlaylist ? inspection.title : null;
   record.title = inspection.title;
+  record.isLive = Boolean(inspection.isLive);
+  record.liveStatus = inspection.liveStatus;
   record.items = record.isPlaylist ? inspection.entries : [];
   record.message = record.isPlaylist
     ? `Found ${record.items.length} playlist item${record.items.length === 1 ? "" : "s"}.`
     : "Media information loaded.";
 }
 
-function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist) {
+function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive) {
   const outputTemplate = isPlaylist
     ? "%(playlist).150B/%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
     : "%(title).200B [%(id)s].%(ext)s";
-  return [
+  const args = [
     "--newline",
     "--progress",
     allowPlaylist ? "--yes-playlist" : "--no-playlist",
@@ -405,9 +503,18 @@ function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist) {
     "-P",
     downloadPath,
     "-o",
-    outputTemplate,
-    url
+    outputTemplate
   ];
+  if (isLive) {
+    args.push(
+      "--hls-use-mpegts",
+      "--retries", "infinite",
+      "--fragment-retries", "infinite",
+      "--retry-sleep", "fragment:exp=1:20"
+    );
+  }
+  args.push(url);
+  return args;
 }
 
 function updateProgress(record, output) {
@@ -558,6 +665,42 @@ function isExplicitPlaylistUrl(value) {
   } catch (err) {
     return false;
   }
+}
+
+function validInputUrl(value) {
+  const inputUrl = String(value || "").trim();
+  if (!/^https?:\/\//i.test(inputUrl)) {
+    throw httpError(400, "A valid http(s) URL is required.");
+  }
+  return inputUrl;
+}
+
+async function replaceFile(filePath, tempPath) {
+  const backupPath = `${filePath}.media-baker-live-backup`;
+  await fs.rm(backupPath, { force: true });
+  await fs.rename(filePath, backupPath);
+  try {
+    await fs.rename(tempPath, filePath);
+    await fs.rm(backupPath, { force: true });
+  } catch (err) {
+    await fs.rename(backupPath, filePath).catch(() => {});
+    throw err;
+  }
+}
+
+async function replaceLiveFile(inputPath, tempPath, outputPath) {
+  if (inputPath === outputPath) {
+    await replaceFile(inputPath, tempPath);
+    return;
+  }
+  try {
+    await fs.stat(outputPath);
+    throw new Error(`Cannot normalise live recording because "${outputPath}" already exists.`);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  await fs.rename(tempPath, outputPath);
+  await fs.rm(inputPath, { force: true });
 }
 
 function finishDownload(record, status, error) {

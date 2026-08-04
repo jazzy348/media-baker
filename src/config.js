@@ -48,6 +48,8 @@ module.exports = {
   accountStorePath: appPath(fileConfig.accountStorePath, "cache/accounts.json"),
   settingsStorePath: appPath(fileConfig.settingsStorePath, "cache/settings.json"),
   indexPath: appPath(fileConfig.indexPath, "cache/media-index.json"),
+  openMovieIdPath: appPath(fileConfig.openMovieIdPath, "cache/openmovie-ids.json"),
+  skipMarkerStorePath: appPath(fileConfig.skipMarkerStorePath, "cache/skip-markers.json"),
   logging: {
     level: normalizeLogLevel(fileConfig.logging && fileConfig.logging.level || fileConfig.logLevel),
     path: appPath(fileConfig.logging && fileConfig.logging.path, "cache/logs", "/logs"),
@@ -72,9 +74,21 @@ module.exports = {
     days: Array.isArray(fileConfig.backup && fileConfig.backup.days) ? fileConfig.backup.days : [0, 1, 2, 3, 4, 5, 6],
     retentionCount: intValue(fileConfig.backup && fileConfig.backup.retentionCount, 7)
   },
+  optimizer: {
+    enabled: Boolean(fileConfig.optimizer && fileConfig.optimizer.enabled),
+    scanIntervalSeconds: intValue(fileConfig.optimizer && fileConfig.optimizer.scanIntervalSeconds, 60),
+    parallelJobs: intValue(fileConfig.optimizer && fileConfig.optimizer.parallelJobs, 1),
+    libraries: fileConfig.optimizer && typeof fileConfig.optimizer.libraries === "object" && !Array.isArray(fileConfig.optimizer.libraries)
+      ? fileConfig.optimizer.libraries
+      : {}
+  },
+  skipDetection: {
+    enabled: Boolean(fileConfig.skipDetection && fileConfig.skipDetection.enabled)
+  },
   mysql: mysqlConfig,
   metadata: {
     enabled: fileConfig.metadata && typeof fileConfig.metadata.enabled === "boolean" ? fileConfig.metadata.enabled : false,
+    source: fileConfig.metadata && fileConfig.metadata.source === "custom" ? "custom" : "providers",
     provider: fileConfig.metadata && fileConfig.metadata.provider || "tmdb",
     tmdbApiKey: fileConfig.metadata && fileConfig.metadata.tmdbApiKey || "",
     tmdbReadAccessToken: fileConfig.metadata && fileConfig.metadata.tmdbReadAccessToken || "",
@@ -84,7 +98,11 @@ module.exports = {
     posterLanguages: listValue(fileConfig.metadata && fileConfig.metadata.posterLanguages, ["en", "null", "ja"]),
     cachePath: appPath(fileConfig.metadata && fileConfig.metadata.cachePath, "cache/metadata"),
     preloadOnStartup: fileConfig.metadata && typeof fileConfig.metadata.preloadOnStartup === "boolean" ? fileConfig.metadata.preloadOnStartup : true,
-    requestDelayMs: intValue(fileConfig.metadata && fileConfig.metadata.requestDelayMs, 250)
+    requestDelayMs: intValue(fileConfig.metadata && fileConfig.metadata.requestDelayMs, 250),
+    customService: {
+      baseUrl: String(fileConfig.metadata && fileConfig.metadata.customService && fileConfig.metadata.customService.baseUrl || ""),
+      apiKey: String(fileConfig.metadata && fileConfig.metadata.customService && fileConfig.metadata.customService.apiKey || "")
+    }
   },
   ytdlp: {
     enabled: fileConfig.ytdlp && typeof fileConfig.ytdlp.enabled === "boolean" ? fileConfig.ytdlp.enabled : false,
@@ -92,7 +110,8 @@ module.exports = {
     binaryPath: ytdlpExecutable(fileConfig.ytdlp && fileConfig.ytdlp.binaryPath),
     downloadPath: appPath(fileConfig.ytdlp && fileConfig.ytdlp.downloadPath, "cache/yt-dlp", "/downloads"),
     libraryTitle: fileConfig.ytdlp && fileConfig.ytdlp.libraryTitle || "YT-DLP",
-    allowPlaylists: fileConfig.ytdlp && typeof fileConfig.ytdlp.allowPlaylists === "boolean" ? fileConfig.ytdlp.allowPlaylists : false
+    allowPlaylists: fileConfig.ytdlp && typeof fileConfig.ytdlp.allowPlaylists === "boolean" ? fileConfig.ytdlp.allowPlaylists : false,
+    trackProgress: !fileConfig.ytdlp || fileConfig.ytdlp.trackProgress !== false
   },
   iptv: {
     enabled: fileConfig.iptv && typeof fileConfig.iptv.enabled === "boolean" ? fileConfig.iptv.enabled : false,

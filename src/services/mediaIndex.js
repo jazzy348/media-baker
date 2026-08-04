@@ -12,6 +12,8 @@ class MediaIndex {
     this.reindexInFlight = null;
     this.libraryReindexInFlight = new Map();
     this.libraryReindexPending = new Set();
+    this.fileStatsRefreshNeeded = false;
+    this.updateListeners = new Set();
   }
 
   emptyIndex() {
@@ -27,6 +29,7 @@ class MediaIndex {
         noMetadata: Boolean(library.noMetadata),
         noSubtitles: Boolean(library.noSubtitles),
         localThumbnails: Boolean(library.localThumbnails),
+        trackProgress: library.trackProgress !== false,
         path: library.path
       }))
     };
@@ -54,9 +57,9 @@ class MediaIndex {
       return;
     }
 
-    if (!this.hasIndexedFileTimestamps()) {
-      logger.info("[index] file timestamps missing; reindexing");
-      await this.reindex();
+    this.fileStatsRefreshNeeded = !await this.hasIndexedFileStats();
+    if (this.fileStatsRefreshNeeded) {
+      logger.info("[index] file stats missing; background reindex required");
     }
   }
 
@@ -105,11 +108,14 @@ class MediaIndex {
     const nextIndex = this.emptyIndex();
     nextIndex.generatedAt = new Date().toISOString();
     for (const library of this.config.libraries) {
-      nextIndex[library.key] = await this.scanLibrary(library);
+      const previousCollection = await this.previousCollection(library);
+      nextIndex[library.key] = await this.scanLibrary(library, previousCollection);
     }
 
     await this.indexStore.save(nextIndex);
     this.index = this.databaseBacked ? indexMeta(nextIndex) : nextIndex;
+    this.fileStatsRefreshNeeded = false;
+    await this.notifyUpdated(null);
     return this.index;
   }
 
@@ -142,7 +148,8 @@ class MediaIndex {
       throw new Error(`Library not found: ${libraryKey}`);
     }
 
-    const collection = await this.scanLibrary(library);
+    const previousCollection = await this.previousCollection(library);
+    const collection = await this.scanLibrary(library, previousCollection);
     this.index.libraries = this.emptyIndex().libraries;
     this.index.generatedAt = new Date().toISOString();
     if (this.databaseBacked) {
@@ -151,7 +158,18 @@ class MediaIndex {
       this.index[library.key] = collection;
       await this.indexStore.save(this.index);
     }
+    await this.notifyUpdated(library.key);
     return this.index;
+  }
+
+  addUpdateListener(listener) {
+    if (typeof listener !== "function") throw new TypeError("Media index update listener must be a function");
+    this.updateListeners.add(listener);
+    return () => this.updateListeners.delete(listener);
+  }
+
+  async notifyUpdated(libraryKey) {
+    await Promise.all([...this.updateListeners].map((listener) => listener(libraryKey)));
   }
 
   async listShows(collection = "tv", loadedCollection = null) {
@@ -304,9 +322,9 @@ class MediaIndex {
     return JSON.stringify(this.index.libraries || null) !== JSON.stringify(this.emptyIndex().libraries);
   }
 
-  hasIndexedFileTimestamps() {
+  async hasIndexedFileStats() {
     if (this.databaseBacked) {
-      return true;
+      return this.indexStore.hasFileStats();
     }
     for (const library of this.config.libraries) {
       const collection = this.index[library.key];
@@ -320,8 +338,8 @@ class MediaIndex {
         }
         const episodes = Object.values(collection.episodesById || {});
         const items = collection.items || [];
-        if (episodes.some((episode) => !Number.isFinite(Number(episode.addedAtMs)))
-          || items.some((movie) => !Number.isFinite(Number(movie.addedAtMs)))) {
+        if (episodes.some((episode) => !hasFileStats(episode))
+          || items.some((movie) => !hasFileStats(movie))) {
           return false;
         }
         continue;
@@ -330,19 +348,23 @@ class MediaIndex {
       if (library.type === "music") {
         const tracks = Object.values(collection.tracksById || {});
         if (!Array.isArray(collection.artists) || !collection.tracksById
-          || tracks.some((track) => !Number.isFinite(Number(track.addedAtMs)))) {
+          || tracks.some((track) => !hasFileStats(track))) {
           return false;
         }
         continue;
       }
 
       const movies = collection.items || [];
-      if (movies.some((movie) => !Number.isFinite(Number(movie.addedAtMs)))) {
+      if (movies.some((movie) => !hasFileStats(movie))) {
         return false;
       }
     }
 
     return true;
+  }
+
+  requiresFileStatsRefresh() {
+    return this.fileStatsRefreshNeeded;
   }
 
   libraryForKey(key) {
@@ -409,17 +431,27 @@ class MediaIndex {
     }));
   }
 
-  async scanLibrary(library) {
+  async previousCollection(library) {
+    if (this.databaseBacked) {
+      return {
+        identityItems: await this.indexStore.loadFileIdentities(library.key, library.type)
+      };
+    }
+    return this.index[library.key] || emptyCollection(library.type);
+  }
+
+  async scanLibrary(library, previousCollection = null) {
+    let collection;
     if (library.type === "tv") {
-      return this.scanTvLibrary(library.path);
+      collection = await this.scanTvLibrary(library.path);
+    } else if (library.type === "music") {
+      collection = await this.scanMusicLibrary(library.path);
+    } else if (library.type === "images") {
+      collection = await this.scanImageLibrary(library.path);
+    } else {
+      collection = await this.scanMovieLibrary(library.path);
     }
-    if (library.type === "music") {
-      return this.scanMusicLibrary(library.path);
-    }
-    if (library.type === "images") {
-      return this.scanImageLibrary(library.path);
-    }
-    return this.scanMovieLibrary(library.path);
+    return reconcileMediaIdentity(collection, previousCollection, library.type);
   }
 
   async scanTvLibrary(libraryPath) {
@@ -429,12 +461,32 @@ class MediaIndex {
     const episodesById = {};
     const videoFiles = await this.findVideoFiles(libraryPath);
     const filesPerDir = countFilesPerDirectory(videoFiles);
+    const fileOrderPerDir = orderFilesPerDirectory(videoFiles);
 
     for (const filePath of videoFiles) {
-      const parsed = parseEpisodeFile(filePath);
+      let parsed = parseEpisodeFile(filePath);
       const id = createId(filePath);
       const fileStats = await this.fileStats(filePath);
+      const parentDirectory = path.basename(path.dirname(filePath));
+      const inferredShowName = nearestShowDirectory(libraryPath, filePath);
+      if ((!Number.isFinite(parsed.season) || !Number.isFinite(parsed.episode))
+        && isSpecialsName(parentDirectory)
+        && inferredShowName) {
+        parsed = {
+          ...parsed,
+          season: 0,
+          episode: fileOrderPerDir.get(filePath) || 1,
+          showName: inferredShowName,
+          matchType: "specialFolder"
+        };
+      }
       if (!Number.isFinite(parsed.season) || !Number.isFinite(parsed.episode)) {
+        const movie = await this.movieItem(libraryPath, filePath, filesPerDir.get(path.dirname(filePath)) || 0, fileStats);
+        items.push(movie);
+        byId[movie.id] = movie;
+        continue;
+      }
+      if (parsed.matchType === "specialFeature" && !inferredShowName) {
         const movie = await this.movieItem(libraryPath, filePath, filesPerDir.get(path.dirname(filePath)) || 0, fileStats);
         items.push(movie);
         byId[movie.id] = movie;
@@ -443,7 +495,9 @@ class MediaIndex {
 
       const showName = showNameForEpisode(libraryPath, filePath, parsed);
       const showId = createId(showName);
-      const seasonNumber = parsed.season || this.parseSeasonFolder(path.basename(path.dirname(filePath)));
+      const seasonNumber = Number.isFinite(parsed.season)
+        ? parsed.season
+        : this.parseSeasonFolder(parentDirectory);
       const episode = {
         id,
         showId,
@@ -454,7 +508,8 @@ class MediaIndex {
         filename: path.basename(filePath),
         filePath,
         addedAtMs: fileStats.addedAtMs,
-        mtimeMs: fileStats.mtimeMs
+        mtimeMs: fileStats.mtimeMs,
+        sizeBytes: fileStats.sizeBytes
       };
       episodesById[id] = episode;
       addEpisodeToShow(showsByKey, libraryPath, filePath, episode);
@@ -516,7 +571,8 @@ class MediaIndex {
         filename: path.basename(filePath),
         filePath,
         addedAtMs: stats.addedAtMs,
-        mtimeMs: stats.mtimeMs
+        mtimeMs: stats.mtimeMs,
+        sizeBytes: stats.sizeBytes
       };
       tracksById[track.id] = track;
 
@@ -559,7 +615,8 @@ class MediaIndex {
         relativePath,
         filePath,
         addedAtMs: stats.addedAtMs,
-        mtimeMs: stats.mtimeMs
+        mtimeMs: stats.mtimeMs,
+        sizeBytes: stats.sizeBytes
       };
       items.push(image);
       byId[image.id] = image;
@@ -613,12 +670,16 @@ class MediaIndex {
 
     return {
       addedAtMs,
-      mtimeMs: stat.mtimeMs || addedAtMs
+      mtimeMs: stat.mtimeMs || addedAtMs,
+      sizeBytes: stat.size
     };
   }
 
   parseSeasonFolder(folderName) {
-    const match = folderName.match(/season\s+(\d+)/i);
+    if (isSpecialsName(folderName)) {
+      return 0;
+    }
+    const match = folderName.match(/(?:season|series)\s+(\d+)/i);
     return match ? Number.parseInt(match[1], 10) : 0;
   }
 
@@ -637,12 +698,17 @@ function movieItemFromParsed(filePath, libraryPath, parsed, fileStats) {
     folder: movieFolderName(libraryPath, filePath),
     filePath,
     addedAtMs: fileStats.addedAtMs,
-    mtimeMs: fileStats.mtimeMs
+    mtimeMs: fileStats.mtimeMs,
+    sizeBytes: fileStats.sizeBytes
   };
 }
 
 function showNameForEpisode(libraryPath, filePath, parsed) {
-  if (parsed.matchType === "animeNumber") {
+  const parentDirectory = path.basename(path.dirname(filePath));
+  if (parsed.matchType === "animeNumber"
+    || parsed.matchType === "specialFeature"
+    || parsed.matchType === "specialFolder"
+    || isSeasonFolder(parentDirectory)) {
     const directoryName = nearestShowDirectory(libraryPath, filePath);
     if (directoryName) {
       return directoryName;
@@ -698,11 +764,15 @@ function showPathForEpisode(libraryPath, filePath) {
 
 function seasonNameForEpisode(filePath, season) {
   const parent = path.basename(path.dirname(filePath));
-  return isSeasonFolder(parent) ? parent : `Season ${season || 0}`;
+  if (season === 0) {
+    return isSpecialsName(parent) ? parent : "Specials";
+  }
+  return isSeasonFolder(parent) ? parent : `Season ${season}`;
 }
 
 function isSeasonFolder(value) {
-  return /^(season|series)\s*\d+$/i.test(String(value || ""))
+  return isSpecialsName(value)
+    || /^(season|series)\s*\d+$/i.test(String(value || ""))
     || /^\d+(?:st|nd|rd|th)?\s+(?:season|series|gig)$/i.test(String(value || ""));
 }
 
@@ -736,6 +806,24 @@ function countFilesPerDirectory(filePaths) {
   }
 
   return counts;
+}
+
+function orderFilesPerDirectory(filePaths) {
+  const byDirectory = new Map();
+  for (const filePath of filePaths) {
+    const directory = path.dirname(filePath);
+    const files = byDirectory.get(directory) || [];
+    files.push(filePath);
+    byDirectory.set(directory, files);
+  }
+
+  const order = new Map();
+  for (const files of byDirectory.values()) {
+    files
+      .sort((a, b) => path.basename(a).localeCompare(path.basename(b), undefined, { numeric: true }))
+      .forEach((filePath, index) => order.set(filePath, index + 1));
+  }
+  return order;
 }
 
 function mergeDuplicateSeasons(seasons) {
@@ -774,7 +862,113 @@ function preferredSeasonName(current, next) {
 }
 
 function isSpecialsName(value) {
-  return /specials?/i.test(String(value || ""));
+  return /^specials?$/i.test(String(value || "").trim());
+}
+
+function reconcileMediaIdentity(collection, previousCollection, type) {
+  if (!previousCollection) {
+    return collection;
+  }
+
+  const currentItems = collectionMediaItems(collection, type);
+  const previousItems = collectionMediaItems(previousCollection, type);
+  if (currentItems.length === 0 || previousItems.length === 0) {
+    return collection;
+  }
+
+  const currentPaths = new Set(currentItems.map((item) => normalizedFilePath(item.filePath)));
+  const previousPaths = new Set(previousItems.map((item) => normalizedFilePath(item.filePath)));
+  const addedItems = currentItems.filter((item) => !previousPaths.has(normalizedFilePath(item.filePath)));
+  const removedItems = previousItems.filter((item) => !currentPaths.has(normalizedFilePath(item.filePath)));
+  const addedByFingerprint = groupByFingerprint(addedItems);
+  const removedByFingerprint = groupByFingerprint(removedItems);
+
+  for (const [fingerprint, additions] of addedByFingerprint) {
+    const removals = removedByFingerprint.get(fingerprint) || [];
+    if (additions.length !== 1 || removals.length !== 1) {
+      continue;
+    }
+
+    const item = additions[0];
+    const previous = removals[0];
+    item.id = previous.id;
+    if (Number.isFinite(Number(previous.addedAtMs))) {
+      item.addedAtMs = Number(previous.addedAtMs);
+    }
+    logger.full(`[index] file rename retained id=${item.id} from="${previous.filePath}" to="${item.filePath}"`);
+  }
+
+  rebuildCollectionLookups(collection, type);
+  return collection;
+}
+
+function collectionMediaItems(collection, type) {
+  if (Array.isArray(collection.identityItems)) {
+    return collection.identityItems;
+  }
+  if (type === "tv") {
+    return [
+      ...Object.values(collection.episodesById || {}),
+      ...(collection.items || [])
+    ];
+  }
+  if (type === "music") {
+    return Object.values(collection.tracksById || {});
+  }
+  return collection.items || [];
+}
+
+function groupByFingerprint(items) {
+  const grouped = new Map();
+  for (const item of items) {
+    const fingerprint = mediaFingerprint(item);
+    if (!fingerprint) {
+      continue;
+    }
+    const matches = grouped.get(fingerprint) || [];
+    matches.push(item);
+    grouped.set(fingerprint, matches);
+  }
+  return grouped;
+}
+
+function mediaFingerprint(item) {
+  const sizeBytes = Number(item && item.sizeBytes);
+  const mtimeMs = Number(item && item.mtimeMs);
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || !Number.isFinite(mtimeMs) || mtimeMs <= 0) {
+    return null;
+  }
+  return `${Math.round(sizeBytes)}:${Math.round(mtimeMs)}`;
+}
+
+function hasFileStats(item) {
+  return Number.isFinite(Number(item && item.addedAtMs))
+    && Number.isFinite(Number(item && item.mtimeMs))
+    && Number.isFinite(Number(item && item.sizeBytes));
+}
+
+function normalizedFilePath(filePath) {
+  const normalized = path.normalize(String(filePath || ""));
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function rebuildCollectionLookups(collection, type) {
+  if (type === "tv") {
+    const episodes = (collection.shows || [])
+      .flatMap((show) => show.seasons || [])
+      .flatMap((season) => season.episodes || []);
+    collection.episodesById = Object.fromEntries(episodes.map((episode) => [episode.id, episode]));
+    collection.byId = Object.fromEntries((collection.items || []).map((item) => [item.id, item]));
+    return;
+  }
+  if (type === "music") {
+    const tracks = (collection.artists || [])
+      .flatMap((artist) => artist.albums || [])
+      .flatMap((album) => album.tracks || []);
+    collection.tracksById = Object.fromEntries(tracks.map((track) => [track.id, track]));
+    return;
+  }
+  collection.byId = Object.fromEntries((collection.items || []).map((item) => [item.id, item]));
 }
 
 function emptyCollection(type) {
