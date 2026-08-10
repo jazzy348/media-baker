@@ -3,8 +3,8 @@ const path = require("path");
 const { createId } = require("../utils/mediaParsers");
 
 class ImageService {
-  constructor(config, ffmpeg, cachedImages) {
-    this.ffmpeg = ffmpeg;
+  constructor(config, imageProcessor, cachedImages) {
+    this.imageProcessor = imageProcessor;
     this.cachedImages = cachedImages;
     this.cacheDir = path.join(config.metadata.cachePath, "images");
     this.dimensions = new Map();
@@ -66,7 +66,7 @@ class ImageService {
       this.inFlight.set(outputPath, (async () => {
         await fs.mkdir(outputDir, { recursive: true });
         try {
-          await this.ffmpeg.createImageCollage(sources.map((item) => item.filePath), outputPath);
+          await this.imageProcessor.createImageCollage(sources.map((item) => item.filePath), outputPath);
         } catch (err) {
           await fs.rm(outputPath, { force: true });
           throw err;
@@ -81,19 +81,14 @@ class ImageService {
     if (this.dimensions.has(sourceKey)) {
       return this.dimensions.get(sourceKey);
     }
-    const probe = await this.ffmpeg.probe(filePath);
-    const stream = (probe.streams || []).find((entry) => entry.codec_type === "video");
-    const dimensions = {
-      width: Number.parseInt(stream && stream.width, 10) || Number.MAX_SAFE_INTEGER,
-      height: Number.parseInt(stream && stream.height, 10) || Number.MAX_SAFE_INTEGER
-    };
+    const dimensions = await this.imageProcessor.metadata(filePath);
     this.dimensions.set(sourceKey, dimensions);
     return dimensions;
   }
 
   async createDerivative(inputPath, outputPath, limit) {
     try {
-      await this.cachedImages.cacheFile(inputPath, path.dirname(outputPath), path.basename(outputPath));
+      await this.cachedImages.cacheFile(inputPath, path.dirname(outputPath), path.basename(outputPath), limit);
     } catch (err) {
       await fs.rm(outputPath, { force: true });
       throw err;

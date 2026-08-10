@@ -5,6 +5,10 @@ const { SUBTITLE_EXTENSIONS, isAudioFile, normalizeAudioPreference } = require("
 const { normalizeQualityPreference, qualityProfileForProbe } = require("./qualityProfiles");
 const logger = require("../utils/logger");
 
+const SEEK_AHEAD_THRESHOLD_SECONDS = 30;
+const SEEK_PRE_ROLL_SECONDS = 24;
+const SEEK_REASSERT_INTERVAL_MS = 1500;
+
 class HlsService {
   constructor(config, ffmpeg, progress = null) {
     this.config = config;
@@ -56,7 +60,8 @@ class HlsService {
     logger.info(`[hls] cache miss cacheKey=${cacheKey}; starting ffmpeg setup`);
     const setup = this.startHls(mediaFile, normalizedOptions, cacheDir, playlistPath, cacheKey, {
       resumeFromSegment: effectiveResumeState.resumeFromSegment,
-      resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(existingManifest && existingManifest.segmentSeconds || this.config.hls.segmentSeconds)
+      resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(existingManifest && existingManifest.segmentSeconds || this.config.hls.segmentSeconds),
+      preserveCache: Boolean(existingManifest)
     })
       .finally(() => this.activeSetups.delete(cacheKey));
     this.activeSetups.set(cacheKey, setup);
@@ -112,11 +117,12 @@ class HlsService {
     }
 
     if (manifest && !await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
-      await this.ensureActiveForCache(cacheKey, manifest);
+      await this.ensureActiveForSegment(cacheKey, manifest, segmentIndex);
     } else {
       this.touchTranscode(cacheKey);
     }
 
+    let lastActivationAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       this.touchTranscode(cacheKey);
       if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
@@ -125,6 +131,11 @@ class HlsService {
           status: "ready",
           filePath
         };
+      }
+
+      if (manifest && Date.now() - lastActivationAt >= SEEK_REASSERT_INTERVAL_MS) {
+        await this.ensureActiveForSegment(cacheKey, manifest, segmentIndex);
+        lastActivationAt = Date.now();
       }
 
       if (!await fileExists(manifestPath)) {
@@ -211,7 +222,7 @@ class HlsService {
     return crypto
       .createHash("sha1")
       .update(JSON.stringify({
-        hlsFormatVersion: "synthetic-vod-h264-compat-v17-resume-timestamps",
+        hlsFormatVersion: "synthetic-vod-h264-compat-v18-seek-reposition",
         filePath,
         size: stat.size,
         mtimeMs: stat.mtimeMs,
@@ -231,8 +242,10 @@ class HlsService {
         return false;
       }
 
-      const playlist = await fs.readFile(playlistPath, "utf8");
-      return isCompletePlaylist(playlist);
+      const manifest = await this.readManifestIfPresent(cacheKey);
+      if (!manifest) return false;
+      const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+      return (await this.resumeState(cacheDir, manifest)).complete;
     } catch (err) {
       if (err.code === "ENOENT") {
         return false;
@@ -279,11 +292,90 @@ class HlsService {
       cacheKey,
       {
         resumeFromSegment: effectiveResumeState.resumeFromSegment,
-        resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(currentManifest.segmentSeconds || this.config.hls.segmentSeconds)
+        resumeFromSeconds: effectiveResumeState.resumeFromSegment * Number(currentManifest.segmentSeconds || this.config.hls.segmentSeconds),
+        preserveCache: true
       }
     ).finally(() => this.activeSetups.delete(cacheKey));
     this.activeSetups.set(cacheKey, setup);
     await setup;
+    this.touchTranscode(cacheKey);
+    return true;
+  }
+
+  async ensureActiveForSegment(cacheKey, manifest, targetSegment) {
+    const segmentIndex = Math.max(0, Number.parseInt(targetSegment, 10) || 0);
+    const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+    const filename = `segment_${String(segmentIndex).padStart(5, "0")}.ts`;
+    if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
+      this.touchTranscode(cacheKey);
+      return true;
+    }
+
+    if (this.activeSetups.has(cacheKey)) {
+      logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey} requestedSegment=${segmentIndex}`);
+      await this.activeSetups.get(cacheKey);
+      if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) return true;
+    }
+
+    const active = this.activeTranscodes.get(cacheKey);
+    if (active) {
+      const prioritySegment = Number.isInteger(active.prioritySegment) ? active.prioritySegment : null;
+      const priorityPending = prioritySegment !== null
+        && !await isPublishedSegment(cacheKey, `segment_${String(prioritySegment).padStart(5, "0")}.ts`, this.config.hls.cachePath);
+      if (priorityPending) {
+        logger.full(`[hls] joining active priority seek cacheKey=${cacheKey} requestedSegment=${segmentIndex} prioritySegment=${prioritySegment}`);
+        this.touchTranscode(cacheKey);
+        return true;
+      }
+
+      const bounds = await publishedSegmentBounds(cacheDir);
+      if (!shouldRepositionTranscode(active, bounds, segmentIndex, manifest.segmentSeconds)) {
+        active.prioritySegment = segmentIndex;
+        this.touchTranscode(cacheKey);
+        return true;
+      }
+    }
+
+    return this.restartTranscodeForSeek(cacheKey, manifest, segmentIndex);
+  }
+
+  async restartTranscodeForSeek(cacheKey, manifest, targetSegment) {
+    if (this.activeSetups.has(cacheKey)) {
+      await this.activeSetups.get(cacheKey);
+      return true;
+    }
+
+    const segmentSeconds = Number(manifest.segmentSeconds || this.config.hls.segmentSeconds) || 6;
+    const preRollSegments = Math.max(1, Math.ceil(SEEK_PRE_ROLL_SECONDS / segmentSeconds));
+    const startSegment = Math.max(0, targetSegment - preRollSegments);
+    const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+    const playlistPath = path.join(cacheDir, "master.m3u8");
+    const setup = (async () => {
+      const active = this.activeTranscodes.get(cacheKey);
+      if (active) await this.stopTranscodeForSeek(cacheKey, active, targetSegment);
+      const targetFilename = `segment_${String(targetSegment).padStart(5, "0")}.ts`;
+      if (await isPublishedSegment(cacheKey, targetFilename, this.config.hls.cachePath)) return;
+      await removeTemporarySegments(cacheDir);
+      logger.info(`[hls] repositioning transcode cacheKey=${cacheKey} input="${manifest.inputPath}" requestedSegment=${targetSegment} startSegment=${startSegment} requestedSeconds=${formatFfmpegSeconds(targetSegment * segmentSeconds)} startSeconds=${formatFfmpegSeconds(startSegment * segmentSeconds)}`);
+      await this.startHls(
+        { filePath: manifest.inputPath },
+        manifest.options,
+        cacheDir,
+        playlistPath,
+        cacheKey,
+        {
+          resumeFromSegment: startSegment,
+          resumeFromSeconds: startSegment * segmentSeconds,
+          requestedSegment: targetSegment,
+          preserveCache: true
+        }
+      );
+    })();
+    const trackedSetup = setup.finally(() => {
+      if (this.activeSetups.get(cacheKey) === trackedSetup) this.activeSetups.delete(cacheKey);
+    });
+    this.activeSetups.set(cacheKey, trackedSetup);
+    await trackedSetup;
     this.touchTranscode(cacheKey);
     return true;
   }
@@ -368,6 +460,7 @@ class HlsService {
     }
 
     active.stoppedForIdle = true;
+    active.stopReason = "idle";
     logger.info(`[hls] stopping idle transcode cacheKey=${cacheKey} input="${active.inputPath}" idleSeconds=${Math.round((Date.now() - active.lastAccessAt) / 1000)}`);
     try {
       active.child.kill("SIGTERM");
@@ -387,6 +480,38 @@ class HlsService {
     return true;
   }
 
+  async stopTranscodeForSeek(cacheKey, active, targetSegment) {
+    if (!active || active.completed) return;
+    active.stoppedForSeek = true;
+    active.stopReason = "seek";
+    if (active.idleTimer) clearTimeout(active.idleTimer);
+    logger.info(`[hls] stopping transcode for seek cacheKey=${cacheKey} input="${active.inputPath}" currentStartSegment=${active.resumeFromSegment} requestedSegment=${targetSegment}`);
+    try {
+      active.child.kill("SIGTERM");
+    } catch (err) {
+      logger.full(`[hls] seek transcode stop ignored cacheKey=${cacheKey} message="${err.message}"`);
+    }
+
+    await Promise.race([
+      active.exitPromise.catch(() => {}),
+      delay(5000)
+    ]);
+    if (!active.completed) {
+      try {
+        active.child.kill("SIGKILL");
+      } catch (err) {
+        logger.full(`[hls] seek transcode force-stop ignored cacheKey=${cacheKey} message="${err.message}"`);
+      }
+      await Promise.race([
+        active.exitPromise.catch(() => {}),
+        delay(2000)
+      ]);
+    }
+    if (!active.completed) {
+      throw new Error(`Timed out stopping the active HLS transcode before seeking to segment ${targetSegment}`);
+    }
+  }
+
   transcodeIdleTimeoutMs() {
     const configuredSeconds = Number(this.config.hls.inactiveTranscodeTimeoutSeconds);
     if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
@@ -403,7 +528,7 @@ class HlsService {
     const resumeFromSeconds = Math.max(0, Number(resume.resumeFromSeconds) || 0);
     logger.info(`[hls] start input="${inputPath}" cacheDir="${cacheDir}" playlist="${playlistPath}" audio=${options.audio} audioChannels=${options.audioChannels} quality=${options.quality} resumeSegment=${resumeFromSegment}`);
     await this.cleanupExpired();
-    if (resumeFromSegment > 0) {
+    if (resumeFromSegment > 0 || resume.preserveCache) {
       await fs.mkdir(cacheDir, { recursive: true });
       await fs.rm(playlistPath, { force: true });
     } else {
@@ -459,11 +584,15 @@ class HlsService {
     logger.info(`[hls] transcode launched input="${inputPath}" playlist="${playlistPath}"`);
     const active = {
       child,
+      exitPromise,
       inputPath,
       cacheDir,
       resumeFromSegment,
+      prioritySegment: Number.isInteger(resume.requestedSegment) ? resume.requestedSegment : null,
       lastAccessAt: Date.now(),
       stoppedForIdle: false,
+      stoppedForSeek: false,
+      stopReason: null,
       completed: false,
       idleTimer: null
     };
@@ -480,12 +609,16 @@ class HlsService {
     exitPromise
       .then(() => {
         cleanupActiveTranscode();
-        logger.info(`[hls] transcode complete cacheKey=${cacheKey} input="${inputPath}"`);
+        if (active.stopReason) {
+          logger.info(`[hls] transcode stopped reason=${active.stopReason} cacheKey=${cacheKey} input="${inputPath}"`);
+          return;
+        }
+        logger.info(`[hls] transcode process reached input end cacheKey=${cacheKey} input="${inputPath}"`);
       })
       .catch(async (err) => {
         cleanupActiveTranscode();
-        if (active.stoppedForIdle) {
-          logger.info(`[hls] transcode paused after idle cacheKey=${cacheKey} input="${inputPath}"`);
+        if (active.stopReason) {
+          logger.info(`[hls] transcode stopped reason=${active.stopReason} cacheKey=${cacheKey} input="${inputPath}"`);
           return;
         }
 
@@ -600,11 +733,16 @@ class HlsService {
       audioCodec
     );
 
+    const subtitleSeekSeconds = subtitle && subtitle.videoFilter && resume.resumeFromSeconds > 0
+      ? Number(resume.resumeFromSeconds)
+      : 0;
     const videoFilter = bitmapSubtitleFilter ? null : composeFilters([
       useHardwareFrames && (scaleFilter || subtitle && subtitle.videoFilter) ? hardwareDownloadFilter : null,
       scaleFilter,
       useHardwareFrames && (scaleFilter || subtitle && subtitle.videoFilter) ? "format=yuv420p" : null,
+      subtitleSeekSeconds > 0 ? `setpts=PTS+${formatFfmpegSeconds(subtitleSeekSeconds)}/TB` : null,
       subtitle && subtitle.videoFilter,
+      subtitleSeekSeconds > 0 ? `setpts=PTS-${formatFfmpegSeconds(subtitleSeekSeconds)}/TB` : null,
       hardwareUploadFilter
     ]);
     if (videoFilter) {
@@ -1475,6 +1613,42 @@ function formatFfmpegSeconds(seconds) {
   }
 
   return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function shouldRepositionTranscode(active, bounds, targetSegment, segmentSeconds) {
+  if (!active || active.completed || active.stopReason) return true;
+  if (targetSegment < active.resumeFromSegment) return true;
+  if (bounds.maximum !== null && targetSegment <= bounds.maximum) return true;
+  const frontier = bounds.maximum === null ? active.resumeFromSegment : bounds.maximum;
+  const allowance = Math.max(3, Math.ceil(SEEK_AHEAD_THRESHOLD_SECONDS / (Number(segmentSeconds) || 6)));
+  return targetSegment > frontier + allowance;
+}
+
+async function publishedSegmentBounds(cacheDir) {
+  let entries;
+  try {
+    entries = await fs.readdir(cacheDir);
+  } catch (err) {
+    if (err.code === "ENOENT") return { minimum: null, maximum: null };
+    throw err;
+  }
+  const indexes = entries.map(segmentFilenameIndex).filter((index) => index !== null);
+  return indexes.length === 0
+    ? { minimum: null, maximum: null }
+    : { minimum: Math.min(...indexes), maximum: Math.max(...indexes) };
+}
+
+async function removeTemporarySegments(cacheDir) {
+  let entries;
+  try {
+    entries = await fs.readdir(cacheDir);
+  } catch (err) {
+    if (err.code === "ENOENT") return;
+    throw err;
+  }
+  await Promise.all(entries
+    .filter((filename) => filename.endsWith(".tmp"))
+    .map((filename) => fs.rm(path.join(cacheDir, filename), { force: true })));
 }
 
 function canResumePartialTranscode(options) {

@@ -3,6 +3,7 @@ const path = require("path");
 const { createId } = require("../utils/mediaParsers");
 const { MusicBrainzMetadataProvider } = require("./musicBrainzMetadataProvider");
 const { CachedImageService } = require("./cachedImageService");
+const { StaticImageService } = require("./staticImageService");
 const { CustomMetadataClient, assetIdFromPath } = require("./customMetadataClient");
 const logger = require("../utils/logger");
 
@@ -15,7 +16,7 @@ class MetadataService {
     this.config = config.metadata;
     this.store = store;
     this.ffmpeg = ffmpeg;
-    this.cachedImages = cachedImages || new CachedImageService(config, ffmpeg);
+    this.cachedImages = cachedImages || new CachedImageService(config, new StaticImageService(ffmpeg));
     this.customMetadata = new CustomMetadataClient(config);
     this.posterDir = path.join(this.config.cachePath, "posters");
     this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages, this.customMetadata);
@@ -754,6 +755,61 @@ class MetadataService {
       });
     this.thumbnailInFlight.set(key, task);
     return task;
+  }
+
+  async ensureShowPosterForShow(mediaType, show) {
+    if (!show || !show.id) {
+      return { available: false, source: "placeholder", reason: "Parent show is unavailable." };
+    }
+
+    const episodes = (show.seasons || []).flatMap((season) => season.episodes || []);
+    const refs = uniqueText([show.id, ...episodes.map((episode) => episode && episode.id)])
+      .map((id) => ({ mediaType, id }));
+    let records = await this.store.getMany(refs);
+    let selection = selectParentShowPosterRecord(records, show.id);
+
+    if (!selection.record && episodes.length > 0 && metadataUnavailableReason(this.config) === null) {
+      await this.getForMedia(mediaType, episodes[0]);
+      records = await this.store.getMany(refs);
+      selection = selectParentShowPosterRecord(records, show.id);
+    }
+
+    if (!selection.record) {
+      return {
+        available: false,
+        source: "placeholder",
+        reason: "Matched parent-show metadata is unavailable.",
+        provider: null,
+        providerId: null
+      };
+    }
+
+    const resolved = selection.record.posterFilename
+      ? selection.record
+      : await this.ensurePosterForRecord(selection.record);
+    const filePath = resolved.posterFilename
+      ? await this.ensurePosterFile(resolved.posterFilename)
+      : null;
+    if (!filePath) {
+      return {
+        available: false,
+        source: "placeholder",
+        reason: resolved.posterUnavailableReason || "Show poster is unavailable.",
+        provider: resolved.provider || null,
+        providerId: resolved.providerId || null,
+        recordMediaId: resolved.mediaId || null
+      };
+    }
+
+    return {
+      available: true,
+      filePath,
+      filename: resolved.posterFilename,
+      source: resolved.mediaId === show.id ? "show-metadata" : "parent-show-metadata",
+      provider: resolved.provider || null,
+      providerId: resolved.providerId || null,
+      recordMediaId: resolved.mediaId || null
+    };
   }
 
   async ensureSeasonPosterForMedia(mediaType, mediaFile, showEpisodes = []) {
@@ -1877,6 +1933,47 @@ function parseSourceJson(value) {
   } catch (err) {
     return null;
   }
+}
+
+function selectParentShowPosterRecord(records, showId) {
+  const found = (records || []).filter((record) => record && record.found);
+  const direct = found.find((record) => record.mediaId === showId) || null;
+  const canonical = direct || mostCommonParentShowRecord(found);
+  if (!canonical) return { record: null };
+
+  const matching = found.filter((record) => sameParentMetadata(record, canonical));
+  const record = [direct, canonical, ...matching]
+    .filter(Boolean)
+    .find((candidate) => candidate.posterFilename)
+    || canonical;
+  return { record };
+}
+
+function mostCommonParentShowRecord(records) {
+  const groups = new Map();
+  for (const record of records) {
+    const key = parentMetadataKey(record);
+    if (!key) continue;
+    const group = groups.get(key) || [];
+    group.push(record);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .sort((first, second) => second.length - first.length)[0]?.[0]
+    || records[0]
+    || null;
+}
+
+function sameParentMetadata(first, second) {
+  const firstKey = parentMetadataKey(first);
+  const secondKey = parentMetadataKey(second);
+  return firstKey && secondKey ? firstKey === secondKey : first.mediaId === second.mediaId;
+}
+
+function parentMetadataKey(record) {
+  const provider = String(record && record.provider || "").trim().toLowerCase();
+  const providerId = String(record && record.providerId || "").trim();
+  return provider && providerId ? `${provider}:${providerId}` : null;
 }
 
 function uniqueText(values) {

@@ -9,6 +9,7 @@ const { FFmpegService } = require("./services/ffmpegService");
 const { HlsService } = require("./services/hlsService");
 const { ImageService } = require("./services/imageService");
 const { CachedImageService } = require("./services/cachedImageService");
+const { StaticImageService } = require("./services/staticImageService");
 const { FallbackStreamService } = require("./services/fallbackStreamService");
 const { safeRequestUrl } = require("./utils/safeRequestUrl");
 const { MetadataStore } = require("./services/metadataStore");
@@ -33,6 +34,9 @@ const { SkipMarkerStore } = require("./services/skipMarkerStore");
 const { SkipDetectionService } = require("./services/skipDetectionService");
 const { OpenMovieIdStore } = require("./services/openMovieIdStore");
 const { OpenMovieService } = require("./services/openMovieService");
+const { OpenMoviePosterAtlasStore } = require("./services/openMoviePosterAtlasStore");
+const { OpenMoviePosterAtlasService } = require("./services/openMoviePosterAtlasService");
+const { OpenMovieArtworkService } = require("./services/openMovieArtworkService");
 const { createApiKeyAuthMiddleware, createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
@@ -89,11 +93,12 @@ async function createApp() {
 
   const ffmpeg = new FFmpegService(config.ffmpeg);
   await ffmpeg.validate();
-  const cachedImages = new CachedImageService(config, ffmpeg);
+  const imageProcessor = new StaticImageService(ffmpeg);
+  const cachedImages = new CachedImageService(config, imageProcessor);
   const progressStore = new PlaybackProgressStore(config);
   const progress = new PlaybackProgressService(config, progressStore);
   const hls = new HlsService(config, ffmpeg, progress);
-  const images = new ImageService(config, ffmpeg, cachedImages);
+  const images = new ImageService(config, imageProcessor, cachedImages);
   const fallbackStream = new FallbackStreamService(config, ffmpeg);
   try {
     await fallbackStream.prepare();
@@ -102,11 +107,20 @@ async function createApp() {
   }
   const metadataStore = new MetadataStore(config);
   const metadata = new MetadataService(config, metadataStore, ffmpeg, cachedImages);
+  const subtitles = new SubtitleService(config);
   const openMovieIdStore = new OpenMovieIdStore(config);
-  const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata);
+  const openMovieArtwork = new OpenMovieArtworkService(mediaIndex, metadata);
+  const openMoviePosterAtlasStore = new OpenMoviePosterAtlasStore(config);
+  const openMoviePosterAtlases = new OpenMoviePosterAtlasService(
+    openMoviePosterAtlasStore,
+    imageProcessor,
+    openMovieArtwork,
+    openMovieIdStore
+  );
+  await openMoviePosterAtlases.init();
+  const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata, ffmpeg, subtitles, openMoviePosterAtlases);
   mediaIndex.addUpdateListener((libraryKey) => openMovie.sync(libraryKey));
   await openMovie.init();
-  const subtitles = new SubtitleService(config);
   const skipMarkerStore = new SkipMarkerStore(config);
   const skipDetection = new SkipDetectionService(config, mediaIndex, ffmpeg, skipMarkerStore);
   const indexScanScheduler = new IndexScanScheduler(config, mediaIndex, metadata, skipDetection);
@@ -130,11 +144,15 @@ async function createApp() {
     ffmpeg,
     hls,
     images,
+    imageProcessor,
     cachedImages,
     fallbackStream,
     metadataStore,
     metadata,
     openMovieIdStore,
+    openMovieArtwork,
+    openMoviePosterAtlasStore,
+    openMoviePosterAtlases,
     openMovie,
     progressStore,
     progress,

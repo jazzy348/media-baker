@@ -377,6 +377,32 @@ class FFmpegService {
     await this.exec(this.ffmpegPath, args);
   }
 
+  async resizeImageBuffer(filePath, dimensions) {
+    const width = positiveImageDimension(dimensions && dimensions.width);
+    const height = positiveImageDimension(dimensions && dimensions.height);
+    if (!width && !height) {
+      throw new Error("A width or height is required to resize an image");
+    }
+    const widthExpression = width ? `min(${width},iw)` : "iw";
+    const heightExpression = height ? `min(${height},ih)` : "ih";
+    const args = [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-i", filePath,
+      "-map", "0:v:0",
+      "-frames:v", "1",
+      "-vf", `scale='${widthExpression}':'${heightExpression}':force_original_aspect_ratio=decrease`,
+      "-c:v", "libwebp",
+      "-quality", "82",
+      "-compression_level", "4",
+      "-f", "webp",
+      "pipe:1"
+    ];
+    logger.full(`[ffmpeg] image memory resize input="${filePath}" width=${width || "original"} height=${height || "original"}`);
+    const child = this.spawnWithOutput(args);
+    return collectProcessBuffer(child, 32 * 1024 * 1024);
+  }
+
   async createImageCollage(inputPaths, outputPath) {
     const sources = inputPaths.slice(0, 4);
     if (sources.length === 0) {
@@ -864,6 +890,50 @@ function imageEncodingArgs(outputPath, quality) {
     return ["-c:v", "libwebp", "-quality", String(quality), "-compression_level", "4"];
   }
   return ["-q:v", "3"];
+}
+
+function positiveImageDimension(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function collectProcessBuffer(child, maximumBytes) {
+  return new Promise((resolve, reject) => {
+    const output = [];
+    const errors = [];
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    child.stdout.on("data", (chunk) => {
+      if (settled) return;
+      outputBytes += chunk.length;
+      if (outputBytes > maximumBytes) {
+        child.kill();
+        finish(reject, new Error("Resized image exceeded the in-memory output limit"));
+        return;
+      }
+      output.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => errors.push(chunk));
+    child.on("error", (err) => finish(reject, err));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const detail = Buffer.concat(errors).toString("utf8").trim();
+        finish(reject, new Error(detail || `FFmpeg image resize exited with code ${code}`));
+        return;
+      }
+      const image = Buffer.concat(output);
+      if (image.length === 0) {
+        finish(reject, new Error("FFmpeg produced no resized image data"));
+        return;
+      }
+      finish(resolve, image);
+    });
+  });
 }
 
 module.exports = { FFmpegService };

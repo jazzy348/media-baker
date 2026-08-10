@@ -5,8 +5,9 @@ const { resolveMediaFile } = require("../services/mediaResolver");
 const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { createId } = require("../utils/mediaParsers");
 const { establishWebStreamAuthCookie } = require("../middleware/auth");
+const logger = require("../utils/logger");
 
-module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, progress, subtitles, playbackTokens, skipDetection }) {
+module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, progress, subtitles, playbackTokens, skipDetection, openMovie }) {
   const router = express.Router();
 
   router.get("/home", async (req, res, next) => {
@@ -559,6 +560,17 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
 
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const option = await subtitles.download(req.params.mediaType, mediaFile, candidateId);
+      if (openMovie) {
+        try {
+          await openMovie.refreshVariants(req.params.mediaType, mediaFile.id);
+        } catch (err) {
+          logger.error(
+            `[openmovie] playback variant refresh failed after subtitle download `
+            + `mediaType=${req.params.mediaType} id=${mediaFile.id} message="${err.message}"`,
+            err
+          );
+        }
+      }
       res.json({
         ok: true,
         subtitle: option

@@ -7,9 +7,9 @@ const MAX_DIMENSION = 1024;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif", ".heic", ".heif", ".svg"]);
 
 class CachedImageService {
-  constructor(config, ffmpeg) {
+  constructor(config, imageProcessor) {
     this.config = config;
-    this.ffmpeg = ffmpeg;
+    this.imageProcessor = imageProcessor;
     this.inFlight = new Map();
     this.migrationPromise = null;
     this.markerPath = path.join(config.metadata.cachePath, "image-cache-webp-v2.json");
@@ -20,22 +20,22 @@ class CachedImageService {
     return `${path.parse(path.basename(filename)).name}.webp`;
   }
 
-  async cacheBuffer(buffer, directory, filename, sourceExtension = null) {
+  async cacheBuffer(buffer, directory, filename, sourceExtension = null, maxDimension = MAX_DIMENSION) {
     const outputFilename = this.filename(filename);
     const outputPath = path.join(directory, outputFilename);
     if (!this.inFlight.has(outputPath)) {
-      this.inFlight.set(outputPath, this.writeBuffer(buffer, directory, outputPath, sourceExtension || path.extname(filename))
+      this.inFlight.set(outputPath, this.writeBuffer(buffer, directory, outputPath, sourceExtension || path.extname(filename), maxDimension)
         .finally(() => this.inFlight.delete(outputPath)));
     }
     await this.inFlight.get(outputPath);
     return outputFilename;
   }
 
-  async cacheFile(sourcePath, directory, filename) {
+  async cacheFile(sourcePath, directory, filename, maxDimension = MAX_DIMENSION) {
     const outputFilename = this.filename(filename);
     const outputPath = path.join(directory, outputFilename);
     if (!this.inFlight.has(outputPath)) {
-      this.inFlight.set(outputPath, this.convert(sourcePath, outputPath)
+      this.inFlight.set(outputPath, this.convert(sourcePath, outputPath, maxDimension)
         .finally(() => this.inFlight.delete(outputPath)));
     }
     await this.inFlight.get(outputPath);
@@ -134,24 +134,25 @@ class CachedImageService {
     return { skipped: false, converted, reused, failures: failures.length };
   }
 
-  async writeBuffer(buffer, directory, outputPath, extension) {
+  async writeBuffer(buffer, directory, outputPath, extension, maxDimension) {
     await fs.mkdir(directory, { recursive: true });
     const inputPath = path.join(directory, `.image-${createId(`${outputPath}:${Date.now()}:${Math.random()}`)}${safeExtension(extension)}`);
     try {
       await fs.writeFile(inputPath, buffer);
-      await this.convert(inputPath, outputPath);
+      await this.convert(inputPath, outputPath, maxDimension);
     } finally {
       await fs.rm(inputPath, { force: true });
     }
   }
 
-  async convert(sourcePath, outputPath) {
+  async convert(sourcePath, outputPath, maxDimension = MAX_DIMENSION) {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     const samePath = path.resolve(sourcePath) === path.resolve(outputPath);
     const targetPath = samePath ? `${outputPath}.migrating.webp` : outputPath;
     const input = await conversionInput(sourcePath);
     try {
-      await this.ffmpeg.resizeImage(input.filePath, targetPath, MAX_DIMENSION);
+      const limit = Math.max(1, Math.min(Number.parseInt(maxDimension, 10) || MAX_DIMENSION, MAX_DIMENSION));
+      await this.imageProcessor.resizeImage(input.filePath, targetPath, limit);
       if (samePath) {
         await fs.rm(outputPath, { force: true });
         await fs.rename(targetPath, outputPath);

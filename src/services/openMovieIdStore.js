@@ -8,6 +8,8 @@ const TABLES = {
   movie: "openmovie_movie_ids",
   episode: "openmovie_episode_ids"
 };
+const VARIANT_TABLE = "openmovie_playback_variant_ids";
+const VARIANT_SOURCE_TABLE = "openmovie_playback_variant_sources";
 
 class OpenMovieIdStore {
   constructor(config) {
@@ -97,6 +99,158 @@ class OpenMovieIdStore {
     });
   }
 
+  async variantSourceSignatures() {
+    await this.init();
+    if (this.mysql) {
+      const [rows] = await this.pool.query(
+        `SELECT media_kind, library_key, media_id, source_signature FROM ${VARIANT_SOURCE_TABLE}`
+      );
+      return rows.map((row) => ({
+        kind: row.media_kind,
+        libraryKey: row.library_key,
+        mediaId: row.media_id,
+        sourceSignature: row.source_signature
+      }));
+    }
+
+    return this.readJsonRegistry((registry) => Object.entries(registry.variantSources).map(([key, sourceSignature]) => {
+      const [kind, libraryKey, ...mediaIdParts] = key.split(":");
+      return { kind, libraryKey, mediaId: mediaIdParts.join(":"), sourceSignature };
+    }));
+  }
+
+  async syncVariants(kind, libraryKey, mediaId, sourceSignature, variants) {
+    await this.init();
+    assertKind(kind);
+    const normalized = normalizeVariants(variants);
+    if (this.mysql) {
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        await connection.execute(
+          `UPDATE ${VARIANT_TABLE} SET active = 0 WHERE media_kind = ? AND library_key = ? AND media_id = ?`,
+          [kind, libraryKey, mediaId]
+        );
+        for (const variant of normalized) {
+          await connection.execute(
+            `INSERT INTO ${VARIANT_TABLE}
+              (media_kind, library_key, media_id, variant_key, audio_json, subtitle_json, is_default, active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE
+               audio_json = VALUES(audio_json),
+               subtitle_json = VALUES(subtitle_json),
+               is_default = VALUES(is_default),
+               active = 1`,
+            [
+              kind,
+              libraryKey,
+              mediaId,
+              variant.key,
+              JSON.stringify(variant.audio),
+              variant.subtitle ? JSON.stringify(variant.subtitle) : null,
+              variant.default ? 1 : 0
+            ]
+          );
+        }
+        await connection.execute(
+          `INSERT INTO ${VARIANT_SOURCE_TABLE} (media_kind, library_key, media_id, source_signature)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE source_signature = VALUES(source_signature), synced_at = CURRENT_TIMESTAMP`,
+          [kind, libraryKey, mediaId, sourceSignature]
+        );
+        await connection.commit();
+      } catch (err) {
+        await connection.rollback();
+        throw err;
+      } finally {
+        connection.release();
+      }
+      return;
+    }
+
+    await this.withJsonRegistry(async (registry) => {
+      const sourceKey = variantSourceKey(kind, libraryKey, mediaId);
+      for (const record of Object.values(registry.variants)) {
+        if (record.kind === kind && record.libraryKey === libraryKey && record.mediaId === mediaId) {
+          record.active = false;
+        }
+      }
+      for (const variant of normalized) {
+        const key = variantRecordKey(kind, libraryKey, mediaId, variant.key);
+        const previous = registry.variants[key];
+        registry.variants[key] = {
+          id: previous ? previous.id : registry.nextVariantId++,
+          kind,
+          libraryKey,
+          mediaId,
+          variantKey: variant.key,
+          audio: variant.audio,
+          subtitle: variant.subtitle,
+          default: variant.default,
+          active: true
+        };
+      }
+      registry.variantSources[sourceKey] = sourceSignature;
+      return true;
+    });
+  }
+
+  async variants(kind = null, libraryKeys = null) {
+    await this.init();
+    if (kind) assertKind(kind);
+    const allowedLibraries = normalizedLibraryKeys(libraryKeys);
+    if (this.mysql) {
+      const conditions = ["active = 1"];
+      const params = [];
+      if (kind) {
+        conditions.push("media_kind = ?");
+        params.push(kind);
+      }
+      if (allowedLibraries) {
+        if (allowedLibraries.length === 0) return [];
+        conditions.push(`library_key IN (${allowedLibraries.map(() => "?").join(", ")})`);
+        params.push(...allowedLibraries);
+      }
+      const [rows] = await this.pool.execute(
+        `SELECT id, media_kind, library_key, media_id, audio_json, subtitle_json, is_default
+         FROM ${VARIANT_TABLE}
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY id`,
+        params
+      );
+      return rows.map(variantFromRow);
+    }
+
+    return this.readJsonRegistry((registry) => Object.values(registry.variants)
+      .filter((record) => record.active
+        && (!kind || record.kind === kind)
+        && (!allowedLibraries || allowedLibraries.includes(record.libraryKey)))
+      .map(publicStoredVariant)
+      .sort((first, second) => first.id - second.id));
+  }
+
+  async resolveVariant(id) {
+    await this.init();
+    const numericId = positiveInteger(id);
+    if (!numericId) return null;
+    if (this.mysql) {
+      const [rows] = await this.pool.execute(
+        `SELECT id, media_kind, library_key, media_id, audio_json, subtitle_json, is_default
+         FROM ${VARIANT_TABLE}
+         WHERE id = ? AND active = 1
+         LIMIT 1`,
+        [numericId]
+      );
+      return rows[0] ? variantFromRow(rows[0]) : null;
+    }
+
+    return this.readJsonRegistry((registry) => {
+      const record = Object.values(registry.variants)
+        .find((entry) => entry.active && Number(entry.id) === numericId);
+      return record ? publicStoredVariant(record) : null;
+    });
+  }
+
   async initMysql() {
     this.pool = mysql.createPool({
       host: this.config.mysql.host,
@@ -120,6 +274,33 @@ class OpenMovieIdStore {
         )
       `);
     }
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS ${VARIANT_TABLE} (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        media_kind VARCHAR(16) NOT NULL,
+        library_key VARCHAR(191) NOT NULL,
+        media_id VARCHAR(64) NOT NULL,
+        variant_key VARCHAR(191) NOT NULL,
+        audio_json TEXT NOT NULL,
+        subtitle_json TEXT NULL,
+        is_default TINYINT(1) NOT NULL DEFAULT 0,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_openmovie_variant (media_kind, library_key, media_id, variant_key),
+        INDEX idx_openmovie_variant_media (media_kind, library_key, media_id, active)
+      )
+    `);
+    await this.pool.execute(`
+      CREATE TABLE IF NOT EXISTS ${VARIANT_SOURCE_TABLE} (
+        media_kind VARCHAR(16) NOT NULL,
+        library_key VARCHAR(191) NOT NULL,
+        media_id VARCHAR(64) NOT NULL,
+        source_signature VARCHAR(191) NOT NULL,
+        synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (media_kind, library_key, media_id)
+      )
+    `);
     this.initialized = true;
   }
 
@@ -127,6 +308,7 @@ class OpenMovieIdStore {
     await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
     try {
       this.registry = parseRegistry(await fs.readFile(this.jsonPath, "utf8"));
+      normalizeVariantRegistry(this.registry);
       validateRegistry(this.registry);
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
@@ -202,6 +384,11 @@ function uniqueRefs(refs) {
   ));
 }
 
+function normalizedLibraryKeys(libraryKeys) {
+  if (libraryKeys === null || libraryKeys === undefined) return null;
+  return [...new Set((libraryKeys || []).map((key) => String(key || "").trim()).filter(Boolean))];
+}
+
 function refKey(ref) {
   return `${ref.libraryKey}:${ref.mediaId}`;
 }
@@ -224,8 +411,11 @@ function emptyRegistry() {
     version: REGISTRY_VERSION,
     nextMovieId: 1,
     nextEpisodeId: 1,
+    nextVariantId: 1,
     movies: {},
-    episodes: {}
+    episodes: {},
+    variants: {},
+    variantSources: {}
   };
 }
 
@@ -237,9 +427,76 @@ function validateRegistry(registry) {
   if (!registry || registry.version !== REGISTRY_VERSION
     || !positiveInteger(registry.nextMovieId)
     || !positiveInteger(registry.nextEpisodeId)
+    || !positiveInteger(registry.nextVariantId)
     || !registry.movies || typeof registry.movies !== "object"
-    || !registry.episodes || typeof registry.episodes !== "object") {
+    || !registry.episodes || typeof registry.episodes !== "object"
+    || !registry.variants || typeof registry.variants !== "object"
+    || !registry.variantSources || typeof registry.variantSources !== "object") {
     throw new Error("Invalid OpenMovie ID registry");
+  }
+}
+
+function normalizeVariantRegistry(registry) {
+  if (!registry.variants || typeof registry.variants !== "object") registry.variants = {};
+  if (!registry.variantSources || typeof registry.variantSources !== "object") registry.variantSources = {};
+  if (!positiveInteger(registry.nextVariantId)) {
+    registry.nextVariantId = Math.max(0, ...Object.values(registry.variants).map((entry) => Number(entry.id) || 0)) + 1;
+  }
+}
+
+function normalizeVariants(variants) {
+  const byKey = new Map();
+  for (const variant of variants || []) {
+    const key = String(variant && variant.key || "").trim();
+    if (!key || !variant.audio) continue;
+    byKey.set(key, {
+      key,
+      audio: variant.audio,
+      subtitle: variant.subtitle || null,
+      default: Boolean(variant.default)
+    });
+  }
+  return [...byKey.values()];
+}
+
+function variantSourceKey(kind, libraryKey, mediaId) {
+  return `${kind}:${libraryKey}:${mediaId}`;
+}
+
+function variantRecordKey(kind, libraryKey, mediaId, variantKey) {
+  return `${variantSourceKey(kind, libraryKey, mediaId)}:${variantKey}`;
+}
+
+function variantFromRow(row) {
+  return {
+    id: Number(row.id),
+    kind: row.media_kind,
+    libraryKey: row.library_key,
+    mediaId: row.media_id,
+    audio: parseJson(row.audio_json, null),
+    subtitle: parseJson(row.subtitle_json, null),
+    default: Boolean(row.is_default)
+  };
+}
+
+function publicStoredVariant(record) {
+  return {
+    id: Number(record.id),
+    kind: record.kind,
+    libraryKey: record.libraryKey,
+    mediaId: record.mediaId,
+    audio: record.audio || null,
+    subtitle: record.subtitle || null,
+    default: Boolean(record.default)
+  };
+}
+
+function parseJson(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
+  try {
+    return typeof value === "string" ? JSON.parse(value) : value;
+  } catch (err) {
+    return fallback;
   }
 }
 

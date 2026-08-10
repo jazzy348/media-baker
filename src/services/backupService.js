@@ -436,6 +436,7 @@ function jsonDataFiles(config) {
     { name: "settings", path: config.settingsStorePath },
     { name: "media-index", path: config.indexPath },
     { name: "openmovie-ids", path: config.openMovieIdPath },
+    { name: "openmovie-poster-atlases", path: path.join(path.dirname(config.openMovieIdPath), "openmovie-poster-atlases.json") },
     { name: "metadata", path: path.join(config.metadata.cachePath, "metadata.json") },
     { name: "playback-progress", path: config.playback.progressPath },
     { name: "skip-markers", path: config.skipMarkerStorePath }
