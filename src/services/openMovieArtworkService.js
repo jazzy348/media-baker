@@ -1,20 +1,44 @@
+const crypto = require("crypto");
+const fs = require("fs/promises");
 const path = require("path");
 const logger = require("../utils/logger");
 
+const LABELLED_PLACEHOLDER_VERSION = 3;
+
 class OpenMovieArtworkService {
-  constructor(mediaIndex, metadata) {
+  constructor(mediaIndex, metadata, imageProcessor, cachePath) {
     this.mediaIndex = mediaIndex;
     this.metadata = metadata;
+    this.imageProcessor = imageProcessor;
     this.placeholderPath = path.resolve(__dirname, "..", "..", "public", "icons", "media-baker-512.png");
+    this.labelledPlaceholderDirectory = path.join(cachePath, "openmovie-labelled-placeholders");
+    this.labelledPlaceholderOperations = new Map();
   }
 
   async movie(library, item) {
-    if (!this.metadata) return this.placeholderPath;
-    const record = await this.metadata.getForMedia(library.key, item);
-    const filePath = record && record.available && record.posterFilename
-      ? await this.metadata.ensurePosterFile(record.posterFilename)
-      : null;
-    return filePath || this.placeholderPath;
+    let record = null;
+    let filePath = null;
+    let reason = "Metadata service is unavailable.";
+    try {
+      if (this.metadata) {
+        record = await this.metadata.getForMedia(library.key, item);
+        filePath = record && record.available && record.posterFilename
+          ? await this.metadata.ensurePosterFile(record.posterFilename)
+          : null;
+        reason = record && record.posterUnavailableReason || "Movie poster is unavailable.";
+      }
+    } catch (err) {
+      reason = err.message;
+    }
+    if (filePath) return filePath;
+
+    logger.info(
+      `[openmovie] movie artwork unresolved movieId=${item && item.id || "unknown"} `
+      + `provider=${record && record.provider || "unknown"} `
+      + `providerId=${record && record.providerId || "unknown"} source=placeholder `
+      + `reason="${singleLine(reason)}"`
+    );
+    return this.labelledPlaceholder(record && record.title || item && item.title, "Unknown movie");
   }
 
   async show(library, show, context = {}) {
@@ -46,7 +70,7 @@ class OpenMovieArtworkService {
       + `providerId=${resolution.providerId || "unknown"} source=${resolution.source || "placeholder"} `
       + `reason="${singleLine(resolution.reason || "Show poster is unavailable.")}"`
     );
-    return this.placeholderPath;
+    return this.labelledPlaceholder(show && show.name || context.showName, "Unknown show");
   }
 
   async season(library, show, season) {
@@ -76,9 +100,37 @@ class OpenMovieArtworkService {
 
   async resolvedEpisode(resolved, mode = "episode") {
     const context = await this.episodeContext(resolved);
-    if (mode === "show") return this.show(resolved.library, context.show, { episodeId: resolved.id });
+    if (mode === "show") {
+      return this.show(resolved.library, context.show, {
+        episodeId: resolved.id,
+        showName: resolved.item.showName
+      });
+    }
     if (mode === "season") return this.season(resolved.library, context.show, context.season);
     return this.episode(resolved.library, context.show, context.season, resolved.item);
+  }
+
+  async labelledPlaceholder(value, fallbackLabel = "Unknown media") {
+    const label = String(value || fallbackLabel).trim() || fallbackLabel;
+    if (!this.imageProcessor || typeof this.imageProcessor.createLabelledPoster !== "function") {
+      return this.placeholderPath;
+    }
+    const key = crypto.createHash("sha256")
+      .update(`${LABELLED_PLACEHOLDER_VERSION}:${label}`)
+      .digest("hex");
+    const filePath = path.join(this.labelledPlaceholderDirectory, `${key}.webp`);
+    if (await existingFile(filePath)) return filePath;
+    if (this.labelledPlaceholderOperations.has(key)) return this.labelledPlaceholderOperations.get(key);
+
+    const operation = this.imageProcessor.createLabelledPoster(this.placeholderPath, filePath, label)
+      .then(() => filePath)
+      .catch((err) => {
+        logger.error(`[openmovie] labelled placeholder failed title="${singleLine(label)}" message="${singleLine(err.message)}"`, err);
+        return this.placeholderPath;
+      })
+      .finally(() => this.labelledPlaceholderOperations.delete(key));
+    this.labelledPlaceholderOperations.set(key, operation);
+    return operation;
   }
 
   async episodeContext(resolved) {
@@ -100,4 +152,14 @@ function showEpisodes(show) {
   return (show && show.seasons || []).flatMap((season) => season.episodes || []);
 }
 
-module.exports = { OpenMovieArtworkService };
+async function existingFile(filePath) {
+  try {
+    const stats = await fs.stat(filePath);
+    return stats.isFile();
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+module.exports = { LABELLED_PLACEHOLDER_VERSION, OpenMovieArtworkService };

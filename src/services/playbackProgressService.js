@@ -69,9 +69,6 @@ class PlaybackProgressService {
     if (!trackProgress) {
       return null;
     }
-    if (current && current.status === STATUS_REMOVED) {
-      return current;
-    }
     const tailSegmentsComplete = this.recordTailSegmentDelivery(
       playbackSessionId,
       userId,
@@ -276,9 +273,6 @@ class PlaybackProgressService {
     session.lastActivityAt = now;
     this.playbackSessions.set(sessionKey, session);
 
-    if (current && current.status === STATUS_REMOVED) {
-      return current;
-    }
     if (position <= 0 && !current) {
       return null;
     }
@@ -576,9 +570,9 @@ class PlaybackProgressService {
       thumbnailUrl: (item.showId || item.localThumbnail) && metadata
         ? metadata.thumbnailUrl(record.mediaType, item.id, authToken, authParamName)
         : item.thumbnailUrl,
-      seasonPosterUrl: seriesPosterUrl || (item.showId && metadata
+      seasonPosterUrl: item.showId && Number(item.season) !== 0 && metadata
         ? metadata.seasonPosterUrl(record.mediaType, item.id, authToken, authParamName)
-        : null),
+        : seriesPosterUrl,
       progress: toPublicProgress(record),
       onDeckReason: reason,
       updatedAt: record.updatedAt || null

@@ -5,7 +5,8 @@ const logger = require("../utils/logger");
 const LAYOUT_VERSION = 1;
 const SLOTS_PER_ATLAS = 12;
 const RENDERER_SIGNATURE = "openmovie-poster-atlas-v1-1200x1350-4x3-edge-copy-q88";
-const SHOW_ARTWORK_SIGNATURE = "parent-show-artwork-v2";
+const MOVIE_ARTWORK_SIGNATURE = "movie-artwork-v2-labelled-placeholder";
+const SHOW_ARTWORK_SIGNATURE = "parent-show-artwork-v5-labelled-placeholder";
 
 class OpenMoviePosterAtlasService {
   constructor(store, imageProcessor, artwork, idStore) {
@@ -88,6 +89,24 @@ class OpenMoviePosterAtlasService {
       });
     }
     entries.sort(compareAtlasEntries);
+  }
+
+  async decorateEpisodes(entries) {
+    const bySeason = groupBy(entries, (entry) => (
+      collectionKey("episodes", entry.library.key, entry.showId, entry.season)
+    ));
+    for (const seasonEntries of bySeason.values()) {
+      const first = seasonEntries[0];
+      await this.ensureCollection({
+        libraryKey: first.library.key,
+        kind: "episodes",
+        key: collectionKey("episodes", first.library.key, first.showId, first.season),
+        items: seasonEntries.map((entry) => ({
+          entityKey: String(entry.id),
+          output: entry.output
+        }))
+      });
+    }
   }
 
   async ensureCollection(collection) {
@@ -241,16 +260,19 @@ class OpenMoviePosterAtlasService {
     if (!entityKey) return this.artwork.placeholderPath;
     const library = this.artwork.mediaIndex.libraryForKey(atlas.libraryKey);
     if (!library) return this.artwork.placeholderPath;
+    let fallbackLabel = null;
     try {
       if (atlas.collectionKind === "movies") {
         const mapping = await this.idStore.resolve("movie", entityKey);
         const item = mapping && mapping.libraryKey === library.key
           ? await this.artwork.mediaIndex.getMovie(mapping.mediaId, library.key)
           : null;
+        fallbackLabel = item && item.title;
         return item ? await this.artwork.movie(library, item) : this.artwork.placeholderPath;
       }
       if (atlas.collectionKind === "shows") {
         const show = await this.artwork.mediaIndex.getShow(entityKey, library.key);
+        fallbackLabel = show && show.name;
         const episodeId = show && firstOpenMovieEpisodeId(show, library.key, context && context.episodeIds);
         return this.artwork.show(library, show, { episodeId });
       }
@@ -272,6 +294,10 @@ class OpenMoviePosterAtlasService {
       }
     } catch (err) {
       logger.full(`[openmovie] poster atlas artwork fallback id=${atlas.id} entity=${entityKey} message="${err.message}"`);
+      if (atlas.collectionKind === "movies" || atlas.collectionKind === "shows") {
+        const unknownLabel = atlas.collectionKind === "movies" ? "Unknown movie" : "Unknown show";
+        return this.artwork.labelledPlaceholder(fallbackLabel, unknownLabel);
+      }
     }
     return this.artwork.placeholderPath;
   }
@@ -337,6 +363,9 @@ function normalizedPageSlots(slots) {
 }
 
 function rendererSignature(collectionKind) {
+  if (collectionKind === "movies") {
+    return `${RENDERER_SIGNATURE}:${MOVIE_ARTWORK_SIGNATURE}`;
+  }
   return collectionKind === "shows"
     ? `${RENDERER_SIGNATURE}:${SHOW_ARTWORK_SIGNATURE}`
     : RENDERER_SIGNATURE;

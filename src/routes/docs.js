@@ -146,6 +146,30 @@ function openApiSpec() {
           default: { type: "boolean" },
           playbackUrl: { type: "string" }
         }),
+        OpenMovieProgress: objectSchema({
+          status: { type: "string", enum: ["in_progress", "next"] },
+          positionSeconds: { type: "number", minimum: 0 },
+          durationSeconds: { type: "number", minimum: 0 },
+          percent: { type: "number", minimum: 0, maximum: 100 },
+          resumeSeconds: { type: "integer", minimum: 0 },
+          updatedAt: { type: "string", format: "date-time", nullable: true },
+          watchedAt: { type: "string", format: "date-time", nullable: true }
+        }, ["status", "positionSeconds", "durationSeconds", "percent", "resumeSeconds", "updatedAt", "watchedAt"]),
+        OpenMovieOnDeckItem: objectSchema({
+          id: { type: "integer", format: "int32", minimum: 1 },
+          library: { type: "string", example: "anime-movies" },
+          title: { type: "string" },
+          showTitle: { type: "string", nullable: true, description: "Present for TV episodes." },
+          year: { type: "integer", nullable: true },
+          season: { type: "integer", nullable: true, description: "Present for TV episodes." },
+          episode: { type: "integer", nullable: true, description: "Present for TV episodes." },
+          overview: { type: "string" },
+          playbackUrl: { type: "string" },
+          playbackVariants: { type: "array", items: { $ref: "#/components/schemas/OpenMoviePlaybackVariant" } },
+          posterAtlas: { $ref: "#/components/schemas/OpenMoviePosterAtlas" },
+          progress: { $ref: "#/components/schemas/OpenMovieProgress" },
+          onDeckReason: { type: "string", enum: ["resume", "next"] }
+        }, ["id", "library", "title", "year", "overview", "playbackUrl", "playbackVariants", "posterAtlas", "progress", "onDeckReason"]),
         OpenMovieShow: objectSchema({
           library: { type: "string" },
           libraryTitle: { type: "string" },
@@ -429,6 +453,11 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/catalog/{mediaType}/shows/{showId}/metadata/season-posters/refresh": {
+        post: operation("Catalog", "Refresh season artwork", "Invalidates and refetches season posters for one TV show without refreshing the rest of the library metadata.", true, {
+          parameters: [pathParam("mediaType"), pathParam("showId")]
+        })
+      },
       "/api/catalog/metadata/poster/{filename}": {
         get: operation("Catalog", "Cached poster file", "Serves a cached poster image.", true, {
           parameters: [pathParam("filename")]
@@ -696,6 +725,25 @@ function openApiSpec() {
           security: openMovieSecurity(),
           parameters: [openMovieOffsetParam("episode")],
           responses: openMovieListResponse("OpenMovieShow")
+        })
+      },
+      "/api/openmovie/on-deck": {
+        get: operation("OpenMovie", "List OpenMovie On Deck items", "Applies the same in-progress TTL, next-episode, removal, progress-tracking, user, and library-access rules as the standard On Deck endpoint. Movie and episode source IDs are projected to durable OpenMovie IDs and playback variants. TV entries also include show, season, and episode context.", true, {
+          security: openMovieSecurity(),
+          responses: {
+            200: {
+              description: "Current user's OpenMovie On Deck items",
+              content: {
+                "application/json": {
+                  schema: objectSchema({
+                    items: { type: "array", items: { $ref: "#/components/schemas/OpenMovieOnDeckItem" } }
+                  }, ["items"])
+                }
+              }
+            },
+            401: errorResponse(),
+            500: errorResponse()
+          }
         })
       },
       "/api/openmovie/poster-atlases/{atlasId}": {

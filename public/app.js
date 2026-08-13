@@ -495,6 +495,7 @@ let videoNaturalEndSeconds = 0;
 let videoEndSkipRequested = false;
 let floatingPlayerDrag = null;
 let libraryObserver = null;
+const libraryViewCache = new Map();
 let progressRefreshPromise = null;
 let draggedLibraryKey = null;
 let adminRefreshTimer = null;
@@ -512,6 +513,7 @@ let liveTvRefreshTimer = null;
 let liveTvRefreshPromise = null;
 let liveTvRequestId = 0;
 let searchRequestId = 0;
+let searchAbortController = null;
 let routeRenderDepth = 0;
 let userHistoryItems = [];
 let userHistoryNextOffset = null;
@@ -569,6 +571,7 @@ els.lockButton.addEventListener("click", () => {
   state.user = null;
   setPlaybackPreferences(null);
   state.shareToken = "";
+  libraryViewCache.clear();
   els.usernameInput.value = "";
   els.secretInput.value = "";
   updateAdminControls();
@@ -696,7 +699,7 @@ els.backupFolderParent.addEventListener("click", () => {
 els.selectBackupFolder.addEventListener("click", selectBackupFolder);
 els.closeDetails.addEventListener("click", closeDetails);
 els.toggleFilePath.addEventListener("click", toggleFilePath);
-els.searchInput.addEventListener("input", debounce(search, 180));
+els.searchInput.addEventListener("input", debounce(search, 300));
 els.recentMode.addEventListener("click", () => loadHome("recent"));
 els.randomMode.addEventListener("click", () => loadHome("random"));
 els.editPoster.addEventListener("click", openPosterEditor);
@@ -953,7 +956,7 @@ async function renderRoute(route) {
       navigation.navigate("/", { replace: true });
     }
     if (route.name === "library") {
-      await openLibraryView(route.libraryKey, route.title || readableRouteName(route.libraryKey), route.folder || "");
+      await openLibraryView(route.libraryKey, route.title || readableRouteName(route.libraryKey), route.folder || "", { restore: true });
       return;
     }
     if (route.name === "show") {
@@ -1242,6 +1245,10 @@ async function search() {
   hideLiveTvView();
   const query = els.searchInput.value.trim();
   const requestId = ++searchRequestId;
+  if (searchAbortController) {
+    searchAbortController.abort();
+    searchAbortController = null;
+  }
   if (!query) {
     recordRoute(navigation.homePath(state.homeMode), { replace: state.currentView === "search" });
     els.searchResults.classList.add("hidden");
@@ -1257,7 +1264,25 @@ async function search() {
   els.homeRows.classList.add("hidden");
   els.homeToolbar.classList.add("hidden");
   state.currentView = "search";
-  const data = await api(`/api/catalog/search?q=${encodeURIComponent(query)}`);
+  const controller = new AbortController();
+  searchAbortController = controller;
+  let data;
+  try {
+    data = await api(
+      `/api/catalog/search?q=${encodeURIComponent(query)}`,
+      state.token,
+      { signal: controller.signal }
+    );
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      return;
+    }
+    throw err;
+  } finally {
+    if (searchAbortController === controller) {
+      searchAbortController = null;
+    }
+  }
   if (requestId !== searchRequestId
     || state.currentView !== "search"
     || els.searchInput.value.trim() !== query) {
@@ -1581,7 +1606,7 @@ function hierarchyButton(label, onClick) {
   return button;
 }
 
-async function openSeasonView(mediaType, showId, seasonNumber) {
+async function openSeasonView(mediaType, showId, seasonNumber, options = {}) {
   stopLibraryLoading();
   recordRoute(navigation.seasonPath(mediaType, showId, seasonNumber));
   const [show, seasonResponse] = await Promise.all([
@@ -1598,6 +1623,9 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
     airDate: seasonMetadata.airDate || seasonResponse.airDate || null,
     year: seasonMetadata.year || seasonResponse.year || null
   };
+  if (options.seasonArtworkVersion) {
+    season.posterUrl = withCacheVersion(season.posterUrl, options.seasonArtworkVersion);
+  }
   state.currentView = "season";
   closeDetails();
   const content = document.createDocumentFragment();
@@ -1618,6 +1646,7 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
     actions: [
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Edit poster", onClick: () => openSeriesPosterEditor(mediaType, show) }] : []),
+      ...(hasPermission("canManageMetadata") ? [{ label: "Refresh season posters", onClick: (event) => refreshSeasonArtwork(mediaType, show, event.currentTarget, seasonNumber) }] : []),
       ...(state.user && !state.shareToken ? [{ label: seasonWatchedActionLabel(season), onClick: (event) => markSeasonWatched(mediaType, show, season, event.currentTarget) }] : []),
       { label: "Show", onClick: () => openShowView(mediaType, showId) },
       { label: "Home", onClick: () => loadHome() }
@@ -1626,10 +1655,15 @@ async function openSeasonView(mediaType, showId, seasonNumber) {
   });
 }
 
-async function openShowView(mediaType, showId) {
+async function openShowView(mediaType, showId, options = {}) {
   stopLibraryLoading();
   recordRoute(navigation.showPath(mediaType, showId));
   const show = await api(`${tvBasePath(mediaType)}/${showId}`);
+  if (options.seasonArtworkVersion) {
+    for (const season of show.seasons || []) {
+      season.posterUrl = withCacheVersion(season.posterUrl, options.seasonArtworkVersion);
+    }
+  }
   state.currentView = "show";
   closeDetails();
   const fragment = document.createDocumentFragment();
@@ -1641,11 +1675,36 @@ async function openShowView(mediaType, showId) {
     actions: [
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Edit poster", onClick: () => openSeriesPosterEditor(mediaType, show) }] : []),
+      ...(hasPermission("canManageMetadata") ? [{ label: "Refresh season posters", onClick: (event) => refreshSeasonArtwork(mediaType, show, event.currentTarget) }] : []),
       { label: "Random episode", onClick: () => openRandomEpisode(mediaType, show) },
       { label: "Home", onClick: () => loadHome() }
     ],
     content: fragment
   });
+}
+
+async function refreshSeasonArtwork(mediaType, show, button, seasonNumber = null) {
+  button.disabled = true;
+  button.textContent = "Refreshing...";
+  try {
+    const result = await api(`/api/catalog/${encodeURIComponent(mediaType)}/shows/${encodeURIComponent(show.id)}/metadata/season-posters/refresh`, state.token, { method: "POST" });
+    const seasonArtworkVersion = result.refreshedAt || Date.now();
+    if (seasonNumber === null) {
+      await openShowView(mediaType, show.id, { seasonArtworkVersion });
+    } else {
+      await openSeasonView(mediaType, show.id, seasonNumber, { seasonArtworkVersion });
+    }
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = "Refresh failed";
+  }
+}
+
+function withCacheVersion(url, version) {
+  if (!url) return url;
+  const parsed = new URL(url, window.location.origin);
+  parsed.searchParams.set("v", String(version));
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 function seriesSummary(show, season = null) {
@@ -1806,10 +1865,16 @@ function showContentView({ title, subtitle, actions, content }) {
   return { header, content };
 }
 
-async function openLibraryView(libraryKey, title, folder = "") {
+async function openLibraryView(libraryKey, title, folder = "", options = {}) {
   stopLibraryLoading();
   closeDetails();
   recordRoute(navigation.libraryPath(libraryKey, folder), { state: { title } });
+
+  const cacheKey = libraryViewCacheKey(libraryKey, folder);
+  if (options.restore && restoreLibraryView(cacheKey)) {
+    return;
+  }
+  libraryViewCache.delete(cacheKey);
 
   const section = document.createElement("section");
   section.className = "library-results";
@@ -1829,7 +1894,7 @@ async function openLibraryView(libraryKey, title, folder = "") {
     title: folder ? catalogFolderName(folder) : title,
     subtitle: "Loading...",
     actions: [
-      ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder)) }] : []),
+      ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder), { restore: true }) }] : []),
       { label: "Home", onClick: () => loadHome() }
     ],
     content: section
@@ -1855,12 +1920,9 @@ async function openLibraryView(libraryKey, title, folder = "") {
     heading: view.header.querySelector("h2")
   };
 
-  libraryObserver = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) {
-      loadNextLibraryPage();
-    }
-  }, { rootMargin: "700px 0px" });
-  libraryObserver.observe(sentinel);
+  state.libraryView.header = view.header;
+  state.libraryView.section = section;
+  startLibraryObserver(state.libraryView);
 
   await loadNextLibraryPage();
 }
@@ -5364,7 +5426,64 @@ function stopLibraryLoading() {
     libraryObserver = null;
   }
 
+  if (state.libraryView) {
+    const view = state.libraryView;
+    view.scrollY = window.scrollY;
+    view.requestId += 1;
+    view.loading = false;
+    if (view.hasMore && view.status.textContent === "Loading more...") {
+      view.status.textContent = "";
+    }
+    cacheLibraryView(view);
+  }
+
   state.libraryView = null;
+}
+
+function libraryViewCacheKey(libraryKey, folder = "") {
+  return `${libraryKey}\0${folder}`;
+}
+
+function cacheLibraryView(view) {
+  const key = libraryViewCacheKey(view.key, view.folder);
+  libraryViewCache.delete(key);
+  libraryViewCache.set(key, view);
+  while (libraryViewCache.size > 6) {
+    libraryViewCache.delete(libraryViewCache.keys().next().value);
+  }
+}
+
+function restoreLibraryView(cacheKey) {
+  const view = libraryViewCache.get(cacheKey);
+  if (!view || !view.header || !view.section) {
+    return false;
+  }
+
+  libraryViewCache.delete(cacheKey);
+  hideLiveTvView();
+  els.searchInput.value = "";
+  els.searchResults.classList.add("hidden");
+  els.homeToolbar.classList.add("hidden");
+  els.homeRows.classList.remove("hidden");
+  els.homeRows.replaceChildren(view.header, view.section);
+  state.currentView = "library";
+  state.libraryView = view;
+  startLibraryObserver(view);
+
+  const scrollY = Number(view.scrollY) || 0;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => window.scrollTo({ top: scrollY, left: 0, behavior: "auto" }));
+  });
+  return true;
+}
+
+function startLibraryObserver(view) {
+  libraryObserver = new IntersectionObserver((entries) => {
+    if (state.libraryView === view && entries.some((entry) => entry.isIntersecting)) {
+      loadNextLibraryPage();
+    }
+  }, { rootMargin: "700px 0px" });
+  libraryObserver.observe(view.sentinel);
 }
 
 function seasonGrid(mediaType, show, season) {
@@ -5956,7 +6075,7 @@ function thumbnailUrlForEpisode(mediaType, id) {
 }
 
 function progressBarHtml(progress) {
-  if (!progress || !progress.percent || progress.status === "watched") {
+  if (!progress || progress.status !== "in_progress" || !progress.percent) {
     return "";
   }
 
@@ -6139,7 +6258,7 @@ function setNewEpisodeMarker(element, count) {
 
 function renderDetailsProgress(progress) {
   setWatchedMarker(els.detailsPoster, isWatchedProgress(progress));
-  if (!progress || !progress.percent || progress.status === "watched") {
+  if (!progress || progress.status !== "in_progress" || !progress.percent) {
     els.detailsProgress.classList.add("hidden");
     els.detailsProgressFill.style.removeProperty("--progress");
     els.detailsProgressText.textContent = "";
@@ -6899,7 +7018,7 @@ async function openWebPlayer(url, options = {}) {
 }
 
 function closePlayer() {
-  reportWebPlaybackProgress(true);
+  const finalProgressRequest = reportWebPlaybackProgress(true);
   stopOnDeckPolling();
   exitVideoPictureInPicture();
   clearTimeout(videoControlsHideTimer);
@@ -6937,6 +7056,11 @@ function closePlayer() {
   webProgressLastReportedAt = 0;
   resetVideoEndTracking();
   setPlayerStatus("");
+  if (finalProgressRequest) {
+    finalProgressRequest.finally(() => {
+      refreshOnDeckRow({ force: true }).catch(() => {});
+    });
+  }
 }
 
 function minimizeVideoPlayback() {

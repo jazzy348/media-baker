@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
+const { LABELLED_PLACEHOLDER_VERSION } = require("./openMovieArtworkService");
 const logger = require("../utils/logger");
 const { getMediaPlaybackOptions } = require("./mediaOptions");
 
@@ -61,7 +62,7 @@ class OpenMovieService {
         aliases: metadataAliases(record),
         provider: metadataValue(record, "provider"),
         providerId: metadataValue(record, "providerId"),
-        posterUrl: `/api/openmovie/movies/${id}/poster`,
+        posterUrl: `/api/openmovie/movies/${id}/poster?fallbackVersion=${LABELLED_PLACEHOLDER_VERSION}`,
         playbackUrl: `/api/openmovie/movies/${id}/play`,
         playbackVariants
       } };
@@ -140,7 +141,9 @@ class OpenMovieService {
         aliases: metadataAliases(showRecord),
         provider: metadataValue(showRecord, "provider"),
         providerId: metadataValue(showRecord, "providerId"),
-        posterUrl: episodes.length > 0 ? `${episodes[0].posterUrl}?art=show` : null,
+        posterUrl: episodes.length > 0
+          ? `${episodes[0].posterUrl}?art=show&fallbackVersion=${LABELLED_PLACEHOLDER_VERSION}`
+          : null,
         episodeCount: episodes.length,
         seasons
       } };
@@ -153,6 +156,115 @@ class OpenMovieService {
     return showEntries
       .map((entry) => filterOpenMovieShowByOffset(entry.output, minimumId))
       .filter(Boolean);
+  }
+
+  async onDeckCatalogue(items, allowedLibraryKeys = null) {
+    await this.syncOperation;
+    const cards = Array.isArray(items) ? items : [];
+    const libraries = this.mediaLibraries(allowedLibraryKeys);
+    const libraryByKey = new Map(libraries.map((library) => [library.key, library]));
+    const resolved = [];
+    for (const card of cards) {
+      const library = libraryByKey.get(card.mediaType);
+      if (!library) continue;
+      const kind = library.type === "tv" ? "episode" : "movie";
+      const item = kind === "episode"
+        ? await this.mediaIndex.getEpisode(card.id, library.key)
+        : await this.mediaIndex.getMovie(card.id, library.key);
+      if (item) resolved.push({ card, kind, library, item });
+    }
+    if (resolved.length === 0) return [];
+
+    const movieIds = mappingMap(await this.idStore.mappings("movie"));
+    const episodeIds = mappingMap(await this.idStore.mappings("episode"));
+    const metadataRefs = [];
+    for (const entry of resolved) {
+      metadataRefs.push({ mediaType: entry.library.key, id: entry.item.id });
+      if (entry.kind === "episode" && entry.item.showId) {
+        metadataRefs.push({ mediaType: entry.library.key, id: entry.item.showId });
+      }
+    }
+    const metadata = await this.cachedMetadata(metadataRefs);
+    const movieLibraryKeys = uniqueStrings(resolved
+      .filter((entry) => entry.kind === "movie")
+      .map((entry) => entry.library.key));
+    const episodeLibraryKeys = uniqueStrings(resolved
+      .filter((entry) => entry.kind === "episode")
+      .map((entry) => entry.library.key));
+    const [movieVariants, episodeVariants] = await Promise.all([
+      this.variantMap("movie", movieLibraryKeys),
+      this.variantMap("episode", episodeLibraryKeys)
+    ]);
+
+    const outputByMedia = new Map();
+    const outputs = resolved.map(({ card, kind, library, item }) => {
+      const ids = kind === "episode" ? episodeIds : movieIds;
+      const id = ids.get(mappingKey(library.key, item.id));
+      if (!id) return null;
+      const record = metadata.get(mappingKey(library.key, item.id));
+      const variants = kind === "episode" ? episodeVariants : movieVariants;
+      const output = {
+        id,
+        library: library.key,
+        title: kind === "episode" ? item.title : metadataTitle(record, item.title),
+        year: metadataYear(record, item.year),
+        overview: metadataOverview(record),
+        playbackUrl: `/api/openmovie/${kind === "episode" ? "episodes" : "movies"}/${id}/play`,
+        playbackVariants: variants.get(mappingKey(library.key, item.id)) || [],
+        progress: card.progress,
+        onDeckReason: card.onDeckReason
+      };
+      if (kind === "episode") {
+        const showRecord = metadata.get(mappingKey(library.key, item.showId));
+        output.showTitle = metadataTitle(showRecord, item.showName);
+        output.season = numberOrNull(item.season);
+        output.episode = numberOrNull(item.episode);
+      }
+      outputByMedia.set(mappingKey(library.key, item.id), output);
+      return output;
+    }).filter(Boolean);
+
+    if (this.posterAtlases) {
+      const selectedLibraryKeys = new Set(resolved.map((entry) => entry.library.key));
+      const records = await this.collectMedia(libraries.filter((library) => selectedLibraryKeys.has(library.key)));
+      const selectedMovieLibraries = new Set(movieLibraryKeys);
+      const movieAtlasEntries = records.movies
+        .filter(({ library }) => selectedMovieLibraries.has(library.key))
+        .map(({ library, item }) => {
+          const id = movieIds.get(mappingKey(library.key, item.id));
+          return id ? {
+            library,
+            item,
+            output: outputByMedia.get(mappingKey(library.key, item.id)) || { id }
+          } : null;
+        })
+        .filter(Boolean);
+      if (movieAtlasEntries.length > 0) await this.posterAtlases.decorateMovies(movieAtlasEntries);
+
+      const selectedSeasons = new Set(resolved
+        .filter((entry) => entry.kind === "episode")
+        .map((entry) => episodeCollectionKey(entry.library.key, entry.item.showId, entry.item.season)));
+      const episodeAtlasEntries = [];
+      for (const { library, show } of records.shows) {
+        for (const season of show.seasons || []) {
+          if (!selectedSeasons.has(episodeCollectionKey(library.key, show.id, season.season))) continue;
+          for (const item of season.episodes || []) {
+            const id = episodeIds.get(mappingKey(library.key, item.id));
+            if (!id) continue;
+            episodeAtlasEntries.push({
+              library,
+              showId: show.id,
+              season: season.season,
+              id,
+              output: outputByMedia.get(mappingKey(library.key, item.id)) || { id }
+            });
+          }
+        }
+      }
+      if (episodeAtlasEntries.length > 0) await this.posterAtlases.decorateEpisodes(episodeAtlasEntries);
+    }
+
+    return outputs;
   }
 
   async resolve(kind, id, allowedLibraryKeys = null) {
@@ -479,6 +591,14 @@ function mappingMap(mappings) {
 
 function mappingKey(libraryKey, mediaId) {
   return `${libraryKey}:${mediaId}`;
+}
+
+function episodeCollectionKey(libraryKey, showId, season) {
+  return `${libraryKey}:${showId}:${Number(season) || 0}`;
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values)];
 }
 
 function canAccessLibrary(libraryKey, allowedLibraryKeys) {

@@ -2,6 +2,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
 const logger = require("../utils/logger");
+const { normalizeSearchText, searchTokens } = require("../utils/searchText");
 
 class MetadataStore {
   constructor(config) {
@@ -474,19 +475,6 @@ function chunks(values, size) {
     result.push(values.slice(index, index + size));
   }
   return result;
-}
-
-function searchTokens(value) {
-  return normalizeSearchText(value).split(" ").filter(Boolean);
-}
-
-function normalizeSearchText(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
 }
 
 async function ensureColumn(pool, table, column, definition) {

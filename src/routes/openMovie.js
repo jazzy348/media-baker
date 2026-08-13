@@ -4,8 +4,26 @@ const { httpError, isClientAbort } = require("../utils/httpErrors");
 
 const PLAYBACK_QUERY_PARAMETERS = ["audio", "subtitle", "audioChannels", "quality", "3d", "t"];
 
-module.exports = function createOpenMovieRoutes({ openMovie, playbackTokens, imageProcessor, openMovieArtwork, openMoviePosterAtlases }) {
+module.exports = function createOpenMovieRoutes({ mediaIndex, metadata, progress, openMovie, playbackTokens, imageProcessor, openMovieArtwork, openMoviePosterAtlases }) {
   const router = express.Router();
+
+  router.get("/on-deck", async (req, res, next) => {
+    try {
+      const items = await progress.onDeck(
+        mediaIndex,
+        metadata,
+        req.authToken,
+        req.authParamName || "apiKey",
+        req.allowedLibraryKeys,
+        req.progressUserId || req.user && req.user.id || "global"
+      );
+      res.json({
+        items: await openMovie.onDeckCatalogue(items, req.allowedLibraryKeys)
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   router.get("/movies", async (req, res, next) => {
     try {

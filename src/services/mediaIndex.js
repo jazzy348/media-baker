@@ -469,15 +469,16 @@ class MediaIndex {
       const fileStats = await this.fileStats(filePath);
       const parentDirectory = path.basename(path.dirname(filePath));
       const inferredShowName = nearestShowDirectory(libraryPath, filePath);
-      if ((!Number.isFinite(parsed.season) || !Number.isFinite(parsed.episode))
-        && isSpecialsName(parentDirectory)
-        && inferredShowName) {
+      const specialsFolder = nearestSpecialsFolder(libraryPath, filePath);
+      const specialsFolderDetails = specialsFolder && seasonFolderDetails(specialsFolder);
+      const specialsShowName = inferredShowName || specialsFolderDetails && specialsFolderDetails.showName;
+      if (specialsFolder && specialsShowName) {
         parsed = {
           ...parsed,
           season: 0,
-          episode: fileOrderPerDir.get(filePath) || 1,
-          showName: inferredShowName,
-          matchType: "specialFolder"
+          episode: Number.isFinite(parsed.episode) ? parsed.episode : fileOrderPerDir.get(filePath) || 1,
+          showName: specialsShowName,
+          matchType: parsed.matchType || "specialFolder"
         };
       }
       if (!Number.isFinite(parsed.season) || !Number.isFinite(parsed.episode)) {
@@ -676,11 +677,11 @@ class MediaIndex {
   }
 
   parseSeasonFolder(folderName) {
-    if (isSpecialsName(folderName)) {
+    if (isSpecialsFolder(folderName)) {
       return 0;
     }
-    const match = folderName.match(/(?:season|series)\s+(\d+)/i);
-    return match ? Number.parseInt(match[1], 10) : 0;
+    const season = seasonNumberFromFolder(folderName);
+    return season === null ? 0 : season;
   }
 
   async movieItem(libraryPath, filePath, siblingVideoCount, fileStats = null) {
@@ -705,13 +706,18 @@ function movieItemFromParsed(filePath, libraryPath, parsed, fileStats) {
 
 function showNameForEpisode(libraryPath, filePath, parsed) {
   const parentDirectory = path.basename(path.dirname(filePath));
+  const seasonFolderName = nearestSeasonFolder(libraryPath, filePath);
+  const seasonFolder = seasonFolderDetails(seasonFolderName || parentDirectory);
   if (parsed.matchType === "animeNumber"
     || parsed.matchType === "specialFeature"
     || parsed.matchType === "specialFolder"
-    || isSeasonFolder(parentDirectory)) {
+    || seasonFolder) {
     const directoryName = nearestShowDirectory(libraryPath, filePath);
     if (directoryName) {
       return directoryName;
+    }
+    if (seasonFolder && seasonFolder.showName) {
+      return seasonFolder.showName;
     }
   }
 
@@ -719,11 +725,30 @@ function showNameForEpisode(libraryPath, filePath, parsed) {
 }
 
 function nearestShowDirectory(libraryPath, filePath) {
-  const relativeParts = path.relative(libraryPath, path.dirname(filePath))
-    .split(path.sep)
-    .filter(Boolean);
+  const relativeParts = relativeDirectoryParts(libraryPath, filePath);
+  const seasonIndex = relativeParts.findIndex(isSeasonFolder);
+  if (seasonIndex > 0) {
+    for (let index = seasonIndex - 1; index >= 0; index -= 1) {
+      if (!isMetadataFolder(relativeParts[index])) return relativeParts[index];
+    }
+  }
+  if (seasonIndex === 0) return null;
   const filteredParts = relativeParts.filter((part) => !isSeasonFolder(part) && !isMetadataFolder(part));
   return filteredParts.length > 0 ? filteredParts[filteredParts.length - 1] : null;
+}
+
+function nearestSeasonFolder(libraryPath, filePath) {
+  return relativeDirectoryParts(libraryPath, filePath).find(isSeasonFolder) || null;
+}
+
+function nearestSpecialsFolder(libraryPath, filePath) {
+  return relativeDirectoryParts(libraryPath, filePath).find(isSpecialsFolder) || null;
+}
+
+function relativeDirectoryParts(libraryPath, filePath) {
+  return path.relative(libraryPath, path.dirname(filePath))
+    .split(path.sep)
+    .filter(Boolean);
 }
 
 function addEpisodeToShow(showsByKey, libraryPath, filePath, episode) {
@@ -772,8 +797,26 @@ function seasonNameForEpisode(filePath, season) {
 
 function isSeasonFolder(value) {
   return isSpecialsName(value)
-    || /^(season|series)\s*\d+$/i.test(String(value || ""))
+    || seasonNumberFromFolder(value) !== null
     || /^\d+(?:st|nd|rd|th)?\s+(?:season|series|gig)$/i.test(String(value || ""));
+}
+
+function seasonNumberFromFolder(value) {
+  const details = seasonFolderDetails(value);
+  return details ? details.season : null;
+}
+
+function seasonFolderDetails(value) {
+  const text = String(value || "").trim();
+  const leadingMatch = text.match(/^(?:(?:season|series)\s*|s\s*)0*(\d{1,4})(?=$|[\s._:\-]|\(|\[)/i);
+  if (leadingMatch) {
+    return { season: Number.parseInt(leadingMatch[1], 10), showName: null };
+  }
+
+  const trailingMatch = text.match(/^(.+?)\s+(?:-\s*)?(?:season|series|s)\s*0*(\d{1,4})(?=$|[\s._:\-]|\(|\[)/i);
+  return trailingMatch
+    ? { season: Number.parseInt(trailingMatch[2], 10), showName: trailingMatch[1].trim() }
+    : null;
 }
 
 function isMetadataFolder(value) {
@@ -791,11 +834,47 @@ function movieFolderName(libraryPath, filePath) {
 
 function parseMovieFile(libraryPath, filePath, siblingVideoCount) {
   const relativeDir = path.relative(libraryPath, path.dirname(filePath));
+  const parentDirectory = path.basename(path.dirname(filePath));
+  const filename = path.basename(filePath, path.extname(filePath));
+  if (siblingVideoCount > 1) {
+    const namedCollectionMovie = parseNamedCollectionMovie(parentDirectory, filename);
+    if (namedCollectionMovie) return namedCollectionMovie;
+  }
   if (relativeDir && relativeDir !== "." && siblingVideoCount === 1) {
-    return parseMovieFolder(path.basename(path.dirname(filePath)));
+    return parseMovieFolder(parentDirectory);
   }
 
-  return parseMovieFolder(path.basename(filePath, path.extname(filePath)));
+  const title = siblingVideoCount > 1 && isMovieCollectionFolder(parentDirectory)
+    ? stripCollectionSequence(filename)
+    : filename;
+  return parseMovieFolder(title);
+}
+
+function parseNamedCollectionMovie(parentDirectory, filename) {
+  const parent = normalizeMoviePathText(parentDirectory);
+  const name = normalizeMoviePathText(filename);
+  const prefix = `${parent} - `;
+  if (!parent || !name.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+
+  const match = name.slice(prefix.length).match(/^((?:19|20)\d{2})\s*-\s*(.+)$/);
+  return match ? parseMovieFolder(`${match[2]} (${match[1]})`) : null;
+}
+
+function normalizeMoviePathText(value) {
+  return String(value || "")
+    .replace(/[._]+/g, " ")
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isMovieCollectionFolder(value) {
+  return /\b(?:collection|anthology|box[\s._-]*set)\b/i.test(String(value || ""));
+}
+
+function stripCollectionSequence(value) {
+  const stripped = String(value || "").replace(/\s*-\s*0*\d{1,3}\s*$/, "").trim();
+  return stripped || String(value || "").trim();
 }
 
 function countFilesPerDirectory(filePaths) {
@@ -863,6 +942,10 @@ function preferredSeasonName(current, next) {
 
 function isSpecialsName(value) {
   return /^specials?$/i.test(String(value || "").trim());
+}
+
+function isSpecialsFolder(value) {
+  return isSpecialsName(value) || seasonNumberFromFolder(value) === 0;
 }
 
 function reconcileMediaIdentity(collection, previousCollection, type) {

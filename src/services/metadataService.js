@@ -511,7 +511,11 @@ class MetadataService {
   }
 
   seasonPosterUrl(mediaType, mediaId, token, paramName = "authToken") {
-    return `/api/catalog/${encodeURIComponent(mediaType)}/${encodeURIComponent(mediaId)}/metadata/season-poster?${encodeURIComponent(paramName)}=${encodeURIComponent(token)}`;
+    const params = new URLSearchParams({
+      [paramName]: token,
+      cache: "revalidate"
+    });
+    return `/api/catalog/${encodeURIComponent(mediaType)}/${encodeURIComponent(mediaId)}/metadata/season-poster?${params.toString()}`;
   }
 
   startBackgroundPreload(mediaIndex, options = {}) {
@@ -812,7 +816,7 @@ class MetadataService {
     };
   }
 
-  async ensureSeasonPosterForMedia(mediaType, mediaFile, showEpisodes = []) {
+  async ensureSeasonPosterForMedia(mediaType, mediaFile, showEpisodes = [], options = {}) {
     if (!isEpisodeFile(mediaFile)) {
       return { available: false, reason: "Season posters are only available for TV episodes." };
     }
@@ -856,6 +860,16 @@ class MetadataService {
     const key = `${record.providerId}:${season}`;
     const filename = seasonPosterFilenameFor(record.providerId, season, this.config.posterSize);
     const filePath = this.posterFilePath(filename);
+    if (options.refresh) {
+      const inFlight = this.seasonPosterInFlight.get(key);
+      if (inFlight) {
+        await inFlight.catch(() => {});
+      }
+      this.seasonPosterUnavailable.delete(key);
+      if (filePath) {
+        await fs.rm(filePath, { force: true });
+      }
+    }
     if (filePath && await fileExists(filePath)) {
       return { available: true, filePath, filename, source: "season" };
     }
@@ -867,6 +881,27 @@ class MetadataService {
       .finally(() => this.seasonPosterInFlight.delete(key));
     this.seasonPosterInFlight.set(key, task);
     return task;
+  }
+
+  async refreshSeasonPostersForShow(mediaType, show) {
+    const seasons = show && show.seasons || [];
+    const showEpisodes = seasons.flatMap((season) => season.episodes || []);
+    const results = [];
+    for (const season of seasons) {
+      const representativeEpisode = (season.episodes || [])[0];
+      if (!representativeEpisode) {
+        results.push({ season: Number(season.season), available: false, reason: "Season has no episodes." });
+        continue;
+      }
+      const result = await this.ensureSeasonPosterForMedia(mediaType, representativeEpisode, showEpisodes, { refresh: true });
+      results.push({
+        season: Number(season.season),
+        available: Boolean(result.available),
+        source: result.source || null,
+        reason: result.reason || null
+      });
+    }
+    return results;
   }
 
   async resolveShowPoster(record) {
@@ -1044,18 +1079,25 @@ class MetadataService {
 
   async searchTmdbCandidates(query) {
     const endpoint = query.kind === "tv" ? "search/tv" : "search/movie";
-    const baseParams = {
-      query: query.title,
-      include_adult: "false",
-      language: this.config.language,
-      page: "1"
-    };
-    const searches = [baseParams];
-    if (query.year) {
-      searches.push({
-        ...baseParams,
-        [query.kind === "tv" ? "first_air_date_year" : "primary_release_year"]: String(query.year)
-      });
+    const searchTitles = uniqueText([
+      query.title,
+      movieTitleWithoutSpecialSuffix(query)
+    ]);
+    const searches = [];
+    for (const title of searchTitles) {
+      const baseParams = {
+        query: title,
+        include_adult: "false",
+        language: this.config.language,
+        page: "1"
+      };
+      searches.push(baseParams);
+      if (query.year) {
+        searches.push({
+          ...baseParams,
+          [query.kind === "tv" ? "first_air_date_year" : "primary_release_year"]: String(query.year)
+        });
+      }
     }
 
     const resultsById = new Map();
@@ -1583,12 +1625,25 @@ function delay(ms) {
 
 function splitTitleYear(value) {
   const text = String(value || "").trim();
-  const match = text.match(/^(.*)\s+(?:\((\d{4})\)|\[(\d{4})\])$/);
-  const year = match ? match[2] || match[3] : null;
+  const wrappedMatch = text.match(/^(.*)\s+(?:\((\d{4})\)|\[(\d{4})\])$/);
+  if (wrappedMatch) {
+    const year = wrappedMatch[2] || wrappedMatch[3];
+    return {
+      title: wrappedMatch[1].trim(),
+      year: Number.parseInt(year, 10)
+    };
+  }
+
+  const bareMatch = text.match(/^(.*?)\s+((?:18|19|20)\d{2})$/);
+  const bareYear = bareMatch ? Number.parseInt(bareMatch[2], 10) : null;
+  const bareTitle = bareMatch ? bareMatch[1].trim() : "";
+  const plausibleBareYear = bareYear >= 1878 && bareYear <= new Date().getFullYear() + 1;
+  const titleTreatsYearAsName = /(?:\b(?:of|in)|:)$/i.test(bareTitle);
+  const useBareYear = Boolean(bareTitle && plausibleBareYear && !titleTreatsYearAsName);
 
   return {
-    title: match ? match[1].trim() : text,
-    year: year ? Number.parseInt(year, 10) : null
+    title: useBareYear ? bareTitle : text,
+    year: useBareYear ? bareYear : null
   };
 }
 
@@ -1833,6 +1888,15 @@ function cleanMovieMetadataTitle(value) {
     .replace(/\b(?:complete|full)\s+(?:movie|film)\b/giu, " ")
     .replace(/\b(?:movie|film)\s+complete\b/giu, " ");
   return cleanMetadataSearchText(cleaned) || cleanMetadataSearchText(original);
+}
+
+function movieTitleWithoutSpecialSuffix(query) {
+  if (!query || query.kind !== "movie") return null;
+  const title = String(query.title || "").trim();
+  const stripped = title.replace(/\s+special$/i, "").trim();
+  return stripped !== title && stripped.split(/\s+/).filter(Boolean).length >= 2
+    ? stripped
+    : null;
 }
 
 function createManualRecord(mediaType, mediaFile) {

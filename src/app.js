@@ -109,7 +109,12 @@ async function createApp() {
   const metadata = new MetadataService(config, metadataStore, ffmpeg, cachedImages);
   const subtitles = new SubtitleService(config);
   const openMovieIdStore = new OpenMovieIdStore(config);
-  const openMovieArtwork = new OpenMovieArtworkService(mediaIndex, metadata);
+  const openMovieArtwork = new OpenMovieArtworkService(
+    mediaIndex,
+    metadata,
+    imageProcessor,
+    config.metadata.cachePath
+  );
   const openMoviePosterAtlasStore = new OpenMoviePosterAtlasStore(config);
   const openMoviePosterAtlases = new OpenMoviePosterAtlasService(
     openMoviePosterAtlasStore,

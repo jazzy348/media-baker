@@ -6,7 +6,8 @@
         "Content-Type": "application/json",
         ...(options.headers || {})
       },
-      body: options.body
+      body: options.body,
+      signal: options.signal
     });
 
     const serverVersion = response.headers.get("X-Media-Baker-Version");

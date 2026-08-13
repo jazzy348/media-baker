@@ -141,7 +141,7 @@ class CachedImageService {
       await fs.writeFile(inputPath, buffer);
       await this.convert(inputPath, outputPath, maxDimension);
     } finally {
-      await fs.rm(inputPath, { force: true });
+      await removeTemporaryFile(inputPath);
     }
   }
 
@@ -158,14 +158,39 @@ class CachedImageService {
         await fs.rename(targetPath, outputPath);
       }
     } catch (err) {
-      await fs.rm(targetPath, { force: true });
+      await removeTemporaryFile(targetPath);
       throw err;
     } finally {
       if (input.temporary) {
-        await fs.rm(input.filePath, { force: true });
+        await removeTemporaryFile(input.filePath);
       }
     }
   }
+}
+
+async function removeTemporaryFile(filePath) {
+  const retries = 10;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await fs.rm(filePath, { force: true });
+      return true;
+    } catch (err) {
+      if (!isRetryableWindowsFileLock(err) || attempt === retries) {
+        logger.full(`[images] temporary file cleanup deferred file="${filePath}" message="${err.message}"`);
+        return false;
+      }
+      await delay(50 * (attempt + 1));
+    }
+  }
+  return false;
+}
+
+function isRetryableWindowsFileLock(err) {
+  return err && ["EBUSY", "EPERM", "EACCES"].includes(err.code);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function conversionInput(sourcePath) {

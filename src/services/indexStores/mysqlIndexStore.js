@@ -1,5 +1,6 @@
 const mysql = require("mysql2/promise");
 const logger = require("../../utils/logger");
+const { searchTokens } = require("../../utils/searchText");
 
 class MysqlIndexStore {
   constructor(config) {
@@ -1050,11 +1051,14 @@ function tokenWhere(columns, tokens) {
   if (tokens.length === 0) {
     return { sql: "1 = 0", params: [] };
   }
-  const expression = `LOWER(CONCAT_WS(' ', ${columns.join(", ")}))`;
   return {
-    sql: tokens.map(() => `${expression} LIKE ?`).join(" AND "),
-    params: tokens.map((token) => `%${token}%`)
+    sql: tokens.map(() => `(${columns.map((column) => `${apostropheInsensitiveSql(column)} LIKE ?`).join(" OR ")})`).join(" AND "),
+    params: tokens.flatMap((token) => columns.map(() => `%${token}%`))
   };
+}
+
+function apostropheInsensitiveSql(column) {
+  return `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(${column}, CHAR(39), ''), '’', ''), '‘', ''), 'ʼ', ''))`;
 }
 
 function idClause(ids, column = "id") {
@@ -1066,17 +1070,6 @@ function idClause(ids, column = "id") {
     sql: ` OR ${column} IN (${values.map(() => "?").join(", ")})`,
     params: values
   };
-}
-
-function searchTokens(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
 }
 
 function sortEpisodes(a, b) {

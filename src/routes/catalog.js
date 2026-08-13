@@ -4,6 +4,7 @@ const { getMediaPlaybackOptions } = require("../services/mediaOptions");
 const { resolveMediaFile } = require("../services/mediaResolver");
 const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { createId } = require("../utils/mediaParsers");
+const { normalizeSearchText, searchTokens } = require("../utils/searchText");
 const { establishWebStreamAuthCookie } = require("../middleware/auth");
 const logger = require("../utils/logger");
 
@@ -41,11 +42,13 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
 
   router.get("/search", async (req, res, next) => {
     try {
+      const startedAt = Date.now();
       const query = String(req.query.q || "").trim();
       const categories = categoriesForRequest(config, req);
       const metadataRefs = mediaIndex.databaseBacked && metadata && metadata.searchCachedRefs
         ? await metadata.searchCachedRefs(query, categories.map((category) => category.mediaType), 1200)
         : [];
+      if (searchRequestClosed(req, res)) return;
       const metadataIdsByType = groupMetadataIds(metadataRefs);
       const allItems = (await Promise.all(categories.map((category) => searchItemsForCategory(
         mediaIndex,
@@ -53,8 +56,14 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
         query,
         metadataIdsByType.get(category.mediaType) || []
       )))).flat();
-      const enrichedItems = await withCatalogState(allItems, metadata, progress, mediaIndex, req);
-      const results = fuzzySearch(enrichedItems, query).slice(0, 60);
+      if (searchRequestClosed(req, res)) return;
+      const enrichedItems = (await withCachedMetadata(allItems, metadata, authContext(req))).filter(Boolean);
+      if (searchRequestClosed(req, res)) return;
+      const rankedItems = fuzzySearch(enrichedItems, query).slice(0, 60);
+      const results = await withPlaybackProgress(rankedItems, progress, mediaIndex, req);
+      if (searchRequestClosed(req, res)) return;
+
+      logger.full(`[search] query="${query}" libraries=${categories.length} metadataRefs=${metadataRefs.length} candidates=${allItems.length} results=${results.length} durationMs=${Date.now() - startedAt}`);
 
       res.json({
         query,
@@ -382,7 +391,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
     try {
       assertMediaAccess(req, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
-      const show = Number(mediaFile.season) === 0 && mediaFile.showId
+      const show = mediaFile.showId
         ? await mediaIndex.getShow(mediaFile.showId, req.params.mediaType)
         : null;
       const showEpisodes = show
@@ -394,12 +403,33 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
         return;
       }
 
-      res.set("Cache-Control", "private, max-age=86400");
+      res.set("Cache-Control", "private, no-cache, must-revalidate");
       res.type(contentTypeForImage(result.filePath));
       res.sendFile(result.filePath, (err) => {
         if (err && !isClientAbort(err)) {
           next(httpError(err.statusCode || 404, "Season poster not found"));
         }
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/:mediaType/shows/:showId/metadata/season-posters/refresh", async (req, res, next) => {
+    try {
+      requireMetadataManagement(req);
+      assertMediaAccess(req, req.params.mediaType);
+      const show = await mediaIndex.getShow(req.params.showId, req.params.mediaType);
+      if (!show) {
+        next(httpError(404, "Show not found"));
+        return;
+      }
+      const seasons = await metadata.refreshSeasonPostersForShow(req.params.mediaType, show);
+      res.json({
+        ok: true,
+        showId: show.id,
+        refreshedAt: new Date().toISOString(),
+        seasons
       });
     } catch (err) {
       next(err);
@@ -663,7 +693,10 @@ async function itemsForCategory(mediaIndex, category, indexedCollection = null) 
     filePath: episode.filePath,
     localThumbnail: Boolean(category.localThumbnails),
     addedAtMs: episode.addedAtMs || episode.mtimeMs || 0,
-    searchText: episodeNumberSearchText(episode),
+    searchText: uniqueText([
+      episode.showName,
+      episodeNumberSearchText(episode)
+    ]).join(" "),
     fallbackSearchText: ""
   }));
 
@@ -779,7 +812,10 @@ async function libraryItemsForCategory(mediaIndex, category, indexedCollection =
       showId: show.id,
       showName: show.name,
       metadataId: show.metadataId || (firstEpisode ? firstEpisode.id : null),
-      metadataIds: show.metadataId ? [show.metadataId] : episodes.map((episode) => episode.id),
+      metadataIds: uniqueText([
+        show.metadataId,
+        ...episodes.map((episode) => episode.id)
+      ]),
       addedAtMs: show.addedAtMs || addedAtMs,
       localThumbnail: Boolean(category.localThumbnails),
       searchText: "",
@@ -1085,10 +1121,6 @@ function tokenWordScore(words, token) {
   return 0;
 }
 
-function searchTokens(value) {
-  return normalizeSearchText(value).split(" ").filter(Boolean);
-}
-
 function groupMetadataIds(refs) {
   const grouped = new Map();
   for (const ref of refs || []) {
@@ -1099,13 +1131,8 @@ function groupMetadataIds(refs) {
   return grouped;
 }
 
-function normalizeSearchText(value) {
-  return String(value || "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
+function searchRequestClosed(req, res) {
+  return Boolean(req.aborted || res.destroyed);
 }
 
 function pad(value) {
@@ -1131,6 +1158,25 @@ async function withCachedMetadata(items, metadata, authContextValue) {
     id
   })));
   const cachedByKey = await metadata.getCachedForMediaItems(refs);
+  const showPosterRecords = new Map();
+  for (const item of metadataItems) {
+    if (!item.showId) {
+      continue;
+    }
+    const showKey = `${item.mediaType}:${item.showId}`;
+    if (showPosterRecords.has(showKey)) {
+      continue;
+    }
+    const record = uniqueText([
+      item.showId,
+      ...metadataIdsForItem(item)
+    ])
+      .map((id) => cachedByKey.get(`${item.mediaType}:${id}`))
+      .find((entry) => entry && entry.available && entry.posterFilename);
+    if (record) {
+      showPosterRecords.set(showKey, record);
+    }
+  }
   const auth = typeof authContextValue === "object"
     ? authContextValue
     : { token: authContextValue, paramName: "authToken" };
@@ -1158,21 +1204,28 @@ async function withCachedMetadata(items, metadata, authContextValue) {
       return null;
     }
     const metadataLookupEnabled = Boolean(metadata.config && metadata.config.enabled);
-    const seriesRecord = item.showId
-      ? cachedByKey.get(`${item.mediaType}:${item.showId}`)
-      : null;
+    const showKey = item.showId ? `${item.mediaType}:${item.showId}` : null;
+    const directSeriesRecord = showKey ? cachedByKey.get(showKey) : null;
+    const seriesRecord = directSeriesRecord && directSeriesRecord.available && directSeriesRecord.posterFilename
+      ? directSeriesRecord
+      : (showKey && showPosterRecords.get(showKey)) || null;
+    const seriesSearchRecord = directSeriesRecord && directSeriesRecord.available
+      ? directSeriesRecord
+      : seriesRecord;
     const seriesPosterUrl = seriesRecord && seriesRecord.available && seriesRecord.posterFilename
       ? metadata.posterUrl(seriesRecord.posterFilename, auth.token, auth.paramName)
       : null;
     const thumbnailUrl = episodeItem && metadataLookupEnabled
       ? metadata.thumbnailUrl(item.mediaType, item.id, auth.token, auth.paramName)
       : item.thumbnailUrl;
-    const seasonPosterUrl = seriesPosterUrl || (episodeItem && metadataLookupEnabled
+    const seasonPosterUrl = episodeItem && Number(item.season) !== 0 && metadataLookupEnabled
       ? metadata.seasonPosterUrl(item.mediaType, item.id, auth.token, auth.paramName)
-      : null);
-    const cached = metadataIdsForItem(item)
+      : seriesPosterUrl;
+    const cachedRecords = metadataIdsForItem(item)
       .map((id) => cachedByKey.get(`${item.mediaType}:${id}`))
-      .find((record) => record && record.available);
+      .filter((record) => record && record.available);
+    const cached = cachedRecords[0];
+    const posterRecord = cachedRecords.find((record) => record.posterFilename);
     if (!cached || !cached.available) {
       return {
         ...item,
@@ -1188,10 +1241,16 @@ async function withCachedMetadata(items, metadata, authContextValue) {
       title,
       metadataTitle: item.itemType === "artist" ? item.title : cached.title || null,
       metadataAliases: item.itemType === "artist" ? [] : cached.aliases || [],
-      posterUrl: seriesPosterUrl || (cached.posterFilename ? metadata.posterUrl(cached.posterFilename, auth.token, auth.paramName) : item.posterUrl),
+      posterUrl: seriesPosterUrl || (posterRecord ? metadata.posterUrl(posterRecord.posterFilename, auth.token, auth.paramName) : item.posterUrl),
       thumbnailUrl,
       seasonPosterUrl,
       searchText: uniqueText([
+        ...(episodeItem ? [
+          seriesSearchRecord && seriesSearchRecord.title,
+          ...(seriesSearchRecord && seriesSearchRecord.aliases || []),
+          cached.title,
+          ...(cached.aliases || [])
+        ] : []),
         item.searchText
       ]).join(" ")
     };
