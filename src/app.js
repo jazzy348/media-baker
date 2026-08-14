@@ -31,13 +31,14 @@ const { UpdateService } = require("./services/updateService");
 const { BackupService } = require("./services/backupService");
 const { OptimiserService } = require("./services/optimiserService");
 const { SkipMarkerStore } = require("./services/skipMarkerStore");
-const { SkipDetectionService } = require("./services/skipDetectionService");
+const { SkipDetectionWorkerClient } = require("./services/skipDetectionWorkerClient");
 const { OpenMovieIdStore } = require("./services/openMovieIdStore");
 const { OpenMovieService } = require("./services/openMovieService");
+const { OpenMovieCapabilityService } = require("./services/openMovieCapabilityService");
 const { OpenMoviePosterAtlasStore } = require("./services/openMoviePosterAtlasStore");
 const { OpenMoviePosterAtlasService } = require("./services/openMoviePosterAtlasService");
 const { OpenMovieArtworkService } = require("./services/openMovieArtworkService");
-const { createApiKeyAuthMiddleware, createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
+const { createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
 const createHealthRoutes = require("./routes/health");
@@ -49,6 +50,7 @@ const createYtDlpRoutes = require("./routes/ytdlp");
 const createYtDlpRelayPlaybackRoutes = require("./routes/ytdlpRelayPlayback");
 const createIptvRoutes = require("./routes/iptv");
 const createFallbackRoutes = require("./routes/fallback");
+const { createFallbackSegmentRoutes } = createFallbackRoutes;
 const createDocsRoutes = require("./routes/docs");
 const createAppInfoRoutes = require("./routes/appInfo");
 const createOpenMovieRoutes = require("./routes/openMovie");
@@ -124,10 +126,16 @@ async function createApp() {
   );
   await openMoviePosterAtlases.init();
   const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata, ffmpeg, subtitles, openMoviePosterAtlases);
-  mediaIndex.addUpdateListener((libraryKey) => openMovie.sync(libraryKey));
+  const openMovieCapabilities = new OpenMovieCapabilityService(appSettings.openMovieEncryptionKey());
+  mediaIndex.addUpdateListener((libraryKey, details = {}) => {
+    hls.queueKeyframeIndex(details.changedMedia);
+    mediaIndex.consumeChangedVideoMedia();
+    return openMovie.sync(libraryKey);
+  });
+  hls.queueKeyframeIndex(mediaIndex.consumeChangedVideoMedia());
   await openMovie.init();
   const skipMarkerStore = new SkipMarkerStore(config);
-  const skipDetection = new SkipDetectionService(config, mediaIndex, ffmpeg, skipMarkerStore);
+  const skipDetection = new SkipDetectionWorkerClient(config, skipMarkerStore);
   const indexScanScheduler = new IndexScanScheduler(config, mediaIndex, metadata, skipDetection);
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
@@ -159,6 +167,7 @@ async function createApp() {
     openMoviePosterAtlasStore,
     openMoviePosterAtlases,
     openMovie,
+    openMovieCapabilities,
     progressStore,
     progress,
     subtitles,
@@ -213,11 +222,7 @@ async function createApp() {
     createStreamAuthMiddleware(playbackTokens),
     createStreamRoutes(app.locals.services, { surface: "web" })
   );
-  app.use(
-    "/api/openmovie",
-    createApiKeyAuthMiddleware(accountService),
-    createOpenMovieRoutes(app.locals.services)
-  );
+  app.use("/api/openmovie", createOpenMovieRoutes(app.locals.services));
   app.use(createAuthMiddleware(accountService, libraryService));
 
   app.use("/api/admin", createAdminRoutes(app.locals.services));
@@ -227,6 +232,7 @@ async function createApp() {
   app.use("/api/libraries", createLibraryRoutes(app.locals.services));
   app.use("/api/ytdlp", createYtDlpRoutes(app.locals.services));
   app.use("/api/iptv", createIptvRoutes(app.locals.services));
+  app.use(createFallbackSegmentRoutes(app.locals.services));
   app.use("/api/fallback", createFallbackRoutes(app.locals.services));
 
   app.use(async (req, res, next) => {

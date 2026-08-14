@@ -14,6 +14,7 @@ class MediaIndex {
     this.libraryReindexPending = new Set();
     this.fileStatsRefreshNeeded = false;
     this.updateListeners = new Set();
+    this.pendingChangedVideoMedia = [];
   }
 
   emptyIndex() {
@@ -106,16 +107,20 @@ class MediaIndex {
 
   async buildIndex() {
     const nextIndex = this.emptyIndex();
+    const changedMedia = [];
     nextIndex.generatedAt = new Date().toISOString();
     for (const library of this.config.libraries) {
       const previousCollection = await this.previousCollection(library);
-      nextIndex[library.key] = await this.scanLibrary(library, previousCollection);
+      const collection = await this.scanLibrary(library, previousCollection);
+      nextIndex[library.key] = collection;
+      changedMedia.push(...changedVideoMedia(collection, previousCollection, library));
     }
 
     await this.indexStore.save(nextIndex);
     this.index = this.databaseBacked ? indexMeta(nextIndex) : nextIndex;
     this.fileStatsRefreshNeeded = false;
-    await this.notifyUpdated(null);
+    this.pendingChangedVideoMedia = changedMedia;
+    await this.notifyUpdated(null, { changedMedia });
     return this.index;
   }
 
@@ -150,6 +155,7 @@ class MediaIndex {
 
     const previousCollection = await this.previousCollection(library);
     const collection = await this.scanLibrary(library, previousCollection);
+    const changedMedia = changedVideoMedia(collection, previousCollection, library);
     this.index.libraries = this.emptyIndex().libraries;
     this.index.generatedAt = new Date().toISOString();
     if (this.databaseBacked) {
@@ -158,7 +164,8 @@ class MediaIndex {
       this.index[library.key] = collection;
       await this.indexStore.save(this.index);
     }
-    await this.notifyUpdated(library.key);
+    this.pendingChangedVideoMedia = changedMedia;
+    await this.notifyUpdated(library.key, { changedMedia });
     return this.index;
   }
 
@@ -168,8 +175,14 @@ class MediaIndex {
     return () => this.updateListeners.delete(listener);
   }
 
-  async notifyUpdated(libraryKey) {
-    await Promise.all([...this.updateListeners].map((listener) => listener(libraryKey)));
+  async notifyUpdated(libraryKey, details = {}) {
+    await Promise.all([...this.updateListeners].map((listener) => listener(libraryKey, details)));
+  }
+
+  consumeChangedVideoMedia() {
+    const changedMedia = this.pendingChangedVideoMedia;
+    this.pendingChangedVideoMedia = [];
+    return changedMedia;
   }
 
   async listShows(collection = "tv", loadedCollection = null) {
@@ -999,6 +1012,31 @@ function collectionMediaItems(collection, type) {
     return Object.values(collection.tracksById || {});
   }
   return collection.items || [];
+}
+
+function changedVideoMedia(collection, previousCollection, library) {
+  if (!library || library.type === "music" || library.type === "images") {
+    return [];
+  }
+
+  const previousByPath = new Map(collectionMediaItems(previousCollection || {}, library.type)
+    .map((item) => [normalizedFilePath(item.filePath), item]));
+
+  return collectionMediaItems(collection, library.type)
+    .filter((item) => isVideoFile(item.filePath))
+    .filter((item) => {
+      const previous = previousByPath.get(normalizedFilePath(item.filePath));
+      return !previous
+        || Number(previous.sizeBytes) !== Number(item.sizeBytes)
+        || Number(previous.mtimeMs) !== Number(item.mtimeMs);
+    })
+    .map((item) => ({
+      id: item.id,
+      mediaType: library.key,
+      filePath: item.filePath,
+      sizeBytes: item.sizeBytes,
+      mtimeMs: item.mtimeMs
+    }));
 }
 
 function groupByFingerprint(items) {

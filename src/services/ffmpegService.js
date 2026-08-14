@@ -76,15 +76,17 @@ class FFmpegService {
 
   async probe(filePath, options = {}) {
     logger.full(`[ffprobe] probing file="${filePath}"`);
-    const analyzeduration = options.analyzeduration || "100M";
-    const probesize = options.probesize || "100M";
+    const analyzeduration = Object.prototype.hasOwnProperty.call(options, "analyzeduration")
+      ? options.analyzeduration
+      : options.useDefaultProbeLimits ? null : "100M";
+    const probesize = Object.prototype.hasOwnProperty.call(options, "probesize")
+      ? options.probesize
+      : options.useDefaultProbeLimits ? null : "100M";
     const args = [
       "-v",
       "error",
-      "-analyzeduration",
-      String(analyzeduration),
-      "-probesize",
-      String(probesize),
+      ...(analyzeduration == null ? [] : ["-analyzeduration", String(analyzeduration)]),
+      ...(probesize == null ? [] : ["-probesize", String(probesize)]),
       "-print_format",
       "json",
       "-show_format",
@@ -93,10 +95,84 @@ class FFmpegService {
       filePath
     ];
 
-    const stdout = await this.exec(this.ffprobePath, args);
+    const stdout = await this.exec(this.ffprobePath, args, { timeoutMs: options.timeoutMs });
     const result = JSON.parse(stdout);
     logger.full(`[ffprobe] found ${result.streams ? result.streams.length : 0} streams for file="${filePath}"`);
     return result;
+  }
+
+  async probeVideoKeyframes(filePath, streamIndex, options = {}) {
+    const inactivityTimeoutMs = Math.max(5000, Number(options.inactivityTimeoutMs) || 30000);
+    const args = [
+      "-v", "error",
+      "-select_streams", String(streamIndex),
+      "-show_packets",
+      "-show_entries", "packet=pts_time,dts_time,flags",
+      "-of", "csv=p=0",
+      filePath
+    ];
+    logger.full(`[ffprobe] indexing video keyframes file="${filePath}" stream=${streamIndex}`);
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.ffprobePath, args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const keyframes = [];
+      const errors = [];
+      let buffered = "";
+      let inactive = false;
+      let settled = false;
+      let inactivityTimer = null;
+      const resetInactivityTimer = () => {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+          inactive = true;
+          child.kill();
+        }, inactivityTimeoutMs);
+        inactivityTimer.unref?.();
+      };
+      const consumeLines = (text, flush = false) => {
+        buffered += text;
+        const lines = buffered.split(/\r?\n/);
+        buffered = flush ? "" : lines.pop() || "";
+        if (flush && buffered) lines.push(buffered);
+        lines.forEach((line) => addKeyframeCsvLine(keyframes, line));
+      };
+
+      resetInactivityTimer();
+      child.stdout.on("data", (chunk) => {
+        resetInactivityTimer();
+        consumeLines(chunk.toString());
+      });
+      child.stderr.on("data", (chunk) => {
+        resetInactivityTimer();
+        errors.push(chunk.toString());
+        if (errors.length > 8) errors.shift();
+      });
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(inactivityTimer);
+        reject(error);
+      });
+      child.once("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(inactivityTimer);
+        consumeLines("\n", true);
+        if (inactive) {
+          reject(new Error(`FFprobe produced no output for ${Math.round(inactivityTimeoutMs / 1000)} seconds while indexing video keyframes`));
+          return;
+        }
+        if (code !== 0) {
+          reject(new Error(`FFprobe keyframe scan exited with code ${code}: ${errors.join("").trim()}`));
+          return;
+        }
+        logger.full(`[ffprobe] indexed video keyframes file="${filePath}" stream=${streamIndex} keyframes=${keyframes.length}`);
+        resolve(keyframes);
+      });
+    });
   }
 
   async probePacketTimeline(filePath, streamSpecifier, expectedDurationSeconds, options = {}) {
@@ -621,6 +697,21 @@ function createPacketTimelineAccumulator() {
     packetDurationSeconds: 0,
     packetCount: 0
   };
+}
+
+function addKeyframeCsvLine(keyframes, line) {
+  const fields = String(line || "").trim().split(",");
+  if (fields.length < 2 || !fields.some((field) => field.includes("K"))) {
+    return;
+  }
+  const timestamp = finiteNumber(fields[0], fields[1]);
+  if (!Number.isFinite(timestamp)) {
+    return;
+  }
+  const previous = keyframes[keyframes.length - 1];
+  if (!Number.isFinite(previous) || Math.abs(timestamp - previous) > 0.000001) {
+    keyframes.push(timestamp);
+  }
 }
 
 function addCompactPacketLine(accumulator, line) {

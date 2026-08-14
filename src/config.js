@@ -85,6 +85,10 @@ module.exports = {
   skipDetection: {
     enabled: Boolean(fileConfig.skipDetection && fileConfig.skipDetection.enabled)
   },
+  openMovie: {
+    enabled: Boolean(fileConfig.openMovie && fileConfig.openMovie.enabled),
+    encryptionSecret: ""
+  },
   mysql: mysqlConfig,
   metadata: {
     enabled: fileConfig.metadata && typeof fileConfig.metadata.enabled === "boolean" ? fileConfig.metadata.enabled : false,

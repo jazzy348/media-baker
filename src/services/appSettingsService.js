@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
@@ -39,6 +40,10 @@ const DEFAULT_RUNTIME_SETTINGS = {
   },
   skipDetection: {
     enabled: false
+  },
+  openMovie: {
+    enabled: false,
+    encryptionSecret: ""
   },
   metadata: {
     enabled: false,
@@ -116,6 +121,7 @@ class AppSettingsService {
     this.config = config;
     this.pool = null;
     this.initialized = false;
+    this.runtimeSettings = null;
   }
 
   async init() {
@@ -153,13 +159,27 @@ class AppSettingsService {
     return normalizeRuntimeSettings(stored ? deepMerge(base, stored) : base);
   }
 
+  async getPublic() {
+    const settings = await this.get();
+    return {
+      ...settings,
+      openMovie: {
+        ...settings.openMovie,
+        encryptionSecret: undefined,
+        encryptionReady: Boolean(settings.openMovie.encryptionSecret)
+      }
+    };
+  }
+
   async save(input) {
     await this.init();
     const current = await this.read();
     const base = current ? deepMerge(runtimeSettingsFromConfig(this.config), current) : runtimeSettingsFromConfig(this.config);
     const settings = normalizeRuntimeSettings(deepMerge(base, input || {}));
+    settings.openMovie.encryptionSecret = ensureOpenMovieEncryptionSecret(base.openMovie && base.openMovie.encryptionSecret);
     await this.write(settings);
     applyRuntimeSettings(this.config, settings);
+    this.runtimeSettings = settings;
     return settings;
   }
 
@@ -168,11 +188,29 @@ class AppSettingsService {
     const stored = await this.read();
     const base = runtimeSettingsFromConfig(this.config);
     const settings = normalizeRuntimeSettings(stored ? deepMerge(base, stored) : base);
-    if (!stored) {
+    const generatedOpenMovieSecret = !settings.openMovie.encryptionSecret;
+    settings.openMovie.encryptionSecret = ensureOpenMovieEncryptionSecret(settings.openMovie.encryptionSecret);
+    if (!stored || generatedOpenMovieSecret) {
       await this.write(settings);
     }
     applyRuntimeSettings(this.config, settings);
+    this.runtimeSettings = settings;
     return settings;
+  }
+
+  isOpenMovieEnabled() {
+    return Boolean(this.runtimeSettings && this.runtimeSettings.openMovie && this.runtimeSettings.openMovie.enabled);
+  }
+
+  openMovieEncryptionKey() {
+    const encoded = this.runtimeSettings
+      && this.runtimeSettings.openMovie
+      && this.runtimeSettings.openMovie.encryptionSecret;
+    const key = encoded ? Buffer.from(encoded, "base64url") : Buffer.alloc(0);
+    if (key.length !== 32) {
+      throw new Error("OpenMovie encryption secret is unavailable");
+    }
+    return key;
   }
 
   async write(settings) {
@@ -243,6 +281,10 @@ function runtimeSettingsFromConfig(config) {
     },
     skipDetection: {
       enabled: config.skipDetection && config.skipDetection.enabled
+    },
+    openMovie: {
+      enabled: config.openMovie && config.openMovie.enabled,
+      encryptionSecret: config.openMovie && config.openMovie.encryptionSecret
     },
     metadata: {
       enabled: config.metadata && config.metadata.enabled,
@@ -327,6 +369,7 @@ function applyRuntimeSettings(config, settings) {
   config.backup.directory = path.resolve(config.backup.directory);
   config.optimizer = normalized.optimizer;
   config.skipDetection = normalized.skipDetection;
+  config.openMovie = normalized.openMovie;
   Object.assign(config.metadata, normalized.metadata);
   const ytdlpBinaryPath = config.ytdlp && config.ytdlp.binaryPath;
   Object.assign(config.ytdlp, normalized.ytdlp);
@@ -388,6 +431,10 @@ function normalizeRuntimeSettings(input = {}) {
     },
     skipDetection: {
       enabled: boolValue(merged.skipDetection.enabled, DEFAULT_RUNTIME_SETTINGS.skipDetection.enabled)
+    },
+    openMovie: {
+      enabled: boolValue(merged.openMovie.enabled, DEFAULT_RUNTIME_SETTINGS.openMovie.enabled),
+      encryptionSecret: encryptionSecretValue(merged.openMovie.encryptionSecret)
     },
     metadata: {
       enabled: boolValue(merged.metadata.enabled, DEFAULT_RUNTIME_SETTINGS.metadata.enabled),
@@ -471,6 +518,20 @@ function deepMerge(base, override) {
     }
   });
   return output;
+}
+
+function encryptionSecretValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return Buffer.from(text, "base64url").length === 32 ? text : "";
+  } catch (err) {
+    return "";
+  }
+}
+
+function ensureOpenMovieEncryptionSecret(value) {
+  return encryptionSecretValue(value) || crypto.randomBytes(32).toString("base64url");
 }
 
 function normalizeLogLevel(value) {

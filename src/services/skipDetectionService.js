@@ -14,11 +14,12 @@ const MAX_AUDIO_STREAMS = 2;
 const SPECTRAL_FREQUENCIES = [90, 160, 280, 480, 800, 1250, 1900, 2900];
 
 class SkipDetectionService {
-  constructor(config, mediaIndex, ffmpeg, store) {
+  constructor(config, mediaIndex, ffmpeg, store, options = {}) {
     this.config = config;
     this.mediaIndex = mediaIndex;
     this.ffmpeg = ffmpeg;
     this.store = store;
+    this.prepareRun = typeof options.prepareRun === "function" ? options.prepareRun : null;
     this.running = false;
     this.queued = false;
     this.cancelled = false;
@@ -233,6 +234,14 @@ class SkipDetectionService {
     logger.info(`[skip-detection] analysis started reason=${reason} algorithm=${ALGORITHM_VERSION}`);
 
     try {
+      if (this.prepareRun) {
+        await this.prepareRun();
+      }
+      if (!this.enabled()) {
+        this.status.enabled = false;
+        this.status.phase = "disabled";
+        return;
+      }
       const seasons = await this.buildWorkList();
       this.status.totals.seasons = seasons.length;
       this.status.totals.episodes = seasons.reduce((total, entry) => total + entry.episodes.length, 0);
@@ -1336,4 +1345,4 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-module.exports = { SkipDetectionService };
+module.exports = { SkipDetectionService, episodeMarkerId };

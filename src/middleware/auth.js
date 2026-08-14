@@ -90,8 +90,12 @@ function createApiKeyAuthMiddleware(accountService) {
     const apiKey = extractApiKey(req);
     if (!apiKey || !accountService) return next(unauthorizedError());
     try {
-      const user = await accountService.verifyApiKey(apiKey);
+      const principal = typeof accountService.verifyApiKeyPrincipal === "function"
+        ? await accountService.verifyApiKeyPrincipal(apiKey)
+        : null;
+      const user = principal && principal.user;
       if (!user) return next(unauthorizedError());
+      req.apiKeyId = principal.apiKeyId;
       req.authMode = user.permissions.isAdmin ? "admin" : "user";
       req.user = user;
       req.progressUserId = user.id;

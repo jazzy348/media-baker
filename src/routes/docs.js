@@ -80,13 +80,12 @@ function openApiSpec() {
           settings: { type: "object", additionalProperties: true }
         }),
         OpenMoviePosterAtlas: objectSchema({
-          id: { type: "integer", format: "int64", minimum: 1 },
+          url: { type: "string" },
           slot: { type: "integer", minimum: 0, maximum: 11 },
           page: { type: "integer", minimum: 0 },
           layout: { type: "integer", minimum: 1, example: 1 }
-        }, ["id", "slot", "page", "layout"]),
+        }, ["url", "slot", "page", "layout"]),
         OpenMovieMovie: objectSchema({
-          id: { type: "integer", format: "int32", minimum: 1 },
           library: { type: "string" },
           libraryTitle: { type: "string" },
           title: { type: "string" },
@@ -102,7 +101,6 @@ function openApiSpec() {
           playbackVariants: { type: "array", items: { $ref: "#/components/schemas/OpenMoviePlaybackVariant" } }
         }, ["posterAtlas"]),
         OpenMovieEpisode: objectSchema({
-          id: { type: "integer", format: "int32", minimum: 1 },
           season: { type: "integer", nullable: true },
           episode: { type: "integer", nullable: true },
           title: { type: "string" },
@@ -127,7 +125,6 @@ function openApiSpec() {
           episodes: { type: "array", items: { $ref: "#/components/schemas/OpenMovieEpisode" } }
         }, ["posterAtlas"]),
         OpenMoviePlaybackVariant: objectSchema({
-          id: { type: "integer", format: "int32", minimum: 1 },
           audio: objectSchema({
             language: { type: "string" },
             label: { type: "string" },
@@ -156,7 +153,6 @@ function openApiSpec() {
           watchedAt: { type: "string", format: "date-time", nullable: true }
         }, ["status", "positionSeconds", "durationSeconds", "percent", "resumeSeconds", "updatedAt", "watchedAt"]),
         OpenMovieOnDeckItem: objectSchema({
-          id: { type: "integer", format: "int32", minimum: 1 },
           library: { type: "string", example: "anime-movies" },
           title: { type: "string" },
           showTitle: { type: "string", nullable: true, description: "Present for TV episodes." },
@@ -169,7 +165,27 @@ function openApiSpec() {
           posterAtlas: { $ref: "#/components/schemas/OpenMoviePosterAtlas" },
           progress: { $ref: "#/components/schemas/OpenMovieProgress" },
           onDeckReason: { type: "string", enum: ["resume", "next"] }
-        }, ["id", "library", "title", "year", "overview", "playbackUrl", "playbackVariants", "posterAtlas", "progress", "onDeckReason"]),
+        }, ["library", "title", "year", "overview", "playbackUrl", "playbackVariants", "posterAtlas", "progress", "onDeckReason"]),
+        OpenMovieBootstrap: objectSchema({
+          moviesUrl: { type: "string" },
+          tvUrl: { type: "string" },
+          onDeckUrl: { type: "string" }
+        }, ["moviesUrl", "tvUrl", "onDeckUrl"]),
+        OpenMovieFutureUrlSequence: objectSchema({
+          startId: { type: "integer", minimum: 1 },
+          endId: { type: "integer", minimum: 1 },
+          urls: {
+            type: "array",
+            description: "Ordered by incremental ID. The ID for an entry is startId plus its zero-based array index.",
+            items: { type: "object", additionalProperties: { type: "string" } }
+          }
+        }, ["startId", "endId", "urls"]),
+        OpenMovieFutureUrls: objectSchema({
+          count: { type: "integer", minimum: 1, maximum: 5000 },
+          movies: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
+          episodes: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
+          variants: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" }
+        }, ["count", "movies", "episodes", "variants"]),
         OpenMovieShow: objectSchema({
           library: { type: "string" },
           libraryTitle: { type: "string" },
@@ -713,83 +729,47 @@ function openApiSpec() {
           parameters: [pathParam("cacheKey"), pathParam("filename"), queryParam("playbackToken")]
         })
       },
-      "/api/openmovie/movies": {
-        get: operation("OpenMovie", "List all accessible movies", "Returns movies from every movie-capable library available to the API-key owner. Movie IDs are durable, incremental integers in a namespace separate from episode IDs. OpenMovie also accepts the API key as the apiKey query parameter for fixed player URLs.", true, {
-          security: openMovieSecurity(),
-          parameters: [openMovieOffsetParam("movie")],
-          responses: openMovieListResponse("OpenMovieMovie")
-        })
-      },
-      "/api/openmovie/tv": {
-        get: operation("OpenMovie", "List all accessible TV shows", "Returns TV shows without a show ID. Episodes retain their durable integer IDs and are grouped into season objects with season metadata and artwork URLs. OpenMovie also accepts the API key as the apiKey query parameter for fixed player URLs.", true, {
-          security: openMovieSecurity(),
-          parameters: [openMovieOffsetParam("episode")],
-          responses: openMovieListResponse("OpenMovieShow")
-        })
-      },
-      "/api/openmovie/on-deck": {
-        get: operation("OpenMovie", "List OpenMovie On Deck items", "Applies the same in-progress TTL, next-episode, removal, progress-tracking, user, and library-access rules as the standard On Deck endpoint. Movie and episode source IDs are projected to durable OpenMovie IDs and playback variants. TV entries also include show, season, and episode context.", true, {
+      "/api/openmovie/auth": {
+        get: operation("OpenMovie", "Create OpenMovie capability URLs", "This is the only OpenMovie endpoint that accepts an API key. It returns opaque, deployment-specific capability URLs for movies, TV, and On Deck. The API key is not embedded in those URLs.", true, {
           security: openMovieSecurity(),
           responses: {
             200: {
-              description: "Current user's OpenMovie On Deck items",
-              content: {
-                "application/json": {
-                  schema: objectSchema({
-                    items: { type: "array", items: { $ref: "#/components/schemas/OpenMovieOnDeckItem" } }
-                  }, ["items"])
-                }
-              }
+              description: "OpenMovie capability roots",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/OpenMovieBootstrap" } } }
             },
             401: errorResponse(),
-            500: errorResponse()
+            404: errorResponse()
           }
         })
       },
-      "/api/openmovie/poster-atlases/{atlasId}": {
-        get: operation("OpenMovie", "Generate or serve a poster atlas", "Returns a 1200x1350 WebP containing twelve poster slots. Atlas IDs and slot assignments are permanent, while rendered images are generated on demand and temporarily cached for the configured HLS cache TTL. Library access is enforced against the API-key owner.", true, {
+      "/api/openmovie/auth/future-urls": {
+        get: operation("OpenMovie", "Generate future OpenMovie capability URLs", "Uses the current next movie, episode, and playback-variant IDs to generate ordered capability URL batches without reserving IDs or writing registry data. Each entry maps to startId plus its zero-based array index and returns 404 until that ID is assigned. This bootstrap endpoint accepts an API key; the generated capability URLs do not.", true, {
           security: openMovieSecurity(),
-          parameters: [pathParam("atlasId", "integer")],
+          parameters: [{
+            name: "count",
+            in: "query",
+            required: true,
+            schema: { type: "integer", minimum: 1, maximum: 5000 },
+            description: "Number of future URLs to generate for each independent ID sequence."
+          }],
           responses: {
             200: {
-              description: "On-demand 4x3 poster atlas",
-              headers: {
-                "Cache-Control": { schema: { type: "string", example: "private, max-age=86400" } },
-                ETag: { schema: { type: "string", example: "\"atlas-18421-1786291200000\"" } }
-              },
-              content: { "image/webp": { schema: { type: "string", format: "binary" } } }
+              description: "Future movie, episode, and playback-variant capability URL sequences",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/OpenMovieFutureUrls" } } }
             },
             400: errorResponse(),
             401: errorResponse(),
-            403: errorResponse(),
-            404: errorResponse(),
-            500: errorResponse()
+            404: errorResponse()
           }
         })
       },
-      "/api/openmovie/movies/{id}/poster": {
-        get: openMoviePosterOperation("movie")
-      },
-      "/api/openmovie/episodes/{id}/poster": {
-        get: openMoviePosterOperation("episode")
-      },
-      "/api/openmovie/episodes/{id}/season-poster": {
-        get: openMoviePosterOperation("season")
-      },
-      "/api/openmovie/movies/{id}/play": {
-        get: openMoviePlaybackOperation("movie")
-      },
-      "/api/openmovie/episodes/{id}/play": {
-        get: openMoviePlaybackOperation("episode")
-      },
-      "/api/openmovie/play/{variantId}": {
-        get: operation("OpenMovie", "Play a fixed audio/subtitle variant", "Requires an API key and Copy stream URLs permission. The permanent incremental variant ID resolves a complete media, audio-track, and subtitle-track selection before redirecting to short-lived HLS. For a fixed VRChat URL, append ?apiKey=YOUR_KEY.", true, {
-          security: openMovieSecurity(),
-          parameters: [pathParam("variantId", "integer")],
+      "/api/openmovie/access/{token}": {
+        get: operation("OpenMovie", "Use an OpenMovie capability", "Executes the single operation encoded by an AES-256-GCM capability. Responses contain further opaque URLs for pagination, artwork, poster atlases, playback variants, and HLS playback. API keys are rejected on this endpoint; current account and library permissions are checked on every request.", false, {
+          parameters: [pathParam("token")],
           responses: {
-            307: { description: "Redirect to the signed HLS master playlist" },
-            401: errorResponse(),
-            403: errorResponse(),
+            200: {
+              description: "Capability-specific JSON, artwork, atlas image, or HLS redirect"
+            },
             404: errorResponse(),
             500: errorResponse()
           }
@@ -797,83 +777,10 @@ function openApiSpec() {
       }
     }
   };
-}
-
-function openMovieListResponse(schemaName) {
-  return {
-    200: {
-      description: "OK",
-      content: {
-        "application/json": {
-          schema: { type: "array", items: { $ref: `#/components/schemas/${schemaName}` } }
-        }
-      }
-    },
-    401: errorResponse(),
-    500: errorResponse()
-  };
-}
-
-function openMoviePosterOperation(kind) {
-  return operation("OpenMovie", `Serve ${kind} artwork`, "Requires an API key and enforces the key owner's library access. Episode artwork prefers its thumbnail and falls back to season/show artwork. Optional width and height bounds resize the response in memory while preserving aspect ratio; cached artwork is not modified.", true, {
-    security: openMovieSecurity(),
-    parameters: [pathParam("id", "integer"), imageDimensionParam("width"), imageDimensionParam("height")],
-    responses: {
-      200: {
-        description: "Poster or fallback artwork",
-        content: { "image/*": { schema: { type: "string", format: "binary" } } }
-      },
-      401: errorResponse(),
-      404: errorResponse(),
-      500: errorResponse()
-    }
-  });
-}
-
-function openMoviePlaybackOperation(kind) {
-  return operation("OpenMovie", `Play ${kind} as HLS`, "Requires an API key and Copy stream URLs permission. Returns a temporary redirect to a short-lived, media-scoped HLS URL without propagating the API key.", true, {
-    security: openMovieSecurity(),
-    parameters: [
-      pathParam("id", "integer"),
-      queryParam("audio"),
-      queryParam("subtitle"),
-      queryParam("audioChannels", "string", ["preserve", "stereo", "surround51", "stabby51"]),
-      queryParam("quality", "string", ["original", "medium", "low"]),
-      queryParam("3d", "string", ["1", "2", "3", "4"]),
-      queryParam("t", "integer")
-    ],
-    responses: {
-      307: { description: "Redirect to the signed HLS master playlist" },
-      401: errorResponse(),
-      403: errorResponse(),
-      404: errorResponse(),
-      500: errorResponse()
-    }
-  });
 }
 
 function openMovieSecurity() {
   return [{ ApiKey: [] }, { ApiKeyQuery: [] }];
-}
-
-function openMovieOffsetParam(idKind) {
-  return {
-    name: "offset",
-    in: "query",
-    required: false,
-    description: `Inclusive minimum ${idKind} ID. Entries with lower IDs are omitted.`,
-    schema: { type: "integer", minimum: 1 }
-  };
-}
-
-function imageDimensionParam(name) {
-  return {
-    name,
-    in: "query",
-    required: false,
-    description: `Maximum output ${name} in pixels. The image is not upscaled.`,
-    schema: { type: "integer", minimum: 1, maximum: 2048 }
-  };
 }
 
 function operation(tag, summary, description, secured = true, extra = {}) {

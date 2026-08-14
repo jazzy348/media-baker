@@ -443,6 +443,7 @@ const els = {
   settingsOnDeckTtl: document.getElementById("settingsOnDeckTtl"),
   settingsWatchedThreshold: document.getElementById("settingsWatchedThreshold"),
   settingsSkipDetectionEnabled: document.getElementById("settingsSkipDetectionEnabled"),
+  settingsOpenMovieEnabled: document.getElementById("settingsOpenMovieEnabled"),
   settingsIndexEnabled: document.getElementById("settingsIndexEnabled"),
   indexSettingsBody: document.getElementById("indexSettingsBody"),
   settingsIndexInterval: document.getElementById("settingsIndexInterval"),
@@ -3637,6 +3638,7 @@ function fillSettingsForm(settings) {
   const iptv = settings.iptv || {};
   const updates = settings.updates || {};
   const skipDetection = settings.skipDetection || {};
+  const openMovie = settings.openMovie || {};
 
   els.settingsLogLevel.value = logging.level || "info";
   els.settingsLogRetentionDays.value = logging.retentionDays ?? 5;
@@ -3689,6 +3691,7 @@ function fillSettingsForm(settings) {
   els.settingsOnDeckTtl.value = playback.onDeckTtlSeconds ?? 1209600;
   els.settingsWatchedThreshold.value = playback.watchedThresholdPercent ?? 10;
   els.settingsSkipDetectionEnabled.checked = Boolean(skipDetection.enabled);
+  els.settingsOpenMovieEnabled.checked = Boolean(openMovie.enabled);
   els.settingsIndexEnabled.checked = indexScan.enabled !== false;
   els.settingsIndexInterval.value = indexScan.intervalSeconds ?? 900;
   els.settingsIndexStartup.checked = Boolean(indexScan.runOnStartup);
@@ -4096,6 +4099,9 @@ function settingsFromForm() {
     },
     skipDetection: {
       enabled: els.settingsSkipDetectionEnabled.checked
+    },
+    openMovie: {
+      enabled: els.settingsOpenMovieEnabled.checked
     },
     hls: {
       ttlSeconds: intInput(els.settingsHlsTtl, 86400),

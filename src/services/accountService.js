@@ -375,6 +375,11 @@ class AccountService {
   }
 
   async verifyApiKey(token) {
+    const principal = await this.verifyApiKeyPrincipal(token);
+    return principal ? principal.user : null;
+  }
+
+  async verifyApiKeyPrincipal(token) {
     await this.init();
     const keyHash = hashApiKey(token);
     let apiKey = null;
@@ -395,7 +400,28 @@ class AccountService {
       return null;
     }
 
-    return this.findById(apiKey.userId).then((account) => account ? publicAccount(account) : null);
+    const account = await this.findById(apiKey.userId);
+    return account ? { apiKeyId: apiKey.id, user: publicAccount(account) } : null;
+  }
+
+  async resolveApiKeyPrincipal(apiKeyId) {
+    await this.init();
+    let apiKey = null;
+    if (this.config.mysql.enabled) {
+      const [rows] = await this.pool.execute(
+        `SELECT id, user_id, key_name, created_at, revoked_at
+         FROM user_api_keys
+         WHERE id = ? AND revoked_at IS NULL`,
+        [apiKeyId]
+      );
+      apiKey = rows[0] ? fromMysqlApiKey(rows[0]) : null;
+    } else {
+      const data = await this.readJson();
+      apiKey = (data.apiKeys || []).find((entry) => entry.id === apiKeyId && !entry.revokedAt) || null;
+    }
+    if (!apiKey) return null;
+    const account = await this.findById(apiKey.userId);
+    return account ? { apiKeyId: apiKey.id, user: publicAccount(account) } : null;
   }
 
   async verifySession(token) {

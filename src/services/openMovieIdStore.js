@@ -99,6 +99,32 @@ class OpenMovieIdStore {
     });
   }
 
+  async peekNextIds() {
+    await this.init();
+    if (this.mysql) {
+      const tableNames = [...Object.values(TABLES), VARIANT_TABLE];
+      const [rows] = await this.pool.query(
+        `SELECT TABLE_NAME, AUTO_INCREMENT
+         FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${tableNames.map(() => "?").join(", ")})`,
+        tableNames
+      );
+      const nextByTable = new Map(rows.map((row) => [row.TABLE_NAME, Number(row.AUTO_INCREMENT) || 1]));
+      return {
+        movie: nextByTable.get(TABLES.movie) || 1,
+        episode: nextByTable.get(TABLES.episode) || 1,
+        variant: nextByTable.get(VARIANT_TABLE) || 1
+      };
+    }
+
+    return this.readJsonRegistry((registry) => ({
+      movie: registry.nextMovieId,
+      episode: registry.nextEpisodeId,
+      variant: registry.nextVariantId
+    }));
+  }
+
   async variantSourceSignatures() {
     await this.init();
     if (this.mysql) {

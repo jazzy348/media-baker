@@ -118,7 +118,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
   router.get("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
       res.json({
-        settings: await appSettings.get()
+        settings: await appSettings.getPublic()
       });
     } catch (err) {
       next(err);
@@ -127,10 +127,15 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.put("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
+      const previousOpenMovieEnabled = appSettings.isOpenMovieEnabled();
       const previousYtDlp = JSON.stringify(config.ytdlp || {});
       const previousIptv = JSON.stringify(config.iptv || {});
       const previousUpdates = JSON.stringify(config.updates || {});
-      const settings = await appSettings.save(req.body && req.body.settings || req.body || {});
+      await appSettings.save(req.body && req.body.settings || req.body || {});
+      const settings = await appSettings.getPublic();
+      if (previousOpenMovieEnabled !== appSettings.isOpenMovieEnabled()) {
+        logger.info(`[openmovie] endpoints ${appSettings.isOpenMovieEnabled() ? "enabled" : "disabled"}`);
+      }
       syncYtDlpLibrary(config);
       const ytdlpChanged = previousYtDlp !== JSON.stringify(config.ytdlp || {});
       const iptvChanged = previousIptv !== JSON.stringify(config.iptv || {});

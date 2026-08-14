@@ -101,7 +101,7 @@ class FallbackStreamService {
     }
   }
 
-  async serve(req, res, statusCode = 200, includeAuth = true) {
+  async serve(req, res, statusCode = 200, includeAuth = true, playlistBasePath = "") {
     if (!this.ready) {
       res.status(statusCode).json({ error: "Fallback stream is not available" });
       return;
@@ -119,7 +119,7 @@ class FallbackStreamService {
     res.set("Cache-Control", "no-store");
     res.send(this.rewritePlaylist(
       playlist,
-      req.path,
+      playlistBasePath ? `${playlistBasePath.replace(/\/$/, "")}/master.m3u8` : requestPath(req),
       includeAuth ? req.authParamName : "",
       includeAuth ? req.authToken : ""
     ));
@@ -170,6 +170,12 @@ class FallbackStreamService {
     const match = basename.match(new RegExp(`^${SEGMENT_PREFIX}(\\d{5})\\.ts$`));
     return match ? `segment_${match[1]}.ts` : null;
   }
+}
+
+function requestPath(req) {
+  const raw = String(req.originalUrl || req.url || req.path || "/");
+  const queryIndex = raw.indexOf("?");
+  return (queryIndex === -1 ? raw : raw.slice(0, queryIndex)) || "/";
 }
 
 async function fileExists(filePath) {

@@ -4,10 +4,12 @@ const { SUBTITLE_EXTENSIONS, isAudioFile } = require("../utils/mediaParsers");
 const { detectProTv3d } = require("./protv3d");
 const { qualityOptionsForProbe } = require("./qualityProfiles");
 
+const INTERACTIVE_PROBE_TIMEOUT_MS = 30 * 1000;
+
 async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
   const probe = await ffmpeg.probe(mediaFile.filePath, options.library && options.library.type === "music"
-    ? { analyzeduration: "1M", probesize: "1M" }
-    : {});
+    ? { analyzeduration: "1M", probesize: "1M", timeoutMs: INTERACTIVE_PROBE_TIMEOUT_MS }
+    : { useDefaultProbeLimits: true, timeoutMs: INTERACTIVE_PROBE_TIMEOUT_MS });
   const streams = probe.streams || [];
   const audioOnly = isAudioFile(mediaFile.filePath) || !streams.some((stream) => (
     stream.codec_type === "video"
