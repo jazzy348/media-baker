@@ -522,6 +522,17 @@ class PlaybackProgressService {
       && timeMs(record.updatedAt) >= cutoff);
   }
 
+  async protectedCacheKeys() {
+    const cutoff = Date.now() - this.config.playback.onDeckTtlSeconds * 1000;
+    const records = await this.store.list();
+    return new Set(records
+      .filter((record) => record.cacheKey
+        && record.status === STATUS_IN_PROGRESS
+        && record.positionSeconds > 0
+        && timeMs(record.updatedAt) >= cutoff)
+      .map((record) => record.cacheKey));
+  }
+
   async cacheReleaseBaseMs(cacheKey) {
     if (!cacheKey) {
       return 0;

@@ -11,6 +11,11 @@ function intValue(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function nonNegativeIntValue(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function resolvePath(value, fallback) {
   const selected = value || fallback;
   return isAbsolutePath(selected) ? selected : path.resolve(rootDir, selected);
@@ -48,6 +53,7 @@ module.exports = {
   accountStorePath: appPath(fileConfig.accountStorePath, "cache/accounts.json"),
   settingsStorePath: appPath(fileConfig.settingsStorePath, "cache/settings.json"),
   indexPath: appPath(fileConfig.indexPath, "cache/media-index.json"),
+  keyframeStorePath: appPath(fileConfig.keyframeStorePath, "cache/media-keyframes.json"),
   openMovieIdPath: appPath(fileConfig.openMovieIdPath, "cache/openmovie-ids.json"),
   skipMarkerStorePath: appPath(fileConfig.skipMarkerStorePath, "cache/skip-markers.json"),
   logging: {
@@ -155,6 +161,7 @@ module.exports = {
     ttlSeconds: intValue(fileConfig.hls && fileConfig.hls.ttlSeconds, 24 * 60 * 60),
     segmentSeconds: intValue(fileConfig.hls && fileConfig.hls.segmentSeconds, 6),
     segmentWaitTimeoutSeconds: intValue(fileConfig.hls && fileConfig.hls.segmentWaitTimeoutSeconds, 90),
+    minimumFreeSpaceMiB: nonNegativeIntValue(fileConfig.hls && fileConfig.hls.minimumFreeSpaceMiB, 1024),
     forceTranscodeCompatibleVideo: fileConfig.hls && typeof fileConfig.hls.forceTranscodeCompatibleVideo === "boolean" ? fileConfig.hls.forceTranscodeCompatibleVideo : false
   },
   fallbackStream: {

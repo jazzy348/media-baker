@@ -71,7 +71,12 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       }
 
       res.type(contentTypeFor(req.params.filename));
+      const releaseCacheRead = typeof hls.beginCacheRead === "function"
+        ? hls.beginCacheRead(req.params.cacheKey)
+        : () => {};
+      res.once("close", releaseCacheRead);
       res.sendFile(segment.filePath, (err) => {
+        releaseCacheRead();
         if (err) {
           if (isClientAbort(err)) {
             return;
@@ -118,6 +123,8 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       logger.info(`[stream] resolved file id=${req.params.id} title="${mediaFile.title || mediaFile.showName || mediaFile.filename}" file="${mediaFile.filePath}"`);
       const stream = await hls.prepare(mediaFile, {
+        mediaType: req.params.mediaType,
+        mediaId: req.params.id,
         audio: req.query.audio,
         subtitle: req.query.subtitle,
         audioChannels: req.query.audioChannels || req.query.audioMode || req.query.channelMode,

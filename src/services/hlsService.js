@@ -8,29 +8,37 @@ const logger = require("../utils/logger");
 const SEEK_AHEAD_THRESHOLD_SECONDS = 30;
 const SEEK_PRE_ROLL_SECONDS = 24;
 const SEEK_REASSERT_INTERVAL_MS = 1500;
-const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-keyframe-timeline-v22";
+const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-keyframe-timeline-v24";
 const HLS_CACHE_FORMAT_MARKER = ".hls-cache-format";
-const KEYFRAME_CACHE_DIRECTORY = ".keyframes";
+const KEYFRAME_CACHE_FORMAT_VERSION = 1;
 const MAXIMUM_COPIED_SEGMENT_SECONDS = 60;
+const MEBIBYTE = 1024 * 1024;
+const STORAGE_MONITOR_INTERVAL_MS = 3000;
 
 class HlsService {
-  constructor(config, ffmpeg, progress = null) {
+  constructor(config, ffmpeg, progress = null, keyframes = null) {
     this.config = config;
     this.ffmpeg = ffmpeg;
     this.progress = progress;
+    this.keyframes = keyframes;
     this.activeSetups = new Map();
     this.activeTranscodes = new Map();
     this.keyframeSetups = new Map();
     this.keyframeWarmQueue = new Map();
     this.keyframeWarmRunning = false;
     this.cacheFormatPromise = null;
+    this.cacheAccess = new Map();
+    this.cacheReaders = new Map();
+    this.storagePressurePromise = null;
+    this.storageMonitorTimer = null;
+    this.storagePressureLogged = false;
   }
 
   queueKeyframeIndex(mediaFiles = []) {
     let added = 0;
     for (const mediaFile of mediaFiles) {
-      if (!mediaFile || !mediaFile.filePath) continue;
-      const queueKey = normalizedFilePath(mediaFile.filePath);
+      if (!keyframeMediaIdentity(mediaFile)) continue;
+      const queueKey = keyframeRecordKey(mediaFile);
       if (!this.keyframeWarmQueue.has(queueKey)) added += 1;
       this.keyframeWarmQueue.set(queueKey, mediaFile);
     }
@@ -38,6 +46,15 @@ class HlsService {
       logger.info(`[hls] queued background keyframe indexing files=${added} pending=${this.keyframeWarmQueue.size}`);
     }
     this.startKeyframeWarmQueue();
+  }
+
+  async queueMissingKeyframeIndex(mediaFiles = []) {
+    if (!this.keyframes) return;
+    const missing = await this.keyframes.missingReferences(mediaFiles);
+    if (missing.length > 0) {
+      logger.info(`[hls] keyframe index backfill missing=${missing.length} indexedMedia=${mediaFiles.length}`);
+      this.queueKeyframeIndex(missing);
+    }
   }
 
   startKeyframeWarmQueue() {
@@ -59,10 +76,16 @@ class HlsService {
       const [queueKey, mediaFile] = this.keyframeWarmQueue.entries().next().value;
       this.keyframeWarmQueue.delete(queueKey);
       try {
-        const probe = await this.ffmpeg.probe(mediaFile.filePath);
-        const videoStream = selectVideoStream(probe);
-        if (videoStream && isCompatibleH264Stream(videoStream) && !this.config.hls.forceTranscodeCompatibleVideo) {
-          await this.keyframeTimelineFor(mediaFile.filePath, probe, videoStream);
+        const probe = mediaFile.probe || await this.ffmpeg.probe(mediaFile.filePath);
+        const videoStream = mediaFile.videoStream || selectVideoStream(probe);
+        if (videoStream && isCompatibleH264Stream(videoStream)) {
+          await this.keyframeTimelineFor(mediaFile, probe, videoStream);
+        } else if (videoStream && this.keyframes) {
+          const stat = await sourceFileSignature(mediaFile.filePath);
+          await this.keyframes.save({
+            ...this.keyframeSignature(mediaFile, videoStream, stat),
+            segments: []
+          });
         }
       } catch (error) {
         logger.full(`[hls] background keyframe index skipped input="${mediaFile.filePath}" message="${summarizeFfmpegOutput(error.message)}"`);
@@ -73,16 +96,22 @@ class HlsService {
 
   async prepare(mediaFile, options = {}) {
     await this.ensureCacheFormat();
+    const indexedMediaFile = {
+      ...mediaFile,
+      mediaType: options.mediaType || mediaFile.mediaType,
+      id: options.mediaId || mediaFile.id
+    };
     const normalizedOptions = {
       audio: normalizeAudioPreference(options.audio, this.config.streaming.preferredAudioLanguage),
       subtitle: normalizeSubtitlePreference(options.subtitle),
       audioChannels: normalizeAudioChannelPreference(options.audioChannels || options.audioMode || options.channelMode),
       quality: normalizeQualityPreference(options.quality)
     };
-    logger.info(`[hls] prepare file="${mediaFile.filePath}" requestedAudio=${options.audio || "default"} selectedAudio=${normalizedOptions.audio} subtitle=${normalizedOptions.subtitle} audioChannels=${normalizedOptions.audioChannels} quality=${normalizedOptions.quality}`);
-    const cacheKey = await this.buildCacheKey(mediaFile.filePath, normalizedOptions);
+    logger.info(`[hls] prepare file="${indexedMediaFile.filePath}" requestedAudio=${options.audio || "default"} selectedAudio=${normalizedOptions.audio} subtitle=${normalizedOptions.subtitle} audioChannels=${normalizedOptions.audioChannels} quality=${normalizedOptions.quality}`);
+    const cacheKey = await this.buildCacheKey(indexedMediaFile.filePath, normalizedOptions);
     const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
     const playlistPath = path.join(cacheDir, "master.m3u8");
+    this.touchCache(cacheKey);
 
     if (this.activeSetups.has(cacheKey)) {
       logger.info(`[hls] joining active ffmpeg setup cacheKey=${cacheKey}`);
@@ -112,7 +141,7 @@ class HlsService {
       : { complete: false, resumeFromSegment: 0 };
 
     logger.info(`[hls] cache miss cacheKey=${cacheKey}; starting ffmpeg setup`);
-    const setup = this.startHls(mediaFile, normalizedOptions, cacheDir, playlistPath, cacheKey, {
+    const setup = this.startHls(indexedMediaFile, normalizedOptions, cacheDir, playlistPath, cacheKey, {
       resumeFromSegment: effectiveResumeState.resumeFromSegment,
       resumeFromSeconds: existingManifest
         ? segmentStartSeconds(existingManifest, effectiveResumeState.resumeFromSegment)
@@ -138,6 +167,7 @@ class HlsService {
 
   async getPlaylist(cacheKey) {
     await this.ensureCacheFormat();
+    this.touchCache(cacheKey);
     const manifest = await this.readManifest(cacheKey);
     const publishedPlaylist = await readPublishedPlaylist(cacheKey, this.config.hls.cachePath);
     if (!publishedPlaylist || !isCompletePlaylist(publishedPlaylist)) {
@@ -153,6 +183,7 @@ class HlsService {
 
   async waitForCachedFile(cacheKey, filename) {
     await this.ensureCacheFormat();
+    this.touchCache(cacheKey);
     const filePath = this.getCachedFilePath(cacheKey, filename);
     if (!filePath) {
       return null;
@@ -187,6 +218,7 @@ class HlsService {
       this.touchTranscode(cacheKey);
       if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
         this.touchTranscode(cacheKey);
+        this.touchCache(cacheKey);
         return {
           status: "ready",
           filePath
@@ -228,14 +260,17 @@ class HlsService {
     const entries = await fs.readdir(this.config.hls.cachePath, { withFileTypes: true });
     const now = Date.now();
     const ttlMs = this.config.hls.ttlSeconds * 1000;
+    const protectedCacheKeys = this.progress && typeof this.progress.protectedCacheKeys === "function"
+      ? await this.progress.protectedCacheKeys()
+      : new Set();
 
     await Promise.all(entries.map(async (entry) => {
-      if (!entry.isDirectory() || entry.name === KEYFRAME_CACHE_DIRECTORY) {
+      if (!entry.isDirectory()) {
         return;
       }
 
       const dirPath = path.join(this.config.hls.cachePath, entry.name);
-      if (this.progress && await this.progress.isCacheProtected(entry.name)) {
+      if (protectedCacheKeys.has(entry.name) || this.isCacheBusy(entry.name)) {
         return;
       }
 
@@ -243,9 +278,128 @@ class HlsService {
       const releaseBaseMs = this.progress ? await this.progress.cacheReleaseBaseMs(entry.name) : 0;
       const ageBaseMs = Math.max(stat.mtimeMs, releaseBaseMs);
       if (now - ageBaseMs > ttlMs) {
-        await fs.rm(dirPath, { recursive: true, force: true });
+        await fs.rm(dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        this.cacheAccess.delete(entry.name);
       }
     }));
+  }
+
+  touchCache(cacheKey) {
+    if (cacheKey) {
+      this.cacheAccess.set(cacheKey, Date.now());
+    }
+  }
+
+  beginCacheRead(cacheKey) {
+    if (!cacheKey) return () => {};
+    this.touchCache(cacheKey);
+    this.cacheReaders.set(cacheKey, (this.cacheReaders.get(cacheKey) || 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.cacheReaders.get(cacheKey) || 1) - 1;
+      if (remaining > 0) {
+        this.cacheReaders.set(cacheKey, remaining);
+      } else {
+        this.cacheReaders.delete(cacheKey);
+      }
+      this.touchCache(cacheKey);
+    };
+  }
+
+  isCacheBusy(cacheKey, includeRecentAccess = true) {
+    if (this.activeSetups.has(cacheKey)
+      || this.activeTranscodes.has(cacheKey)
+      || (this.cacheReaders.get(cacheKey) || 0) > 0) {
+      return true;
+    }
+    if (!includeRecentAccess) return false;
+    const lastAccessAt = this.cacheAccess.get(cacheKey) || 0;
+    return Date.now() - lastAccessAt < this.cacheActiveWindowMs();
+  }
+
+  cacheActiveWindowMs() {
+    const segmentSeconds = Math.max(1, Number(this.config.hls.segmentSeconds) || 6);
+    return Math.max(60, segmentSeconds * 10) * 1000;
+  }
+
+  minimumFreeSpaceBytes() {
+    const mebibytes = Number(this.config.hls.minimumFreeSpaceMiB);
+    return Number.isFinite(mebibytes) && mebibytes > 0 ? Math.floor(mebibytes * MEBIBYTE) : 0;
+  }
+
+  async ensureStorageAvailable(cacheKey) {
+    const reserveBytes = this.minimumFreeSpaceBytes();
+    if (reserveBytes <= 0) return;
+    await fs.mkdir(this.config.hls.cachePath, { recursive: true });
+    const initial = await cacheFilesystemStats(this.config.hls.cachePath);
+    if (!initial || initial.availableBytes >= reserveBytes) return;
+
+    const finalStats = await this.relieveStoragePressure(reserveBytes, cacheKey);
+    if (finalStats && finalStats.availableBytes >= reserveBytes) return;
+
+    const availableBytes = finalStats ? finalStats.availableBytes : initial.availableBytes;
+    throw storagePressureError(reserveBytes, availableBytes);
+  }
+
+  async relieveStoragePressure(reserveBytes, requestedCacheKey = null) {
+    if (this.storagePressurePromise) {
+      await this.storagePressurePromise;
+      const current = await cacheFilesystemStats(this.config.hls.cachePath);
+      if (!current || current.availableBytes >= reserveBytes) return current;
+    }
+
+    this.storagePressurePromise = this.evictInactiveCaches(reserveBytes, requestedCacheKey)
+      .finally(() => {
+        this.storagePressurePromise = null;
+      });
+    return this.storagePressurePromise;
+  }
+
+  async evictInactiveCaches(reserveBytes, requestedCacheKey = null) {
+    const cachePath = this.config.hls.cachePath;
+    let storage = await cacheFilesystemStats(cachePath);
+    if (!storage || storage.availableBytes >= reserveBytes) return storage;
+
+    const protectedCacheKeys = this.progress && typeof this.progress.protectedCacheKeys === "function"
+      ? await this.progress.protectedCacheKeys()
+      : new Set();
+    const entries = await fs.readdir(cachePath, { withFileTypes: true });
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === requestedCacheKey || this.isCacheBusy(entry.name)) continue;
+      const dirPath = path.join(cachePath, entry.name);
+      try {
+        const stat = await fs.stat(dirPath);
+        candidates.push({
+          cacheKey: entry.name,
+          dirPath,
+          protected: protectedCacheKeys.has(entry.name),
+          lastAccessAt: this.cacheAccess.get(entry.name) || stat.mtimeMs
+        });
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+
+    candidates.sort((left, right) => Number(left.protected) - Number(right.protected)
+      || left.lastAccessAt - right.lastAccessAt);
+
+    let removed = 0;
+    for (const candidate of candidates) {
+      await fs.rm(candidate.dirPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      this.cacheAccess.delete(candidate.cacheKey);
+      removed += 1;
+      logger.info(`[hls] storage pressure evicted cacheKey=${candidate.cacheKey} onDeck=${candidate.protected}`);
+      storage = await cacheFilesystemStats(cachePath);
+      if (!storage || storage.availableBytes >= reserveBytes) break;
+    }
+
+    if (storage) {
+      logger.info(`[hls] storage pressure cleanup removed=${removed} availableMiB=${formatMiB(storage.availableBytes)} reserveMiB=${formatMiB(reserveBytes)}`);
+    }
+    return storage;
   }
 
   async ensureCacheFormat() {
@@ -279,11 +433,13 @@ class HlsService {
 
     const entries = await fs.readdir(cachePath, { withFileTypes: true });
     await Promise.all(entries.map((entry) => fs.rm(path.join(cachePath, entry.name), {
-      recursive: true,
-      force: true
-    })));
+        recursive: true,
+        force: true
+      })));
+    this.cacheAccess.clear();
+    this.cacheReaders.clear();
     await fs.writeFile(markerPath, `${HLS_CACHE_FORMAT_VERSION}\n`, "utf8");
-    logger.info(`[hls] cache format changed previous=${previousVersion || "none"} current=${HLS_CACHE_FORMAT_VERSION}; cleared cache="${cachePath}"`);
+    logger.info(`[hls] cache format changed previous=${previousVersion || "none"} current=${HLS_CACHE_FORMAT_VERSION}; cleared generated HLS cache="${cachePath}"`);
   }
 
   async segmentProgress(cacheKey, filename) {
@@ -384,7 +540,11 @@ class HlsService {
 
     logger.info(`[hls] restarting partial transcode cacheKey=${cacheKey} input="${currentManifest.inputPath}" resumeSegment=${effectiveResumeState.resumeFromSegment}`);
     const setup = this.startHls(
-      { filePath: currentManifest.inputPath },
+      {
+        filePath: currentManifest.inputPath,
+        mediaType: currentManifest.mediaType,
+        id: currentManifest.mediaId
+      },
       currentManifest.options,
       cacheDir,
       playlistPath,
@@ -459,7 +619,11 @@ class HlsService {
       await removeTemporarySegments(cacheDir);
       logger.info(`[hls] repositioning transcode cacheKey=${cacheKey} input="${manifest.inputPath}" requestedSegment=${targetSegment} startSegment=${startSegment} requestedSeconds=${formatFfmpegSeconds(targetStartSeconds)} startSeconds=${formatFfmpegSeconds(startSeconds)}`);
       await this.startHls(
-        { filePath: manifest.inputPath },
+        {
+          filePath: manifest.inputPath,
+          mediaType: manifest.mediaType,
+          id: manifest.mediaId
+        },
         manifest.options,
         cacheDir,
         playlistPath,
@@ -515,6 +679,7 @@ class HlsService {
   }
 
   touchTranscode(cacheKey) {
+    this.touchCache(cacheKey);
     const active = this.activeTranscodes.get(cacheKey);
     if (!active) {
       return;
@@ -526,9 +691,82 @@ class HlsService {
 
   registerTranscode(cacheKey, state, armTimer = true) {
     this.activeTranscodes.set(cacheKey, state);
+    this.touchCache(cacheKey);
+    this.startStorageMonitor();
     if (armTimer) {
       this.armTranscodeIdleTimer(cacheKey, state);
     }
+  }
+
+  startStorageMonitor() {
+    if (this.storageMonitorTimer || this.minimumFreeSpaceBytes() <= 0) return;
+    this.storageMonitorTimer = setInterval(() => {
+      this.monitorStoragePressure().catch((error) => {
+        logger.error(`[hls] storage pressure monitor failed message="${error.message}"`, error);
+      });
+    }, STORAGE_MONITOR_INTERVAL_MS);
+    this.storageMonitorTimer.unref?.();
+  }
+
+  stopStorageMonitorIfIdle() {
+    if (this.activeTranscodes.size > 0 || !this.storageMonitorTimer) return;
+    clearInterval(this.storageMonitorTimer);
+    this.storageMonitorTimer = null;
+    this.storagePressureLogged = false;
+  }
+
+  async monitorStoragePressure() {
+    if (this.activeTranscodes.size === 0) {
+      this.stopStorageMonitorIfIdle();
+      return;
+    }
+    const reserveBytes = this.minimumFreeSpaceBytes();
+    if (reserveBytes <= 0) {
+      this.stopStorageMonitorIfIdle();
+      return;
+    }
+    const initial = await cacheFilesystemStats(this.config.hls.cachePath);
+    if (!initial || initial.availableBytes >= reserveBytes) {
+      this.storagePressureLogged = false;
+      return;
+    }
+
+    const finalStats = await this.relieveStoragePressure(reserveBytes);
+    if (!finalStats || finalStats.availableBytes >= reserveBytes) {
+      this.storagePressureLogged = false;
+      return;
+    }
+
+    if (!this.storagePressureLogged) {
+      this.storagePressureLogged = true;
+      logger.error(`[hls] storage reserve exhausted availableMiB=${formatMiB(finalStats.availableBytes)} reserveMiB=${formatMiB(reserveBytes)}; pausing active HLS generation`);
+    }
+    for (const [cacheKey, active] of this.activeTranscodes) {
+      this.stopTranscodeForStoragePressure(cacheKey, active);
+    }
+  }
+
+  stopTranscodeForStoragePressure(cacheKey, active = this.activeTranscodes.get(cacheKey)) {
+    if (!active || active.completed || active.stopReason) return false;
+    active.stopReason = "storage-pressure";
+    if (active.idleTimer) clearTimeout(active.idleTimer);
+    logger.info(`[hls] stopping transcode for storage pressure cacheKey=${cacheKey} input="${active.inputPath}"`);
+    try {
+      active.child.kill("SIGTERM");
+    } catch (error) {
+      logger.full(`[hls] storage pressure stop ignored cacheKey=${cacheKey} message="${error.message}"`);
+    }
+    const killTimer = setTimeout(() => {
+      if (!active.completed) {
+        try {
+          active.child.kill("SIGKILL");
+        } catch (error) {
+          logger.full(`[hls] storage pressure force-stop ignored cacheKey=${cacheKey} message="${error.message}"`);
+        }
+      }
+    }, 5000);
+    killTimer.unref?.();
+    return true;
   }
 
   armTranscodeIdleTimer(cacheKey, active = this.activeTranscodes.get(cacheKey)) {
@@ -641,6 +879,7 @@ class HlsService {
     }
     logger.info(`[hls] start input="${inputPath}" cacheDir="${cacheDir}" playlist="${playlistPath}" audio=${options.audio} audioChannels=${options.audioChannels} quality=${options.quality} resumeSegment=${resumeFromSegment}`);
     await this.cleanupExpired();
+    await this.ensureStorageAvailable(cacheKey);
     if (resumeFromSegment > 0 || preserveCache) {
       await fs.mkdir(cacheDir, { recursive: true });
       await fs.rm(playlistPath, { force: true });
@@ -664,7 +903,9 @@ class HlsService {
         hlsBuild = await this.buildFfmpegArgs(inputPath, probe, options, playlistPath, {
           resumeFromSegment,
           resumeFromSeconds,
-          segmentTimeline: reusableSegmentTimeline
+          segmentTimeline: reusableSegmentTimeline,
+          sourceSignature: beforeSignature,
+          mediaFile
         });
       } catch (error) {
         if (error.code !== "MEDIA_BAKER_SOURCE_CHANGED" || attempt === 3) throw error;
@@ -705,6 +946,8 @@ class HlsService {
       segmentTimeline: hlsBuild.segmentTimeline,
       sourceSignature: verifiedSourceSignature,
       inputPath,
+      mediaType: mediaFile.mediaType,
+      mediaId: mediaFile.id,
       options
     });
     await fs.writeFile(path.join(cacheDir, "stream.json"), JSON.stringify(manifest, null, 2));
@@ -763,6 +1006,7 @@ class HlsService {
       if (this.activeTranscodes.get(cacheKey) === active) {
         this.activeTranscodes.delete(cacheKey);
       }
+      this.stopStorageMonitorIfIdle();
     };
     try {
       await waitForInitialHlsSegment(
@@ -805,36 +1049,26 @@ class HlsService {
     }
   }
 
-  async keyframeTimelineFor(inputPath, probe, videoStream) {
-    const targetSeconds = Math.max(1, Number(this.config.hls.segmentSeconds) || 6);
-    const cacheDirectory = path.join(this.config.hls.cachePath, KEYFRAME_CACHE_DIRECTORY);
-    const cacheName = crypto.createHash("sha1")
-      .update(JSON.stringify({ inputPath, streamIndex: videoStream.index, targetSeconds }))
-      .digest("hex");
-    const cachePath = path.join(cacheDirectory, `${cacheName}.json`);
-    const stat = await sourceFileSignature(inputPath);
-    const signature = {
-      version: 1,
-      inputPath,
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      streamIndex: videoStream.index,
-      targetSeconds
-    };
-    const cached = await readJsonIfPresent(cachePath);
+  async keyframeTimelineFor(mediaFile, probe, videoStream) {
+    const identity = keyframeMediaIdentity(mediaFile);
+    if (!identity || !this.keyframes) return null;
+    const stat = await sourceFileSignature(mediaFile.filePath);
+    const signature = this.keyframeSignature(mediaFile, videoStream, stat);
+    const cached = await this.keyframes.get(identity.mediaType, identity.mediaId);
     if (cached && keyframeCacheMatches(cached, signature) && Array.isArray(cached.segments)) {
-      logger.full(`[hls] keyframe timeline cache hit input="${inputPath}" segments=${cached.segments.length}`);
+      logger.full(`[hls] keyframe timeline cache hit input="${mediaFile.filePath}" segments=${cached.segments.length}`);
       return cached.segments;
     }
-    if (this.keyframeSetups.has(cachePath)) {
-      logger.info(`[hls] joining keyframe scan input="${inputPath}"`);
-      return this.keyframeSetups.get(cachePath);
+    const setupKey = keyframeRecordKey(mediaFile);
+    if (this.keyframeSetups.has(setupKey)) {
+      logger.info(`[hls] joining keyframe scan input="${mediaFile.filePath}"`);
+      return this.keyframeSetups.get(setupKey);
     }
 
     const setup = (async () => {
       const startedAt = Date.now();
-      logger.info(`[hls] indexing source keyframes input="${inputPath}"`);
-      const keyframes = await this.ffmpeg.probeVideoKeyframes(inputPath, videoStream.index, {
+      logger.info(`[hls] indexing source keyframes input="${mediaFile.filePath}"`);
+      const keyframes = await this.ffmpeg.probeVideoKeyframes(mediaFile.filePath, videoStream.index, {
         inactivityTimeoutMs: Math.max(
           30000,
           Number(this.config.hls.segmentWaitTimeoutSeconds) * 1000 || 0
@@ -844,21 +1078,48 @@ class HlsService {
         keyframes,
         probe,
         videoStream,
-        targetSeconds
+        signature.targetSeconds
       );
-      const afterSignature = await sourceFileSignature(inputPath);
+      const afterSignature = await sourceFileSignature(mediaFile.filePath);
       if (!sourceSignaturesMatch(stat, afterSignature)) {
-        const error = new Error(`Media file changed while indexing keyframes: ${inputPath}`);
+        const error = new Error(`Media file changed while indexing keyframes: ${mediaFile.filePath}`);
         error.code = "MEDIA_BAKER_SOURCE_CHANGED";
         throw error;
       }
-      await fs.mkdir(cacheDirectory, { recursive: true });
-      await writeJsonAtomically(cachePath, { ...signature, segments });
-      logger.info(`[hls] source keyframes indexed input="${inputPath}" keyframes=${keyframes.length} segments=${segments.length} durationMs=${Date.now() - startedAt}`);
+      await this.keyframes.save({ ...signature, segments });
+      logger.info(`[hls] source keyframes indexed input="${mediaFile.filePath}" keyframes=${keyframes.length} segments=${segments.length} durationMs=${Date.now() - startedAt}`);
       return segments;
-    })().finally(() => this.keyframeSetups.delete(cachePath));
-    this.keyframeSetups.set(cachePath, setup);
+    })().finally(() => this.keyframeSetups.delete(setupKey));
+    this.keyframeSetups.set(setupKey, setup);
     return setup;
+  }
+
+  keyframeSignature(mediaFile, videoStream, sourceSignature) {
+    const identity = keyframeMediaIdentity(mediaFile);
+    const targetSeconds = Math.max(1, Number(this.config.hls.segmentSeconds) || 6);
+    return {
+      version: KEYFRAME_CACHE_FORMAT_VERSION,
+      mediaType: identity.mediaType,
+      mediaId: identity.mediaId,
+      filePath: mediaFile.filePath,
+      size: sourceSignature.size,
+      mtimeMs: sourceSignature.mtimeMs,
+      streamIndex: videoStream.index,
+      targetSeconds
+    };
+  }
+
+  async cachedKeyframeTimelineFor(mediaFile, videoStream, sourceSignature) {
+    const identity = keyframeMediaIdentity(mediaFile);
+    if (!identity || !this.keyframes) return null;
+    const checkedSignature = sourceSignature || await sourceFileSignature(mediaFile.filePath);
+    const signature = this.keyframeSignature(mediaFile, videoStream, checkedSignature);
+    const cached = await this.keyframes.get(identity.mediaType, identity.mediaId);
+    if (!cached || !keyframeCacheMatches(cached, signature) || !Array.isArray(cached.segments)) {
+      return null;
+    }
+    logger.full(`[hls] keyframe timeline cache hit input="${mediaFile.filePath}" segments=${cached.segments.length}`);
+    return cached.segments;
   }
 
   async buildFfmpegArgs(inputPath, probe, options, playlistPath, resume = {}) {
@@ -886,11 +1147,14 @@ class HlsService {
       : "copy";
     let segmentTimeline = Array.isArray(resume.segmentTimeline) ? resume.segmentTimeline : null;
     if (videoCodec === "copy" && !segmentTimeline) {
-      try {
-        segmentTimeline = await this.keyframeTimelineFor(inputPath, probe, videoStream);
-      } catch (error) {
-        if (error.code === "MEDIA_BAKER_SOURCE_CHANGED") throw error;
-        logger.info(`[hls] source keyframe index failed; using video transcode input="${inputPath}" message="${summarizeFfmpegOutput(error.message)}"`);
+      segmentTimeline = await this.cachedKeyframeTimelineFor(
+        resume.mediaFile,
+        videoStream,
+        resume.sourceSignature
+      );
+      if (!segmentTimeline) {
+        this.queueKeyframeIndex([{ ...resume.mediaFile, probe, videoStream }]);
+        logger.info(`[hls] source keyframe index is not ready; using video transcode while background indexing continues input="${inputPath}"`);
       }
     }
     if (videoCodec === "copy" && !isSafeCopiedSegmentTimeline(segmentTimeline)) {
@@ -1787,6 +2051,8 @@ function buildManifest(probe, segmentSeconds, options = {}) {
     ...(segments ? { segments } : {}),
     sourceSignature: options.sourceSignature || null,
     inputPath: options.inputPath || null,
+    mediaType: options.mediaType || null,
+    mediaId: options.mediaId || null,
     options: options.options || null
   };
 }
@@ -2043,15 +2309,6 @@ async function fileExists(filePath) {
   }
 }
 
-async function readJsonIfPresent(filePath) {
-  try {
-    return JSON.parse(await fs.readFile(filePath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT" || error instanceof SyntaxError) return null;
-    throw error;
-  }
-}
-
 async function sourceFileSignature(filePath) {
   const stat = await fs.stat(filePath);
   return {
@@ -2066,34 +2323,27 @@ function sourceSignaturesMatch(left, right) {
     && Number(left.mtimeMs) === Number(right.mtimeMs);
 }
 
-function normalizedFilePath(filePath) {
-  const normalized = path.normalize(String(filePath || ""));
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+function keyframeMediaIdentity(mediaFile) {
+  if (!mediaFile || !mediaFile.filePath || !mediaFile.mediaType || !mediaFile.id) return null;
+  return {
+    mediaType: String(mediaFile.mediaType),
+    mediaId: String(mediaFile.id)
+  };
+}
+
+function keyframeRecordKey(mediaFile) {
+  const identity = keyframeMediaIdentity(mediaFile);
+  return identity ? `${identity.mediaType}:${identity.mediaId}` : "";
 }
 
 function keyframeCacheMatches(cached, signature) {
   return cached.version === signature.version
-    && cached.inputPath === signature.inputPath
+    && cached.mediaType === signature.mediaType
+    && cached.mediaId === signature.mediaId
     && Number(cached.size) === Number(signature.size)
     && Number(cached.mtimeMs) === Number(signature.mtimeMs)
     && Number(cached.streamIndex) === Number(signature.streamIndex)
     && Number(cached.targetSeconds) === Number(signature.targetSeconds);
-}
-
-async function writeJsonAtomically(filePath, value) {
-  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
-  try {
-    await fs.writeFile(temporaryPath, JSON.stringify(value), "utf8");
-    try {
-      await fs.rename(temporaryPath, filePath);
-    } catch (error) {
-      if (!["EEXIST", "EPERM"].includes(error.code)) throw error;
-      await fs.rm(filePath, { force: true });
-      await fs.rename(temporaryPath, filePath);
-    }
-  } finally {
-    await fs.rm(temporaryPath, { force: true });
-  }
 }
 
 async function isPublishedSegment(cacheKey, filename, hlsCachePath) {
@@ -2122,6 +2372,35 @@ function isCompletePlaylist(playlist) {
 function segmentFilenameIndex(filename) {
   const match = String(filename || "").match(/^segment_(\d{5})\.ts$/);
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+async function cacheFilesystemStats(cachePath) {
+  if (typeof fs.statfs !== "function") return null;
+  try {
+    const stat = await fs.statfs(cachePath);
+    const blockSize = Number(stat.bsize) || 0;
+    const availableBlocks = Number(stat.bavail);
+    if (!blockSize || !Number.isFinite(availableBlocks)) return null;
+    return {
+      availableBytes: Math.max(0, blockSize * availableBlocks)
+    };
+  } catch (error) {
+    logger.full(`[hls] free space check unavailable cache="${cachePath}" message="${error.message}"`);
+    return null;
+  }
+}
+
+function storagePressureError(reserveBytes, availableBytes) {
+  const error = new Error(`Not enough free storage to generate HLS (available ${formatMiB(availableBytes)} MiB, reserve ${formatMiB(reserveBytes)} MiB)`);
+  error.status = 507;
+  error.code = "MEDIA_BAKER_INSUFFICIENT_STORAGE";
+  return error;
+}
+
+function formatMiB(bytes) {
+  return Math.max(0, Number(bytes) || 0) / MEBIBYTE < 10
+    ? (Math.max(0, Number(bytes) || 0) / MEBIBYTE).toFixed(1)
+    : String(Math.round(Math.max(0, Number(bytes) || 0) / MEBIBYTE));
 }
 
 module.exports = { HlsService };

@@ -191,6 +191,40 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
     }
   });
 
+  router.get("/ytdlp", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      res.json({ status: await ytdlpAdminStatus(ytdlp) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/ytdlp/update", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      await ytdlp.forceUpdate();
+      res.json({ status: await ytdlpAdminStatus(ytdlp) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/ytdlp/cookies", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      const cookies = await ytdlp.saveCookies(req.body && req.body.contents);
+      res.json({ cookies });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/ytdlp/cookies", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      res.json({ cookies: await ytdlp.removeCookies() });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/optimizer", requirePermission("canManageOptimizer"), (req, res) => {
     res.json(optimizer.status());
   });
@@ -792,6 +826,16 @@ async function loadHistorySubjects(accountService, libraryService) {
     accountsById,
     shareSubjects,
     sharesById: new Map(shareSubjects.map((share) => [share.id, share]))
+  };
+}
+
+async function ytdlpAdminStatus(ytdlp) {
+  const validation = ytdlp.config.enabled ? await ytdlp.validate() : null;
+  return {
+    ...ytdlp.status(),
+    available: Boolean(validation && validation.ok),
+    validation,
+    cookies: await ytdlp.cookieStatus()
   };
 }
 

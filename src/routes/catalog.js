@@ -615,6 +615,8 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
       requireAdmin(req);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const stream = await hls.prepare(mediaFile, {
+        mediaType: req.params.mediaType,
+        mediaId: req.params.id,
         audio: req.body.audio,
         subtitle: req.body.subtitle,
         audioChannels: req.body.audioChannels || req.body.audioMode || req.body.channelMode,

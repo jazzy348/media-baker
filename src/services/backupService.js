@@ -435,6 +435,7 @@ function jsonDataFiles(config) {
     { name: "libraries", path: config.libraryStorePath },
     { name: "settings", path: config.settingsStorePath },
     { name: "media-index", path: config.indexPath },
+    { name: "media-keyframes", path: config.keyframeStorePath },
     { name: "openmovie-ids", path: config.openMovieIdPath },
     { name: "openmovie-poster-atlases", path: path.join(path.dirname(config.openMovieIdPath), "openmovie-poster-atlases.json") },
     { name: "metadata", path: path.join(config.metadata.cachePath, "metadata.json") },

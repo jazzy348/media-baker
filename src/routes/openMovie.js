@@ -2,7 +2,10 @@ const express = require("express");
 const path = require("path");
 const { httpError, isClientAbort } = require("../utils/httpErrors");
 const { createApiKeyAuthMiddleware } = require("../middleware/auth");
-const { OPEN_MOVIE_OPERATIONS: OPERATIONS } = require("../services/openMovieCapabilityService");
+const {
+  OPEN_MOVIE_OPERATIONS: OPERATIONS,
+  OPEN_MOVIE_ON_DECK_PAGE_SIZE: ON_DECK_PAGE_SIZE
+} = require("../services/openMovieCapabilityService");
 const { safeRequestUrl } = require("../utils/safeRequestUrl");
 const logger = require("../utils/logger");
 
@@ -79,15 +82,16 @@ module.exports = function createOpenMovieRoutes(services) {
           ));
           }
         case OPERATIONS.ON_DECK:
-          return res.json({
-            items: openMovieCapabilities.protectOnDeck(
-              await openMovie.onDeckCatalogue(
-                await progress.onDeck(mediaIndex, metadata, "", "", access.allowedLibraryKeys, principal.user.id),
-                access.allowedLibraryKeys
-              ),
-              capability.apiKeyId
-            )
-          });
+          {
+            const page = capabilityInteger(capability, 0, 1);
+            const items = await openMovieOnDeckItems(services, access, principal.user.id);
+            return res.json(openMovieCapabilities.protectOnDeckPage(
+              pageItems(items, page),
+              capability.apiKeyId,
+              page,
+              items.length
+            ));
+          }
         case OPERATIONS.MOVIE_POSTER:
           return serveItemPoster("movie", capability, access, services, req, res, next);
         case OPERATIONS.EPISODE_POSTER:
@@ -98,6 +102,8 @@ module.exports = function createOpenMovieRoutes(services) {
           return serveItemPoster("episode", capability, access, services, req, res, next, "season");
         case OPERATIONS.POSTER_ATLAS:
           return serveAtlas(capability, access, openMoviePosterAtlases, req, res, next);
+        case OPERATIONS.ON_DECK_POSTER_ATLAS:
+          return serveOnDeckAtlas(capability, access, principal.user.id, services, res);
         case OPERATIONS.MOVIE_PLAYBACK:
           return redirectPlayback("movie", capability, access, principal.user, openMovie, playbackTokens, res);
         case OPERATIONS.EPISODE_PLAYBACK:
@@ -148,6 +154,37 @@ async function serveAtlas(capability, access, posterAtlases, req, res, next) {
   res.sendFile(resolved.filePath, (err) => {
     if (err && !isClientAbort(err)) next(httpError(500, "Poster atlas storage failure"));
   });
+}
+
+async function serveOnDeckAtlas(capability, access, userId, services, res) {
+  const page = capabilityInteger(capability, 0, 1);
+  const items = pageItems(await openMovieOnDeckItems(services, access, userId), page);
+  const image = await services.openMoviePosterAtlases.renderOnDeck(items, access.allowedLibraryKeys);
+  res.set({
+    "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+    Pragma: "no-cache",
+    Expires: "0",
+    "Surrogate-Control": "no-store",
+    "Content-Length": image.length
+  });
+  res.type("image/webp").end(image);
+}
+
+async function openMovieOnDeckItems(services, access, userId) {
+  const cards = await services.progress.onDeck(
+    services.mediaIndex,
+    services.metadata,
+    "",
+    "",
+    access.allowedLibraryKeys,
+    userId
+  );
+  return services.openMovie.onDeckCatalogue(cards, access.allowedLibraryKeys);
+}
+
+function pageItems(items, page) {
+  const offset = (page - 1) * ON_DECK_PAGE_SIZE;
+  return items.slice(offset, offset + ON_DECK_PAGE_SIZE);
 }
 
 async function redirectPlayback(kind, capability, access, user, openMovie, playbackTokens, res) {

@@ -2654,6 +2654,15 @@ textarea {
   min-height: 46px;
 }
 
+.ytdlp-settings-actions,
+.ytdlp-settings-status {
+  grid-column: 1 / -1;
+}
+
+.ytdlp-settings-actions {
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+}
+
 .compact-feature-body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -2874,6 +2883,10 @@ textarea {
   .api-key-form,
   .api-key-secret,
   .duplicate-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ytdlp-settings-actions {
     grid-template-columns: 1fr;
   }
 

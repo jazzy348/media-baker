@@ -17,8 +17,11 @@ const OPERATIONS = Object.freeze({
   POSTER_ATLAS: 8,
   MOVIE_PLAYBACK: 9,
   EPISODE_PLAYBACK: 10,
-  VARIANT_PLAYBACK: 11
+  VARIANT_PLAYBACK: 11,
+  ON_DECK_POSTER_ATLAS: 12
 });
+
+const ON_DECK_PAGE_SIZE = 12;
 
 class OpenMovieCapabilityService {
   constructor(key) {
@@ -30,7 +33,7 @@ class OpenMovieCapabilityService {
     return {
       moviesUrl: this.url(OPERATIONS.MOVIES, apiKeyId, 1),
       tvUrl: this.url(OPERATIONS.TV, apiKeyId, 1),
-      onDeckUrl: this.url(OPERATIONS.ON_DECK, apiKeyId)
+      onDeckUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, 1)
     };
   }
 
@@ -83,7 +86,8 @@ class OpenMovieCapabilityService {
   }
 
   protectMovieCatalogue(items, apiKeyId, currentOffset = 1) {
-    const protectedItems = (items || []).map((movie) => this.protectMovie(movie, apiKeyId));
+    const atlasUrls = new Map();
+    const protectedItems = (items || []).map((movie) => this.protectMovie(movie, apiKeyId, atlasUrls));
     return {
       offsetUrl: this.url(OPERATIONS.MOVIES, apiKeyId, nextOffset(items, currentOffset)),
       items: protectedItems
@@ -91,7 +95,8 @@ class OpenMovieCapabilityService {
   }
 
   protectTvCatalogue(items, apiKeyId, currentOffset = 1) {
-    const protectedItems = (items || []).map((show) => this.protectShow(show, apiKeyId));
+    const atlasUrls = new Map();
+    const protectedItems = (items || []).map((show) => this.protectShow(show, apiKeyId, atlasUrls));
     return {
       offsetUrl: this.url(OPERATIONS.TV, apiKeyId, nextEpisodeOffset(items, currentOffset)),
       items: protectedItems
@@ -113,55 +118,76 @@ class OpenMovieCapabilityService {
       })),
       variants: futureSequence(nextIds.variant, count, (id) => ({
         playbackUrl: this.url(OPERATIONS.VARIANT_PLAYBACK, apiKeyId, id)
+      })),
+      onDeckPages: futurePageSequence(count, (page) => ({
+        pageUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, page),
+        posterAtlasUrl: this.url(OPERATIONS.ON_DECK_POSTER_ATLAS, apiKeyId, page)
       }))
     };
   }
 
-  protectOnDeck(items, apiKeyId) {
-    return (items || []).map((item) => {
+  protectOnDeckPage(items, apiKeyId, page, totalItems) {
+    const atlasUrl = this.url(OPERATIONS.ON_DECK_POSTER_ATLAS, apiKeyId, page);
+    const protectedItems = (items || []).map((item, slot) => {
       const kind = item.showTitle ? "episode" : "movie";
       const protectedItem = this.protectPlayable(item, kind, apiKeyId);
       protectedItem.posterUrl = this.url(
-        kind === "episode" ? OPERATIONS.EPISODE_POSTER : OPERATIONS.MOVIE_POSTER,
+        kind === "episode" ? OPERATIONS.SEASON_POSTER : OPERATIONS.MOVIE_POSTER,
         apiKeyId,
         item.id
       );
-      return protectAtlas(protectedItem, apiKeyId, this);
+      protectedItem.posterAtlas = {
+        url: atlasUrl,
+        slot,
+        page: page - 1,
+        layout: 1
+      };
+      return protectedItem;
     });
+    return {
+      page,
+      pageSize: ON_DECK_PAGE_SIZE,
+      pageCount: Math.ceil(totalItems / ON_DECK_PAGE_SIZE),
+      totalItems,
+      posterAtlasUrl: atlasUrl,
+      nextPageUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, page + 1),
+      nextPosterAtlasUrl: this.url(OPERATIONS.ON_DECK_POSTER_ATLAS, apiKeyId, page + 1),
+      items: protectedItems
+    };
   }
 
-  protectMovie(movie, apiKeyId) {
+  protectMovie(movie, apiKeyId, atlasUrls = new Map()) {
     const output = this.protectPlayable(movie, "movie", apiKeyId);
     output.posterUrl = this.url(OPERATIONS.MOVIE_POSTER, apiKeyId, movie.id);
-    return protectAtlas(output, apiKeyId, this);
+    return protectAtlas(output, apiKeyId, this, atlasUrls);
   }
 
-  protectShow(show, apiKeyId) {
-    const seasons = (show.seasons || []).map((season) => this.protectSeason(season, apiKeyId));
+  protectShow(show, apiKeyId, atlasUrls = new Map()) {
+    const seasons = (show.seasons || []).map((season) => this.protectSeason(season, apiKeyId, atlasUrls));
     const firstEpisodeId = firstId((show.seasons || []).flatMap((season) => season.episodes || []));
     const { posterUrl, ...publicShow } = show;
     const output = { ...publicShow, seasons };
     output.posterUrl = firstEpisodeId
       ? this.url(OPERATIONS.SHOW_POSTER, apiKeyId, firstEpisodeId)
       : null;
-    return protectAtlas(output, apiKeyId, this);
+    return protectAtlas(output, apiKeyId, this, atlasUrls);
   }
 
-  protectSeason(season, apiKeyId) {
-    const episodes = (season.episodes || []).map((episode) => this.protectEpisode(episode, apiKeyId));
+  protectSeason(season, apiKeyId, atlasUrls = new Map()) {
+    const episodes = (season.episodes || []).map((episode) => this.protectEpisode(episode, apiKeyId, atlasUrls));
     const firstEpisodeId = firstId(season.episodes);
     const { posterUrl, ...publicSeason } = season;
     const output = { ...publicSeason, episodes };
     output.posterUrl = firstEpisodeId
       ? this.url(OPERATIONS.SEASON_POSTER, apiKeyId, firstEpisodeId)
       : null;
-    return protectAtlas(output, apiKeyId, this);
+    return protectAtlas(output, apiKeyId, this, atlasUrls);
   }
 
-  protectEpisode(episode, apiKeyId) {
+  protectEpisode(episode, apiKeyId, atlasUrls = new Map()) {
     const output = this.protectPlayable(episode, "episode", apiKeyId);
     output.posterUrl = this.url(OPERATIONS.EPISODE_POSTER, apiKeyId, episode.id);
-    return protectAtlas(output, apiKeyId, this);
+    return protectAtlas(output, apiKeyId, this, atlasUrls);
   }
 
   protectPlayable(item, kind, apiKeyId) {
@@ -189,14 +215,27 @@ function futureSequence(startId, count, createUrls) {
   };
 }
 
-function protectAtlas(item, apiKeyId, service) {
+function futurePageSequence(count, createUrls) {
+  return {
+    startPage: 1,
+    endPage: count,
+    urls: Array.from({ length: count }, (_, index) => createUrls(index + 1))
+  };
+}
+
+function protectAtlas(item, apiKeyId, service, atlasUrls) {
   if (!item.posterAtlas || !item.posterAtlas.id) return item;
   const { id, ...assignment } = item.posterAtlas;
+  let url = atlasUrls.get(id);
+  if (!url) {
+    url = service.url(OPERATIONS.POSTER_ATLAS, apiKeyId, id);
+    atlasUrls.set(id, url);
+  }
   return {
     ...item,
     posterAtlas: {
       ...assignment,
-      url: service.url(OPERATIONS.POSTER_ATLAS, apiKeyId, id)
+      url
     }
   };
 }
@@ -255,4 +294,8 @@ function operationName(operation) {
   return Object.keys(OPERATIONS).find((name) => OPERATIONS[name] === operation) || null;
 }
 
-module.exports = { OpenMovieCapabilityService, OPEN_MOVIE_OPERATIONS: OPERATIONS };
+module.exports = {
+  OpenMovieCapabilityService,
+  OPEN_MOVIE_OPERATIONS: OPERATIONS,
+  OPEN_MOVIE_ON_DECK_PAGE_SIZE: ON_DECK_PAGE_SIZE
+};

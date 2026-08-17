@@ -160,6 +160,29 @@ class OpenMoviePosterAtlasStore {
     });
   }
 
+  async removeCurrentPagesFrom(collectionKind, collectionKey, firstPage) {
+    await this.init();
+    const page = Number.parseInt(firstPage, 10);
+    if (!Number.isInteger(page) || page < 0) throw new Error("Invalid poster atlas page boundary");
+    if (this.mysql) {
+      await this.pool.execute(
+        `DELETE FROM ${CURRENT_TABLE}
+         WHERE collection_kind = ? AND collection_key = ? AND page_number >= ?`,
+        [collectionKind, collectionKey, page]
+      );
+      return;
+    }
+    await this.withJson((registry) => {
+      let changed = false;
+      for (const [key, entry] of Object.entries(registry.current)) {
+        if (entry.collectionKind !== collectionKind || entry.collectionKey !== collectionKey || Number(entry.page) < page) continue;
+        delete registry.current[key];
+        changed = true;
+      }
+      return changed;
+    });
+  }
+
   async resolve(id) {
     await this.init();
     const numericId = positiveInteger(id);

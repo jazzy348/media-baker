@@ -7,6 +7,7 @@ const { createIndexStore } = require("./services/indexStores");
 const { MediaIndex } = require("./services/mediaIndex");
 const { FFmpegService } = require("./services/ffmpegService");
 const { HlsService } = require("./services/hlsService");
+const { KeyframeStore } = require("./services/keyframeStore");
 const { ImageService } = require("./services/imageService");
 const { CachedImageService } = require("./services/cachedImageService");
 const { StaticImageService } = require("./services/staticImageService");
@@ -99,7 +100,9 @@ async function createApp() {
   const cachedImages = new CachedImageService(config, imageProcessor);
   const progressStore = new PlaybackProgressStore(config);
   const progress = new PlaybackProgressService(config, progressStore);
-  const hls = new HlsService(config, ffmpeg, progress);
+  const keyframes = new KeyframeStore(config);
+  await keyframes.init();
+  const hls = new HlsService(config, ffmpeg, progress, keyframes);
   const images = new ImageService(config, imageProcessor, cachedImages);
   const fallbackStream = new FallbackStreamService(config, ffmpeg);
   try {
@@ -127,12 +130,18 @@ async function createApp() {
   await openMoviePosterAtlases.init();
   const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata, ffmpeg, subtitles, openMoviePosterAtlases);
   const openMovieCapabilities = new OpenMovieCapabilityService(appSettings.openMovieEncryptionKey());
-  mediaIndex.addUpdateListener((libraryKey, details = {}) => {
+  mediaIndex.addUpdateListener(async (libraryKey, details = {}) => {
     hls.queueKeyframeIndex(details.changedMedia);
+    await keyframes.removeMany(details.removedMedia);
     mediaIndex.consumeChangedVideoMedia();
     return openMovie.sync(libraryKey);
   });
   hls.queueKeyframeIndex(mediaIndex.consumeChangedVideoMedia());
+  setImmediate(() => {
+    mediaIndex.videoMediaReferences()
+      .then((mediaFiles) => hls.queueMissingKeyframeIndex(mediaFiles))
+      .catch((error) => logger.error(`[hls] keyframe index backfill failed message="${error.message}"`, error));
+  });
   await openMovie.init();
   const skipMarkerStore = new SkipMarkerStore(config);
   const skipDetection = new SkipDetectionWorkerClient(config, skipMarkerStore);

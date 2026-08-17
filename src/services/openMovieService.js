@@ -196,7 +196,6 @@ class OpenMovieService {
       this.variantMap("episode", episodeLibraryKeys)
     ]);
 
-    const outputByMedia = new Map();
     const outputs = resolved.map(({ card, kind, library, item }) => {
       const ids = kind === "episode" ? episodeIds : movieIds;
       const id = ids.get(mappingKey(library.key, item.id));
@@ -220,49 +219,8 @@ class OpenMovieService {
         output.season = numberOrNull(item.season);
         output.episode = numberOrNull(item.episode);
       }
-      outputByMedia.set(mappingKey(library.key, item.id), output);
       return output;
     }).filter(Boolean);
-
-    if (this.posterAtlases) {
-      const selectedLibraryKeys = new Set(resolved.map((entry) => entry.library.key));
-      const records = await this.collectMedia(libraries.filter((library) => selectedLibraryKeys.has(library.key)));
-      const selectedMovieLibraries = new Set(movieLibraryKeys);
-      const movieAtlasEntries = records.movies
-        .filter(({ library }) => selectedMovieLibraries.has(library.key))
-        .map(({ library, item }) => {
-          const id = movieIds.get(mappingKey(library.key, item.id));
-          return id ? {
-            library,
-            item,
-            output: outputByMedia.get(mappingKey(library.key, item.id)) || { id }
-          } : null;
-        })
-        .filter(Boolean);
-      if (movieAtlasEntries.length > 0) await this.posterAtlases.decorateMovies(movieAtlasEntries);
-
-      const selectedSeasons = new Set(resolved
-        .filter((entry) => entry.kind === "episode")
-        .map((entry) => episodeCollectionKey(entry.library.key, entry.item.showId, entry.item.season)));
-      const episodeAtlasEntries = [];
-      for (const { library, show } of records.shows) {
-        for (const season of show.seasons || []) {
-          if (!selectedSeasons.has(episodeCollectionKey(library.key, show.id, season.season))) continue;
-          for (const item of season.episodes || []) {
-            const id = episodeIds.get(mappingKey(library.key, item.id));
-            if (!id) continue;
-            episodeAtlasEntries.push({
-              library,
-              showId: show.id,
-              season: season.season,
-              id,
-              output: outputByMedia.get(mappingKey(library.key, item.id)) || { id }
-            });
-          }
-        }
-      }
-      if (episodeAtlasEntries.length > 0) await this.posterAtlases.decorateEpisodes(episodeAtlasEntries);
-    }
 
     return outputs;
   }
@@ -591,10 +549,6 @@ function mappingMap(mappings) {
 
 function mappingKey(libraryKey, mediaId) {
   return `${libraryKey}:${mediaId}`;
-}
-
-function episodeCollectionKey(libraryKey, showId, season) {
-  return `${libraryKey}:${showId}:${Number(season) || 0}`;
 }
 
 function uniqueStrings(values) {

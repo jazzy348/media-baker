@@ -41,6 +41,7 @@ const state = {
   },
   health: null,
   updateStatus: null,
+  ytdlpAdminStatus: null,
   dismissedUpdateVersion: null
 };
 
@@ -421,6 +422,11 @@ const els = {
   settingsYtDlpPath: document.getElementById("settingsYtDlpPath"),
   settingsYtDlpTitle: document.getElementById("settingsYtDlpTitle"),
   settingsYtDlpPlaylists: document.getElementById("settingsYtDlpPlaylists"),
+  settingsYtDlpUpdate: document.getElementById("settingsYtDlpUpdate"),
+  settingsYtDlpUploadCookies: document.getElementById("settingsYtDlpUploadCookies"),
+  settingsYtDlpRemoveCookies: document.getElementById("settingsYtDlpRemoveCookies"),
+  settingsYtDlpCookieFile: document.getElementById("settingsYtDlpCookieFile"),
+  settingsYtDlpStatus: document.getElementById("settingsYtDlpStatus"),
   settingsIptvEnabled: document.getElementById("settingsIptvEnabled"),
   iptvSettingsBody: document.getElementById("iptvSettingsBody"),
   settingsIptvSourceType: document.getElementById("settingsIptvSourceType"),
@@ -439,6 +445,7 @@ const els = {
   settingsHlsTtl: document.getElementById("settingsHlsTtl"),
   settingsHlsSegment: document.getElementById("settingsHlsSegment"),
   settingsHlsWait: document.getElementById("settingsHlsWait"),
+  settingsHlsMinimumFreeSpace: document.getElementById("settingsHlsMinimumFreeSpace"),
   settingsForceTranscode: document.getElementById("settingsForceTranscode"),
   settingsOnDeckTtl: document.getElementById("settingsOnDeckTtl"),
   settingsWatchedThreshold: document.getElementById("settingsWatchedThreshold"),
@@ -642,6 +649,10 @@ els.rebuildSkipDetection.addEventListener("click", () => reanalyseSkipDetection(
 els.refreshSkipDetectionMarkers.addEventListener("click", loadSkipDetectionMarkers);
 els.settingsCheckUpdates.addEventListener("click", forceCheckForUpdates);
 els.settingsInstallUpdate.addEventListener("click", installAvailableUpdate);
+els.settingsYtDlpUpdate.addEventListener("click", forceYtDlpUpdate);
+els.settingsYtDlpUploadCookies.addEventListener("click", () => els.settingsYtDlpCookieFile.click());
+els.settingsYtDlpCookieFile.addEventListener("change", uploadYtDlpCookies);
+els.settingsYtDlpRemoveCookies.addEventListener("click", removeYtDlpCookies);
 els.installUpdateBanner.addEventListener("click", installAvailableUpdate);
 els.dismissUpdateBanner.addEventListener("click", dismissUpdateBanner);
 els.settingsIptvReload.addEventListener("click", forceReloadIptvSources);
@@ -3616,7 +3627,7 @@ async function loadSettings() {
     const data = await api("/api/admin/settings");
     fillSettingsForm(data.settings || {});
     updateSettingsVisibility();
-    await refreshUpdateStatus();
+    await Promise.all([refreshUpdateStatus(), refreshYtDlpAdminStatus()]);
     els.settingsStatus.textContent = "";
   } catch (err) {
     els.settingsStatus.textContent = err.message || "Failed to load settings.";
@@ -3687,6 +3698,7 @@ function fillSettingsForm(settings) {
   els.settingsHlsTtl.value = hls.ttlSeconds ?? 86400;
   els.settingsHlsSegment.value = hls.segmentSeconds ?? 6;
   els.settingsHlsWait.value = hls.segmentWaitTimeoutSeconds ?? 90;
+  els.settingsHlsMinimumFreeSpace.value = hls.minimumFreeSpaceMiB ?? 1024;
   els.settingsForceTranscode.checked = Boolean(hls.forceTranscodeCompatibleVideo);
   els.settingsOnDeckTtl.value = playback.onDeckTtlSeconds ?? 1209600;
   els.settingsWatchedThreshold.value = playback.watchedThresholdPercent ?? 10;
@@ -3718,12 +3730,117 @@ async function saveSettings(event) {
     await refreshIptvAvailability();
     await refreshSystemHealth();
     await refreshUpdateStatus();
+    await refreshYtDlpAdminStatus();
     els.settingsStatus.textContent = "Settings saved.";
   } catch (err) {
     els.settingsStatus.textContent = err.message || "Failed to save settings.";
   } finally {
     els.saveSettings.disabled = false;
   }
+}
+
+async function refreshYtDlpAdminStatus() {
+  if (!hasPermission("canManageSettings")) return;
+  try {
+    const result = await api("/api/admin/ytdlp");
+    renderYtDlpAdminStatus(result.status || {});
+  } catch (err) {
+    state.ytdlpAdminStatus = null;
+    els.settingsYtDlpStatus.textContent = err.message || "Could not load YT-DLP status.";
+    els.settingsYtDlpUpdate.disabled = true;
+    els.settingsYtDlpRemoveCookies.disabled = true;
+  }
+}
+
+function renderYtDlpAdminStatus(status) {
+  state.ytdlpAdminStatus = status;
+  const cookies = status.cookies || {};
+  const version = status.validation && status.validation.version;
+  const details = [];
+  if (version) details.push(`YT-DLP ${version}.`);
+  if (cookies.configured) {
+    details.push(`${cookies.cookieCount || 0} YouTube cookie${cookies.cookieCount === 1 ? "" : "s"} installed${cookies.updatedAt ? ` (${formatDate(cookies.updatedAt)})` : ""}.`);
+  } else {
+    details.push("No YouTube cookies installed.");
+  }
+  if (status.lastUpdateError) {
+    details.push(`Last update failed: ${status.lastUpdateError}`);
+  } else if (status.lastUpdateMessage) {
+    details.push(status.lastUpdateMessage);
+  }
+  els.settingsYtDlpStatus.textContent = details.join(" ");
+  els.settingsYtDlpUpdate.disabled = !status.enabled || !status.available || Boolean(status.updating);
+  els.settingsYtDlpRemoveCookies.disabled = !cookies.configured;
+}
+
+async function forceYtDlpUpdate() {
+  els.settingsYtDlpUpdate.disabled = true;
+  els.settingsYtDlpStatus.textContent = "Updating YT-DLP...";
+  try {
+    const result = await api("/api/admin/ytdlp/update", state.token, { method: "POST" });
+    renderYtDlpAdminStatus(result.status || {});
+  } catch (err) {
+    els.settingsYtDlpStatus.textContent = err.message || "YT-DLP update failed.";
+    els.settingsYtDlpUpdate.disabled = false;
+  }
+}
+
+async function uploadYtDlpCookies(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  els.settingsYtDlpUploadCookies.disabled = true;
+  els.settingsYtDlpStatus.textContent = "Reading YouTube cookies...";
+  try {
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error("The selected cookies file is too large.");
+    }
+    const contents = youtubeCookiesForUpload(await file.text());
+    const result = await api("/api/admin/ytdlp/cookies", state.token, {
+      method: "PUT",
+      body: JSON.stringify({ contents })
+    });
+    renderYtDlpAdminStatus({
+      ...(state.ytdlpAdminStatus || {}),
+      cookies: result.cookies
+    });
+  } catch (err) {
+    els.settingsYtDlpStatus.textContent = err.message || "Could not install the cookie file.";
+  } finally {
+    els.settingsYtDlpUploadCookies.disabled = false;
+  }
+}
+
+async function removeYtDlpCookies() {
+  if (!window.confirm("Remove the stored YouTube cookies?")) return;
+  els.settingsYtDlpRemoveCookies.disabled = true;
+  els.settingsYtDlpStatus.textContent = "Removing YouTube cookies...";
+  try {
+    const result = await api("/api/admin/ytdlp/cookies", state.token, { method: "DELETE" });
+    renderYtDlpAdminStatus({
+      ...(state.ytdlpAdminStatus || {}),
+      cookies: result.cookies
+    });
+  } catch (err) {
+    els.settingsYtDlpStatus.textContent = err.message || "Could not remove the cookie file.";
+    els.settingsYtDlpRemoveCookies.disabled = false;
+  }
+}
+
+function youtubeCookiesForUpload(contents) {
+  const lines = String(contents || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  const header = lines.find((line) => /^# (?:Netscape HTTP|HTTP) Cookie File\b/i.test(line.trim()));
+  const cookies = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") && !trimmed.startsWith("#HttpOnly_")) return false;
+    const fields = trimmed.split("\t");
+    if (fields.length < 7) return false;
+    const domain = fields[0].replace("#HttpOnly_", "").replace(/^\./, "").toLowerCase();
+    return domain === "youtube.com" || domain.endsWith(".youtube.com");
+  });
+  if (!header) throw new Error("Select a Netscape-format cookies.txt file.");
+  if (cookies.length === 0) throw new Error("The selected file does not contain YouTube cookies.");
+  return `${header.trim()}\n${cookies.join("\n")}\n`;
 }
 
 async function forceCheckForUpdates() {
@@ -4107,6 +4224,7 @@ function settingsFromForm() {
       ttlSeconds: intInput(els.settingsHlsTtl, 86400),
       segmentSeconds: intInput(els.settingsHlsSegment, 6),
       segmentWaitTimeoutSeconds: intInput(els.settingsHlsWait, 90),
+      minimumFreeSpaceMiB: intInput(els.settingsHlsMinimumFreeSpace, 1024, 0),
       forceTranscodeCompatibleVideo: els.settingsForceTranscode.checked
     },
     fallbackStream: {

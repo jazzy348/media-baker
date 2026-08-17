@@ -125,34 +125,37 @@ class OpenMoviePosterAtlasService {
 
   async ensureCollectionNow(collection) {
     const currentPages = await this.store.currentPages(collection.kind, collection.key);
-    const currentEntityKeys = new Set(currentPages.flatMap((page) => page.slots.map((slot) => slot.entityKey).filter(Boolean)));
-    const newItems = collection.items.filter((item) => !currentEntityKeys.has(item.entityKey));
-    let nextPage = currentPages.length > 0
-      ? Math.max(...currentPages.map((page) => page.page)) + 1
-      : 0;
-    const pages = [...currentPages];
-    for (let offset = 0; offset < newItems.length; offset += SLOTS_PER_ATLAS) {
-      const items = newItems.slice(offset, offset + SLOTS_PER_ATLAS);
-      pages.push({
-        id: null,
-        libraryKey: collection.libraryKey,
-        collectionKind: collection.kind,
-        collectionKey: collection.key,
-        page: nextPage,
-        layout: LAYOUT_VERSION,
-        contentSignature: null,
-        filename: null,
-        slots: Array.from({ length: SLOTS_PER_ATLAS }, (_, slot) => ({
-          slot,
-          entityKey: items[slot] ? items[slot].entityKey : null
-        }))
-      });
-      nextPage += 1;
+    const itemMap = new Map(collection.items.map((item) => [item.entityKey, item]));
+    const orderedEntityKeys = [];
+    const seenEntityKeys = new Set();
+    for (const page of currentPages.sort((first, second) => first.page - second.page)) {
+      for (const slot of normalizedPageSlots(page.slots)) {
+        if (!slot.entityKey || !itemMap.has(slot.entityKey) || seenEntityKeys.has(slot.entityKey)) continue;
+        orderedEntityKeys.push(slot.entityKey);
+        seenEntityKeys.add(slot.entityKey);
+      }
+    }
+    for (const item of collection.items) {
+      if (seenEntityKeys.has(item.entityKey)) continue;
+      orderedEntityKeys.push(item.entityKey);
+      seenEntityKeys.add(item.entityKey);
     }
 
-    const itemMap = new Map(collection.items.map((item) => [item.entityKey, item]));
+    const pages = [];
+    for (let offset = 0; offset < orderedEntityKeys.length; offset += SLOTS_PER_ATLAS) {
+      const entityKeys = orderedEntityKeys.slice(offset, offset + SLOTS_PER_ATLAS);
+      pages.push({
+        page: Math.floor(offset / SLOTS_PER_ATLAS),
+        slots: Array.from({ length: SLOTS_PER_ATLAS }, (_, slot) => ({
+          slot,
+          entityKey: entityKeys[slot] || null
+        }))
+      });
+    }
+
+    const currentByPage = new Map(currentPages.map((page) => [page.page, page]));
     const assignmentMap = new Map();
-    for (const page of pages.sort((first, second) => first.page - second.page)) {
+    for (const page of pages) {
       const slots = normalizedPageSlots(page.slots);
       const contentSignature = crypto.createHash("sha256").update(JSON.stringify({
         renderer: rendererSignature(collection.kind),
@@ -160,8 +163,9 @@ class OpenMoviePosterAtlasService {
         slots: slots.map((slot) => slot.entityKey)
       })).digest("hex");
 
-      let published = page;
-      if (!page.id || page.layout !== LAYOUT_VERSION || page.contentSignature !== contentSignature) {
+      const current = currentByPage.get(page.page);
+      let published = current;
+      if (!current || current.layout !== LAYOUT_VERSION || current.contentSignature !== contentSignature) {
         published = await this.publishPage(collection, page.page, slots, contentSignature);
       }
       for (const slot of slots) {
@@ -174,6 +178,7 @@ class OpenMoviePosterAtlasService {
         });
       }
     }
+    await this.store.removeCurrentPagesFrom(collection.kind, collection.key, pages.length);
 
     for (const item of collection.items) {
       const assignment = assignmentMap.get(item.entityKey);
@@ -218,6 +223,35 @@ class OpenMoviePosterAtlasService {
     }
     const cached = await this.ensureCached(atlas);
     return { atlas, ...cached, forbidden: false };
+  }
+
+  async renderOnDeck(items, allowedLibraryKeys = null) {
+    if (!this.imageProcessor || typeof this.imageProcessor.createPosterAtlasBuffer !== "function") {
+      throw new Error("In-memory poster atlas rendering is unavailable");
+    }
+    const artworkPaths = [];
+    for (const item of (items || []).slice(0, SLOTS_PER_ATLAS)) {
+      artworkPaths.push(await this.resolveOnDeckArtwork(item, allowedLibraryKeys));
+    }
+    return this.imageProcessor.createPosterAtlasBuffer(artworkPaths, this.artwork.placeholderPath);
+  }
+
+  async resolveOnDeckArtwork(item, allowedLibraryKeys) {
+    const kind = item && item.showTitle ? "episode" : "movie";
+    const mapping = item && await this.idStore.resolve(kind, item.id);
+    if (!mapping || (Array.isArray(allowedLibraryKeys) && !allowedLibraryKeys.includes(mapping.libraryKey))) {
+      return this.artwork.placeholderPath;
+    }
+    const library = this.artwork.mediaIndex.libraryForKey(mapping.libraryKey);
+    if (!library) return this.artwork.placeholderPath;
+    const media = kind === "episode"
+      ? await this.artwork.mediaIndex.getEpisode(mapping.mediaId, library.key)
+      : await this.artwork.mediaIndex.getMovie(mapping.mediaId, library.key);
+    if (!media) return this.artwork.placeholderPath;
+    const resolved = { id: mapping.id, library, item: media };
+    return kind === "episode"
+      ? this.artwork.resolvedEpisode(resolved, "season")
+      : this.artwork.resolvedMovie(resolved);
   }
 
   async ensureCached(atlas) {

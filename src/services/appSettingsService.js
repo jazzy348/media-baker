@@ -102,6 +102,7 @@ const DEFAULT_RUNTIME_SETTINGS = {
     ttlSeconds: 24 * 60 * 60,
     segmentSeconds: 6,
     segmentWaitTimeoutSeconds: 90,
+    minimumFreeSpaceMiB: 1024,
     forceTranscodeCompatibleVideo: false
   },
   fallbackStream: {
@@ -340,6 +341,7 @@ function runtimeSettingsFromConfig(config) {
       ttlSeconds: config.hls && config.hls.ttlSeconds,
       segmentSeconds: config.hls && config.hls.segmentSeconds,
       segmentWaitTimeoutSeconds: config.hls && config.hls.segmentWaitTimeoutSeconds,
+      minimumFreeSpaceMiB: config.hls && config.hls.minimumFreeSpaceMiB,
       forceTranscodeCompatibleVideo: config.hls && config.hls.forceTranscodeCompatibleVideo
     },
     fallbackStream: {
@@ -493,6 +495,7 @@ function normalizeRuntimeSettings(input = {}) {
       ttlSeconds: intValue(merged.hls.ttlSeconds, DEFAULT_RUNTIME_SETTINGS.hls.ttlSeconds),
       segmentSeconds: intValue(merged.hls.segmentSeconds, DEFAULT_RUNTIME_SETTINGS.hls.segmentSeconds),
       segmentWaitTimeoutSeconds: intValue(merged.hls.segmentWaitTimeoutSeconds, DEFAULT_RUNTIME_SETTINGS.hls.segmentWaitTimeoutSeconds),
+      minimumFreeSpaceMiB: intValue(merged.hls.minimumFreeSpaceMiB, DEFAULT_RUNTIME_SETTINGS.hls.minimumFreeSpaceMiB, 0),
       forceTranscodeCompatibleVideo: boolValue(merged.hls.forceTranscodeCompatibleVideo, DEFAULT_RUNTIME_SETTINGS.hls.forceTranscodeCompatibleVideo)
     },
     fallbackStream: {

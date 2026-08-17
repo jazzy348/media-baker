@@ -3,6 +3,12 @@ const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 const logger = require("../utils/logger");
+const {
+  cookieArgs,
+  cookieCount,
+  cookieFilePath,
+  sanitiseYoutubeCookies
+} = require("../utils/ytdlpCookies");
 
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const VALIDATION_TTL_MS = 60 * 1000;
@@ -20,6 +26,8 @@ class YtDlpService {
     this.updateTimer = null;
     this.lastUpdateAt = null;
     this.lastUpdateError = null;
+    this.lastUpdateMessage = null;
+    this.updatePromise = null;
     this.onDownloadComplete = null;
     this.indexRefreshTimer = null;
     this.indexRefreshPromise = Promise.resolve();
@@ -119,6 +127,23 @@ class YtDlpService {
       return this.status();
     }
 
+    return this.runUpdate();
+  }
+
+  async forceUpdate() {
+    await this.ensureReady();
+    return this.runUpdate(true);
+  }
+
+  runUpdate(force = false) {
+    if (this.updatePromise) return this.updatePromise;
+    this.updatePromise = this.performUpdate(force).finally(() => {
+      this.updatePromise = null;
+    });
+    return this.updatePromise;
+  }
+
+  async performUpdate(force = false) {
     const validation = await this.validate();
     if (!validation.ok) {
       return this.status();
@@ -128,19 +153,22 @@ class YtDlpService {
       logger.info(`[yt-dlp] self-update skipped package-manager=true path="${this.config.binaryPath}"`);
       this.lastUpdateAt = Date.now();
       this.lastUpdateError = null;
+      this.lastUpdateMessage = "YT-DLP is managed by the operating system package manager.";
       return this.status();
     }
 
     try {
-      logger.info(`[yt-dlp] self-update starting path="${this.config.binaryPath}"`);
+      logger.info(`[yt-dlp] self-update starting path="${this.config.binaryPath}" forced=${force}`);
       await execOutput(this.config.binaryPath, ["-U"], { timeout: 120000 });
       this.lastUpdateAt = Date.now();
       this.lastUpdateError = null;
+      this.lastUpdateMessage = "YT-DLP is up to date.";
       this.validation = null;
       logger.info("[yt-dlp] self-update complete");
     } catch (err) {
       this.lastUpdateAt = Date.now();
       this.lastUpdateError = err.message;
+      this.lastUpdateMessage = null;
       logger.info(`[yt-dlp] self-update failed message="${err.message}"`);
     }
 
@@ -155,14 +183,58 @@ class YtDlpService {
       binaryPath: this.config.binaryPath,
       lastUpdateAt: this.lastUpdateAt ? new Date(this.lastUpdateAt).toISOString() : null,
       lastUpdateError: this.lastUpdateError,
+      lastUpdateMessage: this.lastUpdateMessage,
+      updating: Boolean(this.updatePromise),
       downloads: [...this.downloads.values()].map(publicDownload)
     };
+  }
+
+  async cookieStatus() {
+    const filePath = cookieFilePath(this.rootConfig);
+    try {
+      const [stat, contents] = await Promise.all([
+        fs.stat(filePath),
+        fs.readFile(filePath, "utf8")
+      ]);
+      return {
+        configured: stat.isFile() && stat.size > 0,
+        cookieCount: cookieCount(contents),
+        updatedAt: stat.mtime.toISOString()
+      };
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return { configured: false, cookieCount: 0, updatedAt: null };
+      }
+      throw err;
+    }
+  }
+
+  async saveCookies(contents) {
+    const cleaned = sanitiseYoutubeCookies(contents);
+    const filePath = cookieFilePath(this.rootConfig);
+    const tempPath = `${filePath}.${crypto.randomBytes(8).toString("hex")}.tmp`;
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    try {
+      await fs.writeFile(tempPath, cleaned, { encoding: "utf8", mode: 0o600 });
+      await fs.chmod(tempPath, 0o600).catch(() => {});
+      await replaceCookieFile(tempPath, filePath);
+      logger.info(`[yt-dlp] YouTube cookies updated entries=${cookieCount(cleaned)}`);
+      return this.cookieStatus();
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => {});
+    }
+  }
+
+  async removeCookies() {
+    await fs.rm(cookieFilePath(this.rootConfig), { force: true });
+    logger.info("[yt-dlp] YouTube cookies removed");
+    return this.cookieStatus();
   }
 
   async inspect(url) {
     await this.ensureReady();
     const inputUrl = validInputUrl(url);
-    const inspection = await inspectMedia(this.config.binaryPath, inputUrl);
+    const inspection = await inspectMedia(this.config.binaryPath, inputUrl, await cookieArgs(this.rootConfig));
     return {
       url: inputUrl,
       title: inspection.title,
@@ -213,16 +285,17 @@ class YtDlpService {
 
   async prepareDownload(record, inputUrl) {
     const allowPlaylist = this.config.allowPlaylists || isExplicitPlaylistUrl(inputUrl);
+    const authenticationArgs = await cookieArgs(this.rootConfig);
     let inspection = null;
     try {
-      inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist);
+      inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist, authenticationArgs);
       applyInspection(record, inspection);
     } catch (err) {
       logger.info(`[yt-dlp] playlist inspection failed id=${record.id} message="${err.message}"; continuing`);
       record.isPlaylist = isExplicitPlaylistUrl(inputUrl);
     }
 
-    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist, record.isLive);
+    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist, record.isLive, authenticationArgs);
     logger.info(`[yt-dlp] download starting id=${record.id} playlist=${record.isPlaylist} live=${record.isLive} items=${record.items.length} url="${inputUrl}" output="${this.config.downloadPath}"`);
     logger.full(`[yt-dlp] command ${this.config.binaryPath} ${args.map(quoteArg).join(" ")}`);
 
@@ -423,12 +496,13 @@ function ytDlpLibrary(settings) {
 const ITEM_MARKER = "__MEDIA_BAKER_ITEM__";
 const FILE_MARKER = "__MEDIA_BAKER_FILE__";
 
-async function inspectDownload(binaryPath, url, allowPlaylist) {
+async function inspectDownload(binaryPath, url, allowPlaylist, authenticationArgs) {
   const stdout = await execOutput(binaryPath, [
     "--flat-playlist",
     "--dump-single-json",
     "--no-warnings",
     allowPlaylist ? "--yes-playlist" : "--no-playlist",
+    ...authenticationArgs,
     url
   ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
   const data = JSON.parse(stdout);
@@ -457,12 +531,13 @@ async function inspectDownload(binaryPath, url, allowPlaylist) {
   };
 }
 
-async function inspectMedia(binaryPath, url) {
+async function inspectMedia(binaryPath, url, authenticationArgs) {
   const stdout = await execOutput(binaryPath, [
     "--dump-single-json",
     "--skip-download",
     "--no-warnings",
     "--no-playlist",
+    ...authenticationArgs,
     url
   ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
   const data = JSON.parse(stdout);
@@ -486,7 +561,7 @@ function applyInspection(record, inspection) {
     : "Media information loaded.";
 }
 
-function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive) {
+function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive, authenticationArgs) {
   const outputTemplate = isPlaylist
     ? "%(playlist).150B/%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
     : "%(title).200B [%(id)s].%(ext)s";
@@ -513,6 +588,7 @@ function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive) {
       "--retry-sleep", "fragment:exp=1:20"
     );
   }
+  args.push(...authenticationArgs);
   args.push(url);
   return args;
 }
@@ -701,6 +777,16 @@ async function replaceLiveFile(inputPath, tempPath, outputPath) {
   }
   await fs.rename(tempPath, outputPath);
   await fs.rm(inputPath, { force: true });
+}
+
+async function replaceCookieFile(tempPath, filePath) {
+  try {
+    await fs.rename(tempPath, filePath);
+  } catch (err) {
+    if (!["EEXIST", "EPERM"].includes(err.code)) throw err;
+    await fs.rm(filePath, { force: true });
+    await fs.rename(tempPath, filePath);
+  }
 }
 
 function finishDownload(record, status, error) {

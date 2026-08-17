@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const logger = require("../utils/logger");
+const { cookieArgs } = require("../utils/ytdlpCookies");
 
 const RELAY_IDLE_MS = 60 * 1000;
 const RELAY_START_TIMEOUT_MS = 30 * 1000;
@@ -128,7 +129,11 @@ class YtDlpRelayService {
   async launch(relay) {
     await fs.rm(relay.cacheDir, { recursive: true, force: true });
     await fs.mkdir(relay.cacheDir, { recursive: true });
-    const sources = await resolveRelaySources(this.ytdlp.binaryPath, relay.url);
+    const sources = await resolveRelaySources(
+      this.ytdlp.binaryPath,
+      relay.url,
+      await cookieArgs(this.config)
+    );
     const hardware = isH264Codec(sources.videoCodec)
       ? {}
       : await this.ffmpeg.detectHardwareProfile();
@@ -285,10 +290,11 @@ async function waitForPlaylist(filePath, transcoder, timeoutMs, relay) {
   throw new Error(`Timed out waiting for the live relay to start: ${stderrSummary(relay)}`);
 }
 
-async function resolveRelaySources(binaryPath, url) {
+async function resolveRelaySources(binaryPath, url, authenticationArgs) {
   const stdout = await execOutput(binaryPath, [
     "--dump-single-json", "--skip-download", "--no-warnings", "--no-playlist",
     "-f", RELAY_FORMAT,
+    ...authenticationArgs,
     url
   ], 120000);
   const data = JSON.parse(stdout);

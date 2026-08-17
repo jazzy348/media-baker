@@ -166,6 +166,16 @@ function openApiSpec() {
           progress: { $ref: "#/components/schemas/OpenMovieProgress" },
           onDeckReason: { type: "string", enum: ["resume", "next"] }
         }, ["library", "title", "year", "overview", "playbackUrl", "playbackVariants", "posterAtlas", "progress", "onDeckReason"]),
+        OpenMovieOnDeckPage: objectSchema({
+          page: { type: "integer", minimum: 1 },
+          pageSize: { type: "integer", enum: [12] },
+          pageCount: { type: "integer", minimum: 0 },
+          totalItems: { type: "integer", minimum: 0 },
+          posterAtlasUrl: { type: "string", description: "Dynamic 4x3 atlas for this page. The response is never cacheable." },
+          nextPageUrl: { type: "string" },
+          nextPosterAtlasUrl: { type: "string" },
+          items: { type: "array", maxItems: 12, items: { $ref: "#/components/schemas/OpenMovieOnDeckItem" } }
+        }, ["page", "pageSize", "pageCount", "totalItems", "posterAtlasUrl", "nextPageUrl", "nextPosterAtlasUrl", "items"]),
         OpenMovieBootstrap: objectSchema({
           moviesUrl: { type: "string" },
           tvUrl: { type: "string" },
@@ -180,12 +190,22 @@ function openApiSpec() {
             items: { type: "object", additionalProperties: { type: "string" } }
           }
         }, ["startId", "endId", "urls"]),
+        OpenMovieFuturePageSequence: objectSchema({
+          startPage: { type: "integer", minimum: 1 },
+          endPage: { type: "integer", minimum: 1 },
+          urls: {
+            type: "array",
+            description: "Ordered by one-based On Deck page number.",
+            items: { type: "object", additionalProperties: { type: "string" } }
+          }
+        }, ["startPage", "endPage", "urls"]),
         OpenMovieFutureUrls: objectSchema({
           count: { type: "integer", minimum: 1, maximum: 5000 },
           movies: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
           episodes: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
-          variants: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" }
-        }, ["count", "movies", "episodes", "variants"]),
+          variants: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
+          onDeckPages: { $ref: "#/components/schemas/OpenMovieFuturePageSequence" }
+        }, ["count", "movies", "episodes", "variants", "onDeckPages"]),
         OpenMovieShow: objectSchema({
           library: { type: "string" },
           libraryTitle: { type: "string" },
@@ -291,6 +311,18 @@ function openApiSpec() {
         put: operation("Admin", "Update runtime settings", "Applies supported settings without restarting.", true, {
           requestBody: jsonBody({ $ref: "#/components/schemas/SettingsRequest" })
         })
+      },
+      "/api/admin/ytdlp": {
+        get: operation("Admin", "Get YT-DLP administration status", "Returns the installed version, update state, and whether YouTube cookies are configured. Cookie contents are never returned.")
+      },
+      "/api/admin/ytdlp/update": {
+        post: operation("Admin", "Force YT-DLP update", "Runs YT-DLP's self-update immediately. Requires settings-management permission.")
+      },
+      "/api/admin/ytdlp/cookies": {
+        put: operation("Admin", "Install YouTube cookies", "Validates a Netscape cookies.txt payload and stores only YouTube cookie records.", true, {
+          requestBody: jsonBody(objectSchema({ contents: { type: "string" } }))
+        }),
+        delete: operation("Admin", "Remove YouTube cookies", "Deletes the stored YouTube cookie file. Requires settings-management permission.")
       },
       "/api/admin/skip-detection": {
         get: operation("Admin", "Skip detection status", "Returns checkpoint progress, the current episode and phase, ETA, marker counts, and failures. Requires settings-management permission.")
@@ -743,18 +775,18 @@ function openApiSpec() {
         })
       },
       "/api/openmovie/auth/future-urls": {
-        get: operation("OpenMovie", "Generate future OpenMovie capability URLs", "Uses the current next movie, episode, and playback-variant IDs to generate ordered capability URL batches without reserving IDs or writing registry data. Each entry maps to startId plus its zero-based array index and returns 404 until that ID is assigned. This bootstrap endpoint accepts an API key; the generated capability URLs do not.", true, {
+        get: operation("OpenMovie", "Generate future OpenMovie capability URLs", "Uses the current next movie, episode, and playback-variant IDs to generate ordered capability URL batches without reserving IDs or writing registry data. It also returns On Deck page and dynamic atlas capabilities for pages 1 through count. This bootstrap endpoint accepts an API key; the generated capability URLs do not.", true, {
           security: openMovieSecurity(),
           parameters: [{
             name: "count",
             in: "query",
             required: true,
             schema: { type: "integer", minimum: 1, maximum: 5000 },
-            description: "Number of future URLs to generate for each independent ID sequence."
+            description: "Number of future URLs to generate for each independent ID sequence and On Deck page sequence."
           }],
           responses: {
             200: {
-              description: "Future movie, episode, and playback-variant capability URL sequences",
+              description: "Future movie, episode, playback-variant, and On Deck page capability URL sequences",
               content: { "application/json": { schema: { $ref: "#/components/schemas/OpenMovieFutureUrls" } } }
             },
             400: errorResponse(),

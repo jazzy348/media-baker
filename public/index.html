@@ -859,6 +859,13 @@
                   <label>Download path<input id="settingsYtDlpPath" type="text" autocomplete="off" placeholder="C:\MediaBaker\downloads"></label>
                   <label>Library title<input id="settingsYtDlpTitle" type="text" autocomplete="off"></label>
                   <label class="settings-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlists from other providers</label>
+                  <div class="action-row ytdlp-settings-actions">
+                    <button id="settingsYtDlpUpdate" class="secondary-button settings-action-button" type="button">Update YT-DLP</button>
+                    <button id="settingsYtDlpUploadCookies" class="secondary-button settings-action-button" type="button">Upload cookies.txt</button>
+                    <button id="settingsYtDlpRemoveCookies" class="secondary-button settings-action-button" type="button">Remove cookies</button>
+                    <input id="settingsYtDlpCookieFile" class="hidden" type="file" accept=".txt,text/plain">
+                  </div>
+                  <p id="settingsYtDlpStatus" class="status ytdlp-settings-status"></p>
                 </div>
               </fieldset>
               <fieldset>
@@ -882,6 +889,7 @@
                 <label>HLS TTL seconds<input id="settingsHlsTtl" type="number" min="1" step="1"></label>
                 <label>Segment seconds<input id="settingsHlsSegment" type="number" min="1" step="1"></label>
                 <label>Segment wait timeout<input id="settingsHlsWait" type="number" min="1" step="1"></label>
+                <label>Minimum free cache space MiB<input id="settingsHlsMinimumFreeSpace" type="number" min="0" step="128"></label>
                 <label><input id="settingsForceTranscode" type="checkbox"> Force compatible video transcode</label>
                 <label>On-deck TTL seconds<input id="settingsOnDeckTtl" type="number" min="1" step="1"></label>
                 <label>Watched threshold %<input id="settingsWatchedThreshold" type="number" min="1" max="100" step="1"></label>

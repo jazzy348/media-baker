@@ -114,25 +114,16 @@ class StaticImageService {
   async createPosterAtlas(inputPaths, outputPath, placeholderPath) {
     const sources = Array.from({ length: 12 }, (_, index) => inputPaths[index] || placeholderPath);
     return this.run(async () => {
-      const tiles = await Promise.all(sources.map(async (source, index) => ({
-        input: await posterAtlasTile(source, placeholderPath),
-        left: index % 4 * 300,
-        top: Math.floor(index / 4) * 450
-      })));
-      await this.writeAtomic(outputPath, (temporaryPath) => sharp({
-        create: {
-          width: 1200,
-          height: 1350,
-          channels: 3,
-          background: "#080d12"
-        }
-      })
-        .composite(tiles)
-        .removeAlpha()
-        .toColourspace("srgb")
-        .webp({ quality: 88, effort: 4 })
-        .toFile(temporaryPath));
+      const tiles = await posterAtlasTiles(sources, placeholderPath);
+      await this.writeAtomic(outputPath, (temporaryPath) => posterAtlasPipeline(tiles).toFile(temporaryPath));
     });
+  }
+
+  async createPosterAtlasBuffer(inputPaths, placeholderPath) {
+    const sources = Array.from({ length: 12 }, (_, index) => inputPaths[index] || placeholderPath);
+    return this.run(async () => posterAtlasPipeline(
+      await posterAtlasTiles(sources, placeholderPath)
+    ).toBuffer());
   }
 
   async createLabelledPoster(inputPath, outputPath, label) {
@@ -264,6 +255,29 @@ async function posterAtlasTile(source, placeholderPath) {
     logger.full(`[images] poster atlas tile fallback input="${source}" message="${err.message}"`);
     return renderPosterAtlasTile(placeholderPath);
   }
+}
+
+function posterAtlasTiles(sources, placeholderPath) {
+  return Promise.all(sources.map(async (source, index) => ({
+    input: await posterAtlasTile(source, placeholderPath),
+    left: index % 4 * 300,
+    top: Math.floor(index / 4) * 450
+  })));
+}
+
+function posterAtlasPipeline(tiles) {
+  return sharp({
+    create: {
+      width: 1200,
+      height: 1350,
+      channels: 3,
+      background: "#080d12"
+    }
+  })
+    .composite(tiles)
+    .removeAlpha()
+    .toColourspace("srgb")
+    .webp({ quality: 88, effort: 4 });
 }
 
 function renderPosterAtlasTile(source) {
