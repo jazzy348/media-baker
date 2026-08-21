@@ -51,6 +51,10 @@ class SkipDetectionWorkerClient {
     return this.request("getStatus");
   }
 
+  getTaskStatus() {
+    return this.request("getTaskStatus");
+  }
+
   retryFailures() {
     return this.request("retryFailures");
   }

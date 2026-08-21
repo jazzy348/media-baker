@@ -4,9 +4,10 @@ const path = require("path");
 const crypto = require("crypto");
 const logger = require("../utils/logger");
 const {
-  cookieArgs,
+  cookieArgsForUrl,
   cookieCount,
   cookieFilePath,
+  isYoutubeUrl,
   sanitiseYoutubeCookies
 } = require("../utils/ytdlpCookies");
 
@@ -14,6 +15,8 @@ const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const VALIDATION_TTL_MS = 60 * 1000;
 const INDEX_REFRESH_DELAY_MS = 750;
 const LIBRARY_KEY = "yt-dlp";
+const MAX_DIAGNOSTIC_LINES = 30;
+const MAX_DIAGNOSTIC_LENGTH = 1600;
 
 class YtDlpService {
   constructor(config, ffmpeg) {
@@ -234,7 +237,11 @@ class YtDlpService {
   async inspect(url) {
     await this.ensureReady();
     const inputUrl = validInputUrl(url);
-    const inspection = await inspectMedia(this.config.binaryPath, inputUrl, await cookieArgs(this.rootConfig));
+    const inspection = await inspectMedia(
+      this.config.binaryPath,
+      inputUrl,
+      await cookieArgsForUrl(this.rootConfig, inputUrl)
+    );
     return {
       url: inputUrl,
       title: inspection.title,
@@ -270,6 +277,7 @@ class YtDlpService {
       activeItemId: null,
       message: "Reading media information...",
       error: null,
+      diagnostics: [],
       startedAt: new Date().toISOString(),
       finishedAt: null
     };
@@ -285,7 +293,8 @@ class YtDlpService {
 
   async prepareDownload(record, inputUrl) {
     const allowPlaylist = this.config.allowPlaylists || isExplicitPlaylistUrl(inputUrl);
-    const authenticationArgs = await cookieArgs(this.rootConfig);
+    const authenticationArgs = await cookieArgsForUrl(this.rootConfig, inputUrl);
+    logger.full(`[yt-dlp] authentication id=${record.id} provider=${isYoutubeUrl(inputUrl) ? "youtube" : "other"} cookies=${authenticationArgs.length > 0}`);
     let inspection = null;
     try {
       inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist, authenticationArgs);
@@ -308,7 +317,10 @@ class YtDlpService {
     record.processId = child.pid || null;
 
     const stdout = createLineBuffer((lines) => this.handleProgress(record, lines));
-    const stderr = createLineBuffer((lines) => this.handleProgress(record, lines));
+    const stderr = createLineBuffer((lines) => {
+      this.handleProgress(record, lines);
+      rememberDownloadDiagnostics(record, lines);
+    });
     child.stdout.on("data", stdout.push);
     child.stderr.on("data", stderr.push);
     child.on("error", (err) => {
@@ -331,8 +343,9 @@ class YtDlpService {
           });
         return;
       }
-      finishDownload(record, "failed", `yt-dlp exited with code ${code}`);
-      logger.error(`[yt-dlp] download failed id=${record.id} code=${code}`);
+      const error = ytdlpFailureMessage(record, code);
+      finishDownload(record, "failed", error);
+      logger.error(`[yt-dlp] download failed id=${record.id} code=${code} message="${logValue(error)}"`);
     });
   }
 
@@ -744,11 +757,42 @@ function isExplicitPlaylistUrl(value) {
 }
 
 function validInputUrl(value) {
-  const inputUrl = String(value || "").trim();
-  if (!/^https?:\/\//i.test(inputUrl)) {
+  const supplied = String(value || "").trim();
+  const markdownLink = supplied.match(/^\[[^\]]*\]\((https?:\/\/[^\s)]+)\)$/i);
+  const inputUrl = markdownLink ? markdownLink[1] : supplied.replace(/^<(https?:\/\/[^>]+)>$/i, "$1");
+  let parsed;
+  try {
+    parsed = new URL(inputUrl);
+  } catch (err) {
     throw httpError(400, "A valid http(s) URL is required.");
   }
-  return inputUrl;
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw httpError(400, "A valid http(s) URL is required.");
+  }
+  return parsed.toString();
+}
+
+function rememberDownloadDiagnostics(record, output) {
+  const lines = String(output || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^\[download\]\s+\d+(?:\.\d+)?%/i.test(line));
+  if (lines.length === 0) return;
+  record.diagnostics.push(...lines);
+  if (record.diagnostics.length > MAX_DIAGNOSTIC_LINES) {
+    record.diagnostics.splice(0, record.diagnostics.length - MAX_DIAGNOSTIC_LINES);
+  }
+}
+
+function ytdlpFailureMessage(record, code) {
+  const useful = record.diagnostics.filter((line) => /(?:error|warning|unavailable|private|sign in|confirm|format|forbidden|unsupported|unable|failed|http\s+\d{3})/i.test(line));
+  const selected = (useful.length > 0 ? useful : record.diagnostics).slice(-8);
+  const detail = selected.join(" | ").replace(/\s+/g, " ").trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
+  return detail ? `yt-dlp exited with code ${code}: ${detail}` : `yt-dlp exited with code ${code}`;
+}
+
+function logValue(value) {
+  return String(value || "").replace(/[\r\n]+/g, " ").replace(/"/g, "'");
 }
 
 async function replaceFile(filePath, tempPath) {
@@ -822,7 +866,7 @@ function markDownloadIndexing(record) {
 }
 
 function publicDownload(record) {
-  const { processId, ...publicRecord } = record;
+  const { processId, diagnostics, ...publicRecord } = record;
   return publicRecord;
 }
 

@@ -1,8 +1,11 @@
 const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
+const logger = require("../utils/logger");
 
 const STORE_VERSION = 1;
+const JSON_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+const JSON_FLUSH_BATCH_SIZE = 100;
 
 class KeyframeStore {
   constructor(config) {
@@ -12,6 +15,10 @@ class KeyframeStore {
     this.jsonData = null;
     this.initialized = false;
     this.writePromise = Promise.resolve();
+    this.jsonRevision = 0;
+    this.persistedJsonRevision = 0;
+    this.jsonFlushTimer = null;
+    this.jsonFlushPromise = null;
   }
 
   async init() {
@@ -103,9 +110,7 @@ class KeyframeStore {
     }
 
     this.jsonData.records[recordKey(normalized.mediaType, normalized.mediaId)] = compactRecord(normalized);
-    const write = this.writePromise.then(() => atomicWriteJson(this.jsonPath, this.jsonData));
-    this.writePromise = write.catch(() => {});
-    await write;
+    this.scheduleJsonFlush();
     return normalized;
   }
 
@@ -144,11 +149,85 @@ class KeyframeStore {
       }
     }
     if (removed > 0) {
-      const write = this.writePromise.then(() => atomicWriteJson(this.jsonPath, this.jsonData));
-      this.writePromise = write.catch(() => {});
-      await write;
+      this.scheduleJsonFlush(removed);
     }
     return removed;
+  }
+
+  scheduleJsonFlush(changeCount = 1) {
+    this.jsonRevision += Math.max(1, Number(changeCount) || 1);
+    this.queueJsonFlush();
+  }
+
+  queueJsonFlush() {
+    if (this.pool || this.persistedJsonRevision >= this.jsonRevision || this.jsonFlushPromise) return;
+    if (this.jsonRevision - this.persistedJsonRevision >= JSON_FLUSH_BATCH_SIZE) {
+      this.flush().catch((error) => {
+        logger.error(`[keyframes] JSON flush failed message="${error.message}"`, error);
+      });
+      return;
+    }
+
+    if (this.jsonFlushTimer) return;
+    this.jsonFlushTimer = setTimeout(() => {
+      this.jsonFlushTimer = null;
+      this.flush().catch((error) => {
+        logger.error(`[keyframes] JSON flush failed message="${error.message}"`, error);
+      });
+    }, JSON_FLUSH_INTERVAL_MS);
+    this.jsonFlushTimer.unref?.();
+  }
+
+  async flush() {
+    await this.init();
+    if (this.pool || this.persistedJsonRevision >= this.jsonRevision) return 0;
+
+    if (this.jsonFlushTimer) {
+      clearTimeout(this.jsonFlushTimer);
+      this.jsonFlushTimer = null;
+    }
+    if (this.jsonFlushPromise) {
+      await this.jsonFlushPromise;
+      return this.flush();
+    }
+
+    const flush = this.writePromise.then(async () => {
+      const targetRevision = this.jsonRevision;
+      const changeCount = targetRevision - this.persistedJsonRevision;
+      await atomicWriteJson(this.jsonPath, this.jsonData);
+      this.persistedJsonRevision = targetRevision;
+      logger.full(`[keyframes] JSON flushed changes=${changeCount}`);
+      return changeCount;
+    });
+    this.jsonFlushPromise = flush;
+    this.writePromise = flush.catch(() => {});
+
+    try {
+      return await flush;
+    } finally {
+      this.jsonFlushPromise = null;
+      if (this.persistedJsonRevision < this.jsonRevision) {
+        this.queueJsonFlush();
+      }
+    }
+  }
+
+  async close() {
+    if (this.jsonFlushTimer) {
+      clearTimeout(this.jsonFlushTimer);
+      this.jsonFlushTimer = null;
+    }
+    do {
+      await this.flush();
+    } while (!this.pool && this.persistedJsonRevision < this.jsonRevision);
+    if (this.jsonFlushTimer) {
+      clearTimeout(this.jsonFlushTimer);
+      this.jsonFlushTimer = null;
+    }
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
+    }
   }
 
   async missingReferences(refs = []) {
@@ -274,10 +353,11 @@ async function loadJsonStore(filePath) {
 }
 
 async function atomicWriteJson(filePath, value) {
+  const serialized = JSON.stringify(value);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.tmp`;
   try {
-    await fs.writeFile(temporaryPath, JSON.stringify(value), "utf8");
+    await fs.writeFile(temporaryPath, serialized, "utf8");
     await fs.rm(filePath, { force: true });
     await fs.rename(temporaryPath, filePath);
   } finally {

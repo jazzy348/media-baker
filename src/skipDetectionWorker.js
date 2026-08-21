@@ -99,6 +99,9 @@ async function handleCommand(message) {
     case "getStatus":
       result = await context.service.getStatus();
       break;
+    case "getTaskStatus":
+      result = context.service.getTaskStatus();
+      break;
     case "retryFailures":
       result = await context.service.retryFailures();
       break;

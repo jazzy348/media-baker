@@ -116,6 +116,19 @@ class OptimiserService {
     };
   }
 
+  taskQueue(offset = 0, limit = 50) {
+    if (!this.queueState) return { total: 0, offset: 0, items: [] };
+    const start = Math.max(0, Number.parseInt(offset, 10) || 0);
+    const size = Math.max(1, Math.min(Number.parseInt(limit, 10) || 50, 200));
+    const nextIndex = Math.max(0, Number(this.queueState.nextIndex) || 0);
+    const pending = (this.queueState.items || []).slice(nextIndex);
+    return {
+      total: pending.length,
+      offset: start,
+      items: pending.slice(start, start + size).map(publicQueueItem)
+    };
+  }
+
   async clearFailures() {
     await this.updateOptimiserState((optimizer) => {
       const failures = optimiserFailures({ optimizer });

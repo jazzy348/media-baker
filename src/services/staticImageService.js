@@ -44,6 +44,23 @@ class StaticImageService {
     }, () => this.writeAtomic(outputPath, (temporaryPath) => this.ffmpeg.resizeImage(filePath, temporaryPath, limit))));
   }
 
+  async resizePngIcon(filePath, outputPath, size) {
+    const dimension = positiveInteger(size);
+    if (!dimension) {
+      throw new Error("A positive icon size is required");
+    }
+
+    return this.run(() => this.writeAtomic(outputPath, (temporaryPath) => sharp(filePath)
+      .autoOrient()
+      .resize(dimension, dimension, {
+        fit: "contain",
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+        fastShrinkOnLoad: true
+      })
+      .png({ compressionLevel: 9, adaptiveFiltering: true })
+      .toFile(temporaryPath), ".png"));
+  }
+
   async resizeImageBuffer(filePath, dimensions) {
     const resize = normalizeDimensions(dimensions);
     if (!resize.width && !resize.height) {
@@ -175,11 +192,11 @@ class StaticImageService {
     }
   }
 
-  async writeAtomic(outputPath, writer) {
+  async writeAtomic(outputPath, writer, temporaryExtension = ".webp") {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     const temporaryPath = path.join(
       path.dirname(outputPath),
-      `.${path.basename(outputPath)}.${crypto.randomBytes(6).toString("hex")}.tmp.webp`
+      `.${path.basename(outputPath)}.${crypto.randomBytes(6).toString("hex")}.tmp${temporaryExtension}`
     );
     try {
       await writer(temporaryPath);

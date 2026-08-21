@@ -7,8 +7,19 @@ const DEFAULT_PLAYBACK_PREFERENCES = {
   subtitleLanguage: "",
   subtitleMode: "none",
   quality: "original",
-  audioChannels: "stereo"
+  audioChannels: "stereo",
+  themeColour: "#00d9ff"
 };
+
+const THEME_PRESET_COLOURS = new Set([
+  "#00d9ff",
+  "#ff4d5e",
+  "#ffd23f",
+  "#ff5fb7",
+  "#35d07f",
+  "#ff8a3d",
+  "#a970ff"
+]);
 
 const state = {
   token: initialShareToken ? "" : localStorage.getItem("streamToken") || "",
@@ -42,6 +53,7 @@ const state = {
   health: null,
   updateStatus: null,
   ytdlpAdminStatus: null,
+  branding: null,
   dismissedUpdateVersion: null
 };
 
@@ -228,6 +240,11 @@ const els = {
   selfAccountCurrentPassword: document.getElementById("selfAccountCurrentPassword"),
   selfAccountNewPassword: document.getElementById("selfAccountNewPassword"),
   selfAccountConfirmPassword: document.getElementById("selfAccountConfirmPassword"),
+  selfAccountThemePreset: document.getElementById("selfAccountThemePreset"),
+  selfAccountThemeColour: document.getElementById("selfAccountThemeColour"),
+  openThemeColourPicker: document.getElementById("openThemeColourPicker"),
+  themeColourSwatch: document.getElementById("themeColourSwatch"),
+  themeColourValue: document.getElementById("themeColourValue"),
   saveSelfAccount: document.getElementById("saveSelfAccount"),
   closeAccountPanel: document.getElementById("closeAccountPanel"),
   selfAccountStatus: document.getElementById("selfAccountStatus"),
@@ -327,6 +344,7 @@ const els = {
   adminOptimizerTab: document.getElementById("adminOptimizerTab"),
   adminSkipDetectionTab: document.getElementById("adminSkipDetectionTab"),
   adminSettingsTab: document.getElementById("adminSettingsTab"),
+  adminTasksTab: document.getElementById("adminTasksTab"),
   adminHardwareTab: document.getElementById("adminHardwareTab"),
   adminCurrentlyPlayingTab: document.getElementById("adminCurrentlyPlayingTab"),
   adminLogsTab: document.getElementById("adminLogsTab"),
@@ -339,6 +357,7 @@ const els = {
   adminOptimizerPage: document.getElementById("adminOptimizerPage"),
   adminSkipDetectionPage: document.getElementById("adminSkipDetectionPage"),
   adminSettingsPage: document.getElementById("adminSettingsPage"),
+  adminTasksPage: document.getElementById("adminTasksPage"),
   adminHardwarePage: document.getElementById("adminHardwarePage"),
   adminCurrentlyPlayingPage: document.getElementById("adminCurrentlyPlayingPage"),
   adminLogsPage: document.getElementById("adminLogsPage"),
@@ -360,6 +379,7 @@ const els = {
   accountCanReindex: document.getElementById("accountCanReindex"),
   accountCanUsers: document.getElementById("accountCanUsers"),
   accountCanHardware: document.getElementById("accountCanHardware"),
+  accountCanTasks: document.getElementById("accountCanTasks"),
   accountCanLogs: document.getElementById("accountCanLogs"),
   accountCanHistory: document.getElementById("accountCanHistory"),
   resetAccountForm: document.getElementById("resetAccountForm"),
@@ -367,6 +387,16 @@ const els = {
   updateAccount: document.getElementById("updateAccount"),
   accountStatus: document.getElementById("accountStatus"),
   accountList: document.getElementById("accountList"),
+  taskUpdatedAt: document.getElementById("taskUpdatedAt"),
+  taskRunningCount: document.getElementById("taskRunningCount"),
+  taskQueuedCount: document.getElementById("taskQueuedCount"),
+  taskFailedCount: document.getElementById("taskFailedCount"),
+  taskCompletedCount: document.getElementById("taskCompletedCount"),
+  taskStateFilter: document.getElementById("taskStateFilter"),
+  taskTypeFilter: document.getElementById("taskTypeFilter"),
+  taskSearchFilter: document.getElementById("taskSearchFilter"),
+  taskStatus: document.getElementById("taskStatus"),
+  taskList: document.getElementById("taskList"),
   apiKeyForm: document.getElementById("apiKeyForm"),
   apiKeyUserSelect: document.getElementById("apiKeyUserSelect"),
   apiKeyNameInput: document.getElementById("apiKeyNameInput"),
@@ -379,6 +409,7 @@ const els = {
   settingsForm: document.getElementById("settingsForm"),
   settingsLogLevel: document.getElementById("settingsLogLevel"),
   settingsLogRetentionDays: document.getElementById("settingsLogRetentionDays"),
+  settingsAppIcon: document.getElementById("settingsAppIcon"),
   settingsPreferredAudio: document.getElementById("settingsPreferredAudio"),
   settingsEnableGpu: document.getElementById("settingsEnableGpu"),
   settingsUpdatesEnabled: document.getElementById("settingsUpdatesEnabled"),
@@ -507,6 +538,10 @@ const libraryViewCache = new Map();
 let progressRefreshPromise = null;
 let draggedLibraryKey = null;
 let adminRefreshTimer = null;
+let taskSnapshot = null;
+let taskRefreshInFlight = false;
+const taskQueuePages = new Map();
+const expandedTaskQueues = new Set();
 let folderPickerPath = "";
 let backupFolderPickerPath = "";
 let backupWasRunning = false;
@@ -589,6 +624,9 @@ els.lockButton.addEventListener("click", () => {
 els.accountButton.addEventListener("click", openAccountPanel);
 els.closeAccountPanel.addEventListener("click", closeAccountPanel);
 els.selfAccountForm.addEventListener("submit", saveSelfAccount);
+els.selfAccountThemePreset.addEventListener("change", previewThemePreset);
+els.selfAccountThemeColour.addEventListener("input", previewCustomThemeColour);
+els.openThemeColourPicker.addEventListener("click", openThemeColourPicker);
 els.accountOverlay.addEventListener("click", (event) => {
   if (event.target === els.accountOverlay) {
     closeAccountPanel();
@@ -629,6 +667,7 @@ els.adminBackupsTab.addEventListener("click", () => openAdminPanel("backups"));
 els.adminOptimizerTab.addEventListener("click", () => openAdminPanel("optimizer"));
 els.adminSkipDetectionTab.addEventListener("click", () => openAdminPanel("skipDetection"));
 els.adminSettingsTab.addEventListener("click", () => openAdminPanel("settings"));
+els.adminTasksTab.addEventListener("click", () => openAdminPanel("tasks"));
 els.adminHardwareTab.addEventListener("click", () => openAdminPanel("hardware"));
 els.adminCurrentlyPlayingTab.addEventListener("click", () => openAdminPanel("currentlyPlaying"));
 els.adminLogsTab.addEventListener("click", () => openAdminPanel("logs"));
@@ -637,6 +676,9 @@ els.userHistoryUserFilter.addEventListener("change", () => loadUserHistory());
 els.userHistoryTimespanFilter.addEventListener("change", handleUserHistoryTimespanChange);
 els.userHistoryStartDate.addEventListener("change", () => loadUserHistory());
 els.userHistoryEndDate.addEventListener("change", () => loadUserHistory());
+els.taskStateFilter.addEventListener("change", renderTasks);
+els.taskTypeFilter.addEventListener("change", renderTasks);
+els.taskSearchFilter.addEventListener("input", renderTasks);
 els.loadMoreUserHistory.addEventListener("click", () => loadUserHistory({ append: true }));
 els.accountForm.addEventListener("submit", saveAccount);
 els.resetAccountForm.addEventListener("click", resetAccountForm);
@@ -2334,6 +2376,9 @@ function showAdminPage(page) {
   if (page === "skipDetection" && !hasPermission("canManageSettings")) {
     page = firstAllowedAdminPage();
   }
+  if (page === "tasks" && !hasPermission("canViewTasks")) {
+    page = firstAllowedAdminPage();
+  }
   if (page === "hardware" && !hasPermission("canViewHardware")) {
     page = firstAllowedAdminPage();
   }
@@ -2355,6 +2400,7 @@ function showAdminPage(page) {
     optimizer: els.adminOptimizerPage,
     skipDetection: els.adminSkipDetectionPage,
     settings: els.adminSettingsPage,
+    tasks: els.adminTasksPage,
     hardware: els.adminHardwarePage,
     currentlyPlaying: els.adminCurrentlyPlayingPage,
     logs: els.adminLogsPage,
@@ -2371,6 +2417,7 @@ function showAdminPage(page) {
   els.adminOptimizerTab.classList.toggle("hidden", !hasPermission("canManageOptimizer"));
   els.adminSkipDetectionTab.classList.toggle("hidden", !hasPermission("canManageSettings"));
   els.adminSettingsTab.classList.toggle("hidden", !hasPermission("canManageSettings"));
+  els.adminTasksTab.classList.toggle("hidden", !hasPermission("canViewTasks"));
   els.adminHardwareTab.classList.toggle("hidden", !hasPermission("canViewHardware"));
   els.adminCurrentlyPlayingTab.classList.toggle("hidden", !hasPermission("canViewUserHistory"));
   els.adminLogsTab.classList.toggle("hidden", !hasPermission("canViewLogs"));
@@ -2396,6 +2443,9 @@ function showAdminPage(page) {
     adminRefreshTimer = setInterval(() => loadSkipDetection(false), 2000);
   } else if (page === "settings") {
     loadSettings();
+  } else if (page === "tasks") {
+    loadTasks(true);
+    adminRefreshTimer = setInterval(() => loadTasks(false), 2000);
   } else if (page === "hardware") {
     refreshHardware();
     adminRefreshTimer = setInterval(refreshHardware, 2000);
@@ -2418,6 +2468,7 @@ function firstAllowedAdminPage() {
   if (hasPermission("canManageBackups")) return "backups";
   if (hasPermission("canManageOptimizer")) return "optimizer";
   if (hasPermission("canManageSettings")) return "settings";
+  if (hasPermission("canViewTasks")) return "tasks";
   if (hasPermission("canViewHardware")) return "hardware";
   if (hasPermission("canViewUserHistory")) return "currentlyPlaying";
   if (hasPermission("canViewLogs")) return "logs";
@@ -2430,6 +2481,214 @@ function stopAdminRefresh() {
     clearInterval(adminRefreshTimer);
     adminRefreshTimer = null;
   }
+}
+
+async function loadTasks(showLoading = false) {
+  if (!hasPermission("canViewTasks")) return;
+  if (taskRefreshInFlight) return;
+  taskRefreshInFlight = true;
+  if (showLoading && !taskSnapshot) {
+    els.taskStatus.textContent = "Loading tasks...";
+  }
+  try {
+    taskSnapshot = await api("/api/admin/tasks");
+    const activeTaskIds = new Set((taskSnapshot.tasks || []).map((entry) => entry.id));
+    for (const taskId of expandedTaskQueues) {
+      if (!activeTaskIds.has(taskId)) {
+        expandedTaskQueues.delete(taskId);
+        taskQueuePages.delete(taskId);
+      }
+    }
+    updateTaskTypeFilter(taskSnapshot.types || []);
+    await Promise.all([...expandedTaskQueues].map((taskId) => {
+      const cached = taskQueuePages.get(taskId);
+      return loadTaskQueue(taskId, 0, Math.max(50, cached && cached.items.length || 0), false);
+    }));
+    els.taskStatus.textContent = "";
+    renderTasks();
+  } catch (err) {
+    els.taskStatus.textContent = err.message || "Failed to load tasks.";
+  } finally {
+    taskRefreshInFlight = false;
+  }
+}
+
+function updateTaskTypeFilter(types) {
+  const selected = els.taskTypeFilter.value;
+  const options = ['<option value="">All types</option>'];
+  for (const type of types) {
+    options.push(`<option value="${escapeHtml(type)}">${escapeHtml(taskTypeLabel(type))}</option>`);
+  }
+  els.taskTypeFilter.innerHTML = options.join("");
+  if (types.includes(selected)) els.taskTypeFilter.value = selected;
+}
+
+function renderTasks() {
+  if (!taskSnapshot) return;
+  const summary = taskSnapshot.summary || {};
+  els.taskRunningCount.textContent = summary.running || 0;
+  els.taskQueuedCount.textContent = summary.queued || 0;
+  els.taskFailedCount.textContent = summary.failed || 0;
+  els.taskCompletedCount.textContent = summary.completed || 0;
+  els.taskUpdatedAt.textContent = taskSnapshot.generatedAt
+    ? `Updated ${new Date(taskSnapshot.generatedAt).toLocaleTimeString()}`
+    : "";
+
+  const stateFilter = els.taskStateFilter.value;
+  const typeFilter = els.taskTypeFilter.value;
+  const query = normaliseTaskSearch(els.taskSearchFilter.value);
+  const tasks = (taskSnapshot.tasks || [])
+    .filter((entry) => taskMatchesState(entry, stateFilter))
+    .filter((entry) => !typeFilter || entry.type === typeFilter)
+    .filter((entry) => !query || normaliseTaskSearch([
+      entry.title,
+      entry.subtitle,
+      entry.phase,
+      entry.filePath,
+      entry.detail,
+      entry.error
+    ].filter(Boolean).join(" ")).includes(query))
+    .sort(compareTasks);
+
+  els.taskList.innerHTML = "";
+  if (tasks.length === 0) {
+    els.taskList.innerHTML = '<div class="task-empty">No tasks match these filters.</div>';
+    return;
+  }
+  for (const entry of tasks) {
+    els.taskList.appendChild(taskRow(entry));
+  }
+}
+
+function taskRow(entry) {
+  const element = document.createElement("section");
+  element.className = `task-row state-${entry.state}`;
+  const progress = entry.progress || {};
+  const percent = Number.isFinite(Number(progress.percent)) ? Math.round(Number(progress.percent) * 10) / 10 : null;
+  const queueTotal = Number(entry.queue && entry.queue.total) || 0;
+  const expanded = expandedTaskQueues.has(entry.id);
+  const queue = taskQueuePages.get(entry.id);
+  const timing = [
+    entry.startedAt ? `Started ${formatTimestamp(entry.startedAt)}` : null,
+    progress.etaSeconds != null ? `About ${formatDuration(progress.etaSeconds)} remaining` : null
+  ].filter(Boolean).join(" - ");
+  const progressText = progress.current != null && progress.total != null
+    ? `${Number(progress.current).toLocaleString()} / ${Number(progress.total).toLocaleString()}`
+    : percent != null ? `${percent}%` : "";
+
+  element.innerHTML = `
+    <div class="task-row-heading">
+      <div>
+        <span class="task-type">${escapeHtml(taskTypeLabel(entry.type))}</span>
+        <h3>${escapeHtml(entry.title)}</h3>
+        ${entry.subtitle ? `<p>${escapeHtml(entry.subtitle)}</p>` : ""}
+      </div>
+      <span class="task-state">${escapeHtml(taskStateLabel(entry.state))}</span>
+    </div>
+    <div class="task-row-status">
+      <strong>${escapeHtml(entry.phase || taskStateLabel(entry.state))}</strong>
+      ${timing ? `<span>${escapeHtml(timing)}</span>` : ""}
+    </div>
+    ${percent != null ? `<div class="task-progress"><span style="width:${Math.max(0, Math.min(100, percent))}%"></span></div>` : ""}
+    ${progressText || entry.detail ? `<div class="task-row-detail"><span>${escapeHtml(progressText)}</span><span>${escapeHtml(entry.detail || "")}</span></div>` : ""}
+    ${entry.filePath ? `<code class="task-path">${escapeHtml(entry.filePath)}</code>` : ""}
+    ${entry.error ? `<p class="task-error">${escapeHtml(entry.error)}</p>` : ""}
+    ${queueTotal > 0 || expanded ? `<button class="secondary-button compact-button task-queue-toggle" type="button">${expanded ? "Hide queue" : `View queue (${queueTotal.toLocaleString()})`}</button>` : ""}
+    ${expanded ? taskQueueMarkup(queue) : ""}
+  `;
+  const toggle = element.querySelector(".task-queue-toggle");
+  if (toggle) toggle.addEventListener("click", () => toggleTaskQueue(entry.id));
+  const more = element.querySelector(".task-queue-more");
+  if (more) more.addEventListener("click", () => loadMoreTaskQueue(entry.id));
+  return element;
+}
+
+function taskQueueMarkup(queue) {
+  if (!queue) return '<div class="task-queue"><p class="status">Loading queue...</p></div>';
+  if (queue.error) return `<div class="task-queue"><p class="task-error">${escapeHtml(queue.error)}</p></div>`;
+  const rows = (queue.items || []).map((item) => `
+    <div class="task-queue-item">
+      <strong>${escapeHtml(item.title || item.id || "Queued item")}</strong>
+      ${item.status ? `<span>${escapeHtml(item.status)}</span>` : ""}
+      ${item.filePath ? `<code>${escapeHtml(item.filePath)}</code>` : ""}
+    </div>
+  `).join("");
+  const loaded = (queue.items || []).length;
+  return `
+    <div class="task-queue">
+      <div class="task-queue-heading"><strong>Queue</strong><span>${loaded.toLocaleString()} of ${Number(queue.total || 0).toLocaleString()}</span></div>
+      ${rows || '<p class="status">No queued items.</p>'}
+      ${loaded < Number(queue.total || 0) ? '<button class="secondary-button compact-button task-queue-more" type="button">Load more</button>' : ""}
+    </div>
+  `;
+}
+
+async function toggleTaskQueue(taskId) {
+  if (expandedTaskQueues.has(taskId)) {
+    expandedTaskQueues.delete(taskId);
+    renderTasks();
+    return;
+  }
+  expandedTaskQueues.add(taskId);
+  renderTasks();
+  await loadTaskQueue(taskId, 0, 50, true);
+}
+
+async function loadMoreTaskQueue(taskId) {
+  const current = taskQueuePages.get(taskId) || { items: [] };
+  await loadTaskQueue(taskId, current.items.length, 50, true);
+}
+
+async function loadTaskQueue(taskId, offset, limit, renderAfter) {
+  try {
+    const page = await api(`/api/admin/tasks/${encodeURIComponent(taskId)}/queue?offset=${offset}&limit=${limit}`);
+    const previous = offset > 0 ? taskQueuePages.get(taskId) : null;
+    taskQueuePages.set(taskId, {
+      ...page,
+      items: offset > 0 ? [...previous && previous.items || [], ...page.items || []] : page.items || []
+    });
+  } catch (err) {
+    taskQueuePages.set(taskId, { total: 0, items: [], error: err.message || "Failed to load queue." });
+  }
+  if (renderAfter) renderTasks();
+}
+
+function taskMatchesState(entry, filter) {
+  if (filter === "all") return true;
+  if (filter === "active") return ["running", "starting", "queued", "failed"].includes(entry.state);
+  if (filter === "running") return ["running", "starting"].includes(entry.state);
+  return entry.state === filter;
+}
+
+function compareTasks(left, right) {
+  const order = { running: 0, starting: 1, queued: 2, failed: 3, completed: 4, idle: 5 };
+  const stateDifference = (order[left.state] ?? 9) - (order[right.state] ?? 9);
+  if (stateDifference) return stateDifference;
+  return String(right.updatedAt || right.startedAt || "").localeCompare(String(left.updatedAt || left.startedAt || ""));
+}
+
+function taskTypeLabel(type) {
+  return ({
+    index: "Indexing",
+    metadata: "Metadata",
+    keyframes: "Keyframes",
+    optimiser: "Optimiser",
+    "skip-detection": "Skip Detection",
+    hls: "Streaming",
+    "yt-dlp": "YT-DLP",
+    "live-relay": "Live Relay",
+    "live-tv": "Live TV",
+    backup: "Backup",
+    updates: "Updates"
+  })[type] || String(type || "Task");
+}
+
+function taskStateLabel(stateValue) {
+  return ({ running: "Running", starting: "Starting", queued: "Queued", failed: "Failed", completed: "Completed", idle: "Idle" })[stateValue] || stateValue;
+}
+
+function normaliseTaskSearch(value) {
+  return String(value || "").trim().toLocaleLowerCase();
 }
 
 async function loadAccounts() {
@@ -2503,6 +2762,7 @@ function editAccount(account) {
   els.accountCanReindex.checked = Boolean(permissions.canReindex);
   els.accountCanUsers.checked = Boolean(permissions.canManageUsers);
   els.accountCanHardware.checked = Boolean(permissions.canViewHardware);
+  els.accountCanTasks.checked = Boolean(permissions.canViewTasks);
   els.accountCanLogs.checked = Boolean(permissions.canViewLogs);
   els.accountCanHistory.checked = Boolean(permissions.canViewUserHistory);
   Array.from(els.accountLibrariesSelect.options).forEach((option) => {
@@ -2530,6 +2790,7 @@ function resetAccountForm() {
   els.accountCanReindex.checked = false;
   els.accountCanUsers.checked = false;
   els.accountCanHardware.checked = false;
+  els.accountCanTasks.checked = false;
   els.accountCanLogs.checked = false;
   els.accountCanHistory.checked = false;
   Array.from(els.accountLibrariesSelect.options).forEach((option) => {
@@ -2611,6 +2872,7 @@ function setAdminNavState(page) {
     backups: els.adminBackupsTab,
     optimizer: els.adminOptimizerTab,
     skipDetection: els.adminSkipDetectionTab,
+    tasks: els.adminTasksTab,
     hardware: els.adminHardwareTab,
     currentlyPlaying: els.adminCurrentlyPlayingTab,
     logs: els.adminLogsTab,
@@ -2640,6 +2902,7 @@ function accountPermissionsFromForm() {
     || els.accountCanReindex.checked
     || els.accountCanUsers.checked
     || els.accountCanHardware.checked
+    || els.accountCanTasks.checked
     || els.accountCanLogs.checked
     || els.accountCanHistory.checked;
   return {
@@ -2656,6 +2919,7 @@ function accountPermissionsFromForm() {
     canManageUsers: els.accountCanUsers.checked,
     canViewAdmin,
     canViewHardware: els.accountCanHardware.checked,
+    canViewTasks: els.accountCanTasks.checked,
     canViewLogs: els.accountCanLogs.checked,
     canViewUserHistory: els.accountCanHistory.checked,
     libraries: Array.from(els.accountLibrariesSelect.selectedOptions).map((option) => option.value)
@@ -3625,7 +3889,7 @@ async function loadSettings() {
   els.settingsStatus.textContent = "Loading settings...";
   try {
     const data = await api("/api/admin/settings");
-    fillSettingsForm(data.settings || {});
+    fillSettingsForm(data.settings || {}, data.branding || null);
     updateSettingsVisibility();
     await Promise.all([refreshUpdateStatus(), refreshYtDlpAdminStatus()]);
     els.settingsStatus.textContent = "";
@@ -3634,7 +3898,7 @@ async function loadSettings() {
   }
 }
 
-function fillSettingsForm(settings) {
+function fillSettingsForm(settings, branding = null) {
   const logging = settings.logging || {};
   const indexScan = settings.indexScan || {};
   const metadata = settings.metadata || {};
@@ -3650,6 +3914,18 @@ function fillSettingsForm(settings) {
   const updates = settings.updates || {};
   const skipDetection = settings.skipDetection || {};
   const openMovie = settings.openMovie || {};
+  const brandingSettings = settings.branding || {};
+
+  if (branding) {
+    state.branding = branding;
+    els.settingsAppIcon.innerHTML = (branding.options || [])
+      .map((option) => `<option value="${escapeHtml(option.id)}">${escapeHtml(option.title)}</option>`)
+      .join("");
+    applyBranding(branding);
+  }
+  if (brandingSettings.icon && [...els.settingsAppIcon.options].some((option) => option.value === brandingSettings.icon)) {
+    els.settingsAppIcon.value = brandingSettings.icon;
+  }
 
   els.settingsLogLevel.value = logging.level || "info";
   els.settingsLogRetentionDays.value = logging.retentionDays ?? 5;
@@ -3721,7 +3997,7 @@ async function saveSettings(event) {
       method: "PUT",
       body: JSON.stringify({ settings: settingsFromForm() })
     });
-    fillSettingsForm(result.settings || {});
+    fillSettingsForm(result.settings || {}, result.branding || null);
     applyFeatures({
       iptv: Boolean(result.settings && result.settings.iptv && result.settings.iptv.enabled),
       ytdlp: Boolean(result.settings && result.settings.ytdlp && result.settings.ytdlp.enabled)
@@ -4147,6 +4423,9 @@ function setIptvMatcherBusy(busy) {
 
 function settingsFromForm() {
   return {
+    branding: {
+      icon: els.settingsAppIcon.value
+    },
     logging: {
       level: els.settingsLogLevel.value,
       retentionDays: intInput(els.settingsLogRetentionDays, 5)
@@ -4240,6 +4519,25 @@ function settingsFromForm() {
   };
 }
 
+function applyBranding(branding) {
+  if (!branding || !branding.urls) return;
+  const interfaceUrl = branding.urls.interface || branding.urls.favicon;
+  if (interfaceUrl) {
+    document.querySelectorAll(".brand-mark, .login-mark").forEach((image) => {
+      image.src = interfaceUrl;
+    });
+  }
+
+  const favicon = document.querySelector('link[rel="icon"]');
+  if (favicon && branding.urls.favicon) favicon.href = branding.urls.favicon;
+  const appleTouchIcon = document.querySelector('link[rel="apple-touch-icon"]');
+  if (appleTouchIcon && branding.urls.appleTouch) appleTouchIcon.href = branding.urls.appleTouch;
+  const manifest = document.querySelector('link[rel="manifest"]');
+  if (manifest && branding.revision) {
+    manifest.href = `/manifest.webmanifest?icon=${encodeURIComponent(branding.revision)}`;
+  }
+}
+
 function updateSettingsVisibility() {
   els.updatesSettingsFieldset.classList.toggle("hidden", !isAdminMode());
   setFeatureVisible(els.updateSettingsBody, els.settingsUpdatesEnabled.checked);
@@ -4292,12 +4590,14 @@ function openAccountPanel() {
   els.selfAccountCurrentPassword.value = "";
   els.selfAccountNewPassword.value = "";
   els.selfAccountConfirmPassword.value = "";
+  setAccountThemeControls(state.user.preferences && state.user.preferences.themeColour);
   els.selfAccountStatus.textContent = "";
   els.accountOverlay.classList.remove("hidden");
   els.accountOverlay.setAttribute("aria-hidden", "false");
 }
 
 function closeAccountPanel() {
+  applyThemeColour(state.user && state.user.preferences && state.user.preferences.themeColour);
   els.accountOverlay.classList.add("hidden");
   els.accountOverlay.setAttribute("aria-hidden", "true");
   els.selfAccountCurrentPassword.value = "";
@@ -4310,8 +4610,13 @@ async function saveSelfAccount(event) {
   const username = els.selfAccountUsername.value.trim();
   const currentPassword = els.selfAccountCurrentPassword.value;
   const password = els.selfAccountNewPassword.value;
-  if (!username || !currentPassword) {
-    els.selfAccountStatus.textContent = "Username and current password are required.";
+  const accountDetailsChanged = username !== state.user.username || Boolean(password);
+  if (!username) {
+    els.selfAccountStatus.textContent = "Username is required.";
+    return;
+  }
+  if (accountDetailsChanged && !currentPassword) {
+    els.selfAccountStatus.textContent = "Current password is required when changing the username or password.";
     return;
   }
   if (password !== els.selfAccountConfirmPassword.value) {
@@ -4322,11 +4627,25 @@ async function saveSelfAccount(event) {
   els.saveSelfAccount.disabled = true;
   els.selfAccountStatus.textContent = "Saving account...";
   try {
-    const result = await api("/api/auth/me", state.token, {
-      method: "PUT",
-      body: JSON.stringify({ username, currentPassword, password })
+    if (accountDetailsChanged) {
+      const result = await api("/api/auth/me", state.token, {
+        method: "PUT",
+        body: JSON.stringify({ username, currentPassword, password })
+      });
+      state.user = result.user;
+    }
+
+    const preferences = normalizePlaybackPreferences({
+      ...state.playbackPreferences,
+      themeColour: els.selfAccountThemeColour.value
     });
-    state.user = result.user;
+    window.clearTimeout(savePlaybackPreferencesTimer);
+    const preferenceResult = await api("/api/auth/me/preferences", state.token, {
+      method: "PUT",
+      body: JSON.stringify({ preferences })
+    });
+    state.user = preferenceResult.user;
+    setPlaybackPreferences(preferenceResult.preferences);
     els.selfAccountCurrentPassword.value = "";
     els.selfAccountNewPassword.value = "";
     els.selfAccountConfirmPassword.value = "";
@@ -4337,6 +4656,42 @@ async function saveSelfAccount(event) {
   } finally {
     els.saveSelfAccount.disabled = false;
   }
+}
+
+function previewThemePreset() {
+  const selected = els.selfAccountThemePreset.value;
+  if (selected === "custom") {
+    openThemeColourPicker();
+    return;
+  }
+  setAccountThemeControls(selected);
+  applyThemeColour(selected);
+}
+
+function openThemeColourPicker() {
+  if (typeof els.selfAccountThemeColour.showPicker === "function") {
+    try {
+      els.selfAccountThemeColour.showPicker();
+      return;
+    } catch (err) {
+      // The click fallback covers browsers that expose but restrict showPicker().
+    }
+  }
+  els.selfAccountThemeColour.click();
+}
+
+function previewCustomThemeColour() {
+  const colour = normalizeThemeColour(els.selfAccountThemeColour.value);
+  setAccountThemeControls(colour, true);
+  applyThemeColour(colour);
+}
+
+function setAccountThemeControls(value, forceCustom = false) {
+  const colour = normalizeThemeColour(value);
+  els.selfAccountThemeColour.value = colour;
+  els.selfAccountThemePreset.value = !forceCustom && THEME_PRESET_COLOURS.has(colour) ? colour : "custom";
+  els.themeColourSwatch.style.backgroundColor = colour;
+  els.themeColourValue.textContent = colour.toUpperCase();
 }
 
 async function openDownloadPanel() {
@@ -4702,7 +5057,7 @@ async function refreshHardware() {
 
 function drawUsageChart(canvas, history) {
   drawLineChart(canvas, history, [
-    { key: "cpuPercent", label: "CPU", color: "#00d9ff" },
+    { key: "cpuPercent", label: "CPU", color: currentThemeColour() },
     { key: "memoryPercent", label: "Memory", color: "#9ce66f" },
     { key: "gpuPercent", label: "GPU", color: "#f1d26a" }
   ], {
@@ -4717,12 +5072,17 @@ function drawNetworkChart(canvas, history) {
     Number(entry.networkOutBytesPerSecond) || 0
   ]));
   drawLineChart(canvas, history, [
-    { key: "networkInBytesPerSecond", label: "In", color: "#00d9ff" },
+    { key: "networkInBytesPerSecond", label: "In", color: currentThemeColour() },
     { key: "networkOutBytesPerSecond", label: "Out", color: "#ff8f70" }
   ], {
     maxValue,
     valueFormatter: formatBytes
   });
+}
+
+function currentThemeColour() {
+  return getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()
+    || DEFAULT_PLAYBACK_PREFERENCES.themeColour;
 }
 
 function drawLineChart(canvas, history, series, options = {}) {
@@ -6672,6 +7032,7 @@ function subtitleModeForOption(option) {
 function setPlaybackPreferences(preferences) {
   state.playbackPreferences = normalizePlaybackPreferences(preferences);
   localStorage.setItem(PLAYBACK_PREFERENCES_KEY, JSON.stringify(state.playbackPreferences));
+  applyThemeColour(state.playbackPreferences.themeColour);
 }
 
 function readLocalPlaybackPreferences() {
@@ -6716,8 +7077,37 @@ function normalizePlaybackPreferences(value = {}) {
     subtitleLanguage: normalizePreferenceText(preferences.subtitleLanguage),
     subtitleMode: ["none", "preferred", "forced", "any"].includes(subtitleMode) ? subtitleMode : "none",
     quality: ["original", "medium", "low"].includes(quality) ? quality : "original",
-    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo"
+    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo",
+    themeColour: normalizeThemeColour(preferences.themeColour)
   };
+}
+
+function normalizeThemeColour(value) {
+  const colour = String(value || "").trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(colour) ? colour : DEFAULT_PLAYBACK_PREFERENCES.themeColour;
+}
+
+function applyThemeColour(value) {
+  const colour = normalizeThemeColour(value);
+  const red = Number.parseInt(colour.slice(1, 3), 16);
+  const green = Number.parseInt(colour.slice(3, 5), 16);
+  const blue = Number.parseInt(colour.slice(5, 7), 16);
+  const root = document.documentElement;
+  root.style.setProperty("--accent", colour);
+  root.style.setProperty("--accent-rgb", `${red}, ${green}, ${blue}`);
+  root.style.setProperty("--accent-contrast", readableAccentText(red, green, blue));
+}
+
+function readableAccentText(red, green, blue) {
+  const luminance = (0.2126 * linearColourChannel(red))
+    + (0.7152 * linearColourChannel(green))
+    + (0.0722 * linearColourChannel(blue));
+  return luminance > 0.38 ? "#061014" : "#f7fbfd";
+}
+
+function linearColourChannel(value) {
+  const channel = value / 255;
+  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
 }
 
 function normalizePreferenceText(value) {

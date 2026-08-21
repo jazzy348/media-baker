@@ -109,6 +109,15 @@ class SkipDetectionService {
     };
   }
 
+  getTaskStatus() {
+    return {
+      ...clone(this.status),
+      enabled: this.enabled(),
+      running: this.running,
+      queued: this.queued
+    };
+  }
+
   async retryFailures() {
     const failures = await this.store.listFailures(100000);
     const groups = uniqueFailureGroups(failures);

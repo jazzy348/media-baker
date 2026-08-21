@@ -11,6 +11,7 @@ const { KeyframeStore } = require("./services/keyframeStore");
 const { ImageService } = require("./services/imageService");
 const { CachedImageService } = require("./services/cachedImageService");
 const { StaticImageService } = require("./services/staticImageService");
+const { BrandingService } = require("./services/brandingService");
 const { FallbackStreamService } = require("./services/fallbackStreamService");
 const { safeRequestUrl } = require("./utils/safeRequestUrl");
 const { MetadataStore } = require("./services/metadataStore");
@@ -31,6 +32,7 @@ const { IptvService } = require("./services/iptvService");
 const { UpdateService } = require("./services/updateService");
 const { BackupService } = require("./services/backupService");
 const { OptimiserService } = require("./services/optimiserService");
+const { TaskService } = require("./services/taskService");
 const { SkipMarkerStore } = require("./services/skipMarkerStore");
 const { SkipDetectionWorkerClient } = require("./services/skipDetectionWorkerClient");
 const { OpenMovieIdStore } = require("./services/openMovieIdStore");
@@ -54,6 +56,7 @@ const createFallbackRoutes = require("./routes/fallback");
 const { createFallbackSegmentRoutes } = createFallbackRoutes;
 const createDocsRoutes = require("./routes/docs");
 const createAppInfoRoutes = require("./routes/appInfo");
+const createBrandingRoutes = require("./routes/branding");
 const createOpenMovieRoutes = require("./routes/openMovie");
 const logger = require("./utils/logger");
 
@@ -72,12 +75,6 @@ async function createApp() {
     next();
   });
   app.use("/api/app", createAppInfoRoutes({ version: packageJson.version }));
-  app.use(express.static(publicPath, {
-    index: false,
-    setHeaders(res, filePath) {
-      res.setHeader("Cache-Control", "no-cache, must-revalidate");
-    }
-  }));
 
   const libraryService = new LibraryService(config);
   config.libraries = await libraryService.list();
@@ -97,6 +94,20 @@ async function createApp() {
   const ffmpeg = new FFmpegService(config.ffmpeg);
   await ffmpeg.validate();
   const imageProcessor = new StaticImageService(ffmpeg);
+  const branding = new BrandingService({
+    appSettings,
+    cachePath: path.join(path.dirname(config.settingsStorePath), "branding"),
+    imageProcessor,
+    publicPath
+  });
+  await branding.init();
+  app.use(createBrandingRoutes({ branding }));
+  app.use(express.static(publicPath, {
+    index: false,
+    setHeaders(res) {
+      res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    }
+  }));
   const cachedImages = new CachedImageService(config, imageProcessor);
   const progressStore = new PlaybackProgressStore(config);
   const progress = new PlaybackProgressService(config, progressStore);
@@ -155,6 +166,19 @@ async function createApp() {
   const updates = new UpdateService(config);
   const backups = new BackupService(config, appSettings);
   const optimizer = new OptimiserService(config, ffmpeg, mediaIndex, appSettings, metadata);
+  const tasks = new TaskService({
+    mediaIndex,
+    metadata,
+    hls,
+    indexScanScheduler,
+    ytdlp,
+    ytdlpRelay,
+    iptv,
+    updates,
+    backups,
+    optimizer,
+    skipDetection
+  });
   ytdlp.setCompletionHandler(async () => {
     await mediaIndex.reindexLibrary(config.ytdlp.libraryKey || "yt-dlp");
   });
@@ -165,8 +189,10 @@ async function createApp() {
     mediaIndex,
     ffmpeg,
     hls,
+    keyframes,
     images,
     imageProcessor,
+    branding,
     cachedImages,
     fallbackStream,
     metadataStore,
@@ -193,7 +219,8 @@ async function createApp() {
     iptv,
     updates,
     backups,
-    optimizer
+    optimizer,
+    tasks
   };
   const imageMigration = cachedImages.migrate(metadataStore, config.iptv.cachePath);
   backups.setReadiness(imageMigration);

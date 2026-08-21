@@ -26,6 +26,9 @@ class HlsService {
     this.keyframeSetups = new Map();
     this.keyframeWarmQueue = new Map();
     this.keyframeWarmRunning = false;
+    this.keyframeWarmCurrent = null;
+    this.keyframeWarmTotal = 0;
+    this.keyframeWarmProcessed = 0;
     this.cacheFormatPromise = null;
     this.cacheAccess = new Map();
     this.cacheReaders = new Map();
@@ -35,6 +38,10 @@ class HlsService {
   }
 
   queueKeyframeIndex(mediaFiles = []) {
+    if (!this.keyframeWarmRunning && this.keyframeWarmQueue.size === 0) {
+      this.keyframeWarmTotal = 0;
+      this.keyframeWarmProcessed = 0;
+    }
     let added = 0;
     for (const mediaFile of mediaFiles) {
       if (!keyframeMediaIdentity(mediaFile)) continue;
@@ -43,6 +50,7 @@ class HlsService {
       this.keyframeWarmQueue.set(queueKey, mediaFile);
     }
     if (added > 0) {
+      this.keyframeWarmTotal += added;
       logger.info(`[hls] queued background keyframe indexing files=${added} pending=${this.keyframeWarmQueue.size}`);
     }
     this.startKeyframeWarmQueue();
@@ -75,6 +83,7 @@ class HlsService {
     while (this.keyframeWarmQueue.size > 0) {
       const [queueKey, mediaFile] = this.keyframeWarmQueue.entries().next().value;
       this.keyframeWarmQueue.delete(queueKey);
+      this.keyframeWarmCurrent = taskMediaSummary(mediaFile);
       try {
         const probe = mediaFile.probe || await this.ffmpeg.probe(mediaFile.filePath);
         const videoStream = mediaFile.videoStream || selectVideoStream(probe);
@@ -89,9 +98,47 @@ class HlsService {
         }
       } catch (error) {
         logger.full(`[hls] background keyframe index skipped input="${mediaFile.filePath}" message="${summarizeFfmpegOutput(error.message)}"`);
+      } finally {
+        this.keyframeWarmCurrent = null;
+        this.keyframeWarmProcessed += 1;
       }
       await delay(25);
     }
+  }
+
+  taskStatus() {
+    return {
+      keyframes: {
+        running: this.keyframeWarmRunning,
+        pending: this.keyframeWarmQueue.size,
+        total: this.keyframeWarmTotal,
+        processed: this.keyframeWarmProcessed,
+        current: this.keyframeWarmCurrent ? { ...this.keyframeWarmCurrent } : null
+      },
+      setups: [...this.activeSetups.keys()].map((cacheKey) => ({ cacheKey })),
+      transcodes: [...this.activeTranscodes.entries()].map(([cacheKey, active]) => ({
+        cacheKey,
+        inputPath: active.inputPath,
+        resumeFromSegment: active.resumeFromSegment,
+        prioritySegment: active.prioritySegment,
+        startedAt: active.startedAt || null,
+        lastAccessAt: active.lastAccessAt ? new Date(active.lastAccessAt).toISOString() : null,
+        stopReason: active.stopReason,
+        completed: Boolean(active.completed)
+      }))
+    };
+  }
+
+  taskQueue(kind, offset = 0, limit = 50) {
+    if (kind !== "keyframes") return { total: 0, offset: 0, items: [] };
+    const start = Math.max(0, Number.parseInt(offset, 10) || 0);
+    const size = Math.max(1, Math.min(Number.parseInt(limit, 10) || 50, 200));
+    const items = [...this.keyframeWarmQueue.values()];
+    return {
+      total: items.length,
+      offset: start,
+      items: items.slice(start, start + size).map(taskMediaSummary)
+    };
   }
 
   async prepare(mediaFile, options = {}) {
@@ -988,6 +1035,7 @@ class HlsService {
       exitPromise,
       inputPath,
       cacheDir,
+      startedAt: new Date().toISOString(),
       resumeFromSegment,
       prioritySegment: Number.isInteger(resume.requestedSegment) ? resume.requestedSegment : null,
       lastAccessAt: Date.now(),
@@ -2334,6 +2382,16 @@ function keyframeMediaIdentity(mediaFile) {
 function keyframeRecordKey(mediaFile) {
   const identity = keyframeMediaIdentity(mediaFile);
   return identity ? `${identity.mediaType}:${identity.mediaId}` : "";
+}
+
+function taskMediaSummary(mediaFile) {
+  if (!mediaFile) return null;
+  return {
+    mediaType: mediaFile.mediaType || null,
+    id: mediaFile.id || null,
+    title: mediaFile.title || mediaFile.showTitle || mediaFile.filename || path.basename(mediaFile.filePath || ""),
+    filePath: mediaFile.filePath || null
+  };
 }
 
 function keyframeCacheMatches(cached, signature) {

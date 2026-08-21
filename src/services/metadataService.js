@@ -22,6 +22,8 @@ class MetadataService {
     this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages, this.customMetadata);
     this.thumbnailDir = path.join(this.config.cachePath, "thumbnails");
     this.preloadInFlight = null;
+    this.preloadStatus = null;
+    this.preloadQueue = [];
     this.missingRecheckInFlight = null;
     this.lastMissingRecheck = null;
     this.thumbnailInFlight = new Map();
@@ -476,6 +478,26 @@ class MetadataService {
     };
   }
 
+  taskStatus() {
+    return {
+      preload: this.preloadStatus ? { ...this.preloadStatus, current: cloneTaskMedia(this.preloadStatus.current) } : null,
+      missingRecheck: this.missingRecheckStatus()
+    };
+  }
+
+  taskQueue(kind, offset = 0, limit = 50) {
+    if (kind !== "preload") return { total: 0, offset: 0, items: [] };
+    const start = Math.max(0, Number.parseInt(offset, 10) || 0);
+    const size = Math.max(1, Math.min(Number.parseInt(limit, 10) || 50, 200));
+    const processed = Math.max(0, Number(this.preloadStatus && this.preloadStatus.processed) || 0);
+    const pending = this.preloadQueue.slice(processed);
+    return {
+      total: pending.length,
+      offset: start,
+      items: pending.slice(start, start + size).map(taskMediaSummary)
+    };
+  }
+
   async setPosterForMedia(mediaType, mediaFile, source, options = {}) {
     const mediaId = options.mediaId || mediaFile.id;
     const posterFilename = await this.cacheManualPoster(mediaType, mediaId, source);
@@ -562,9 +584,25 @@ class MetadataService {
     let missingCount = 0;
     let failedCount = 0;
 
+    this.preloadQueue = mediaFiles;
+    this.preloadStatus = {
+      running: true,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      total: mediaFiles.length,
+      processed: 0,
+      current: null,
+      cached: 0,
+      fetched: 0,
+      copied: 0,
+      missing: 0,
+      failed: 0
+    };
+
     logger.info(`[metadata] background preload starting files=${mediaFiles.length}`);
 
     for (const media of mediaFiles) {
+      this.preloadStatus.current = taskMediaSummary(media);
       try {
         const cached = await this.store.get(media.mediaType, media.file.id);
         if (cached && !cached.found && !options.retryMissing) {
@@ -614,9 +652,26 @@ class MetadataService {
       } catch (err) {
         failedCount += 1;
         logger.error(`[metadata] preload item failed mediaType=${media.mediaType} id=${media.file.id} message="${err.message}"`, err);
+      } finally {
+        this.preloadStatus = {
+          ...this.preloadStatus,
+          processed: this.preloadStatus.processed + 1,
+          cached: cachedCount,
+          fetched: fetchedCount,
+          copied: copiedCount,
+          missing: missingCount,
+          failed: failedCount
+        };
       }
     }
 
+    this.preloadStatus = {
+      ...this.preloadStatus,
+      running: false,
+      finishedAt: new Date().toISOString(),
+      current: null
+    };
+    this.preloadQueue = [];
     logger.info(`[metadata] background preload complete cached=${cachedCount} fetched=${fetchedCount} posterRepaired=${posterRepairedCount} posterUnavailable=${posterUnavailableCount} copied=${copiedCount} missing=${missingCount} failed=${failedCount}`);
   }
 
@@ -2093,6 +2148,20 @@ async function fileExists(filePath) {
     }
     throw err;
   }
+}
+
+function taskMediaSummary(media) {
+  const file = media && media.file || media || {};
+  return {
+    id: file.id || null,
+    mediaType: media && media.mediaType || null,
+    title: file.title || file.name || file.filename || path.basename(file.filePath || "") || "Media item",
+    filePath: file.filePath || null
+  };
+}
+
+function cloneTaskMedia(media) {
+  return media ? { ...media } : null;
 }
 
 module.exports = { MetadataService };

@@ -11,8 +11,8 @@
     <title>Media Baker</title>
     <style>html.auth-pending body { visibility: hidden; }</style>
     <link rel="manifest" href="/manifest.webmanifest?v=__MEDIA_BAKER_VERSION__">
-    <link rel="icon" href="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" type="image/svg+xml">
-    <link rel="apple-touch-icon" href="/icons/media-baker-180.png?v=__MEDIA_BAKER_VERSION__">
+    <link rel="icon" href="/app-icon/192.png" type="image/png">
+    <link rel="apple-touch-icon" href="/app-icon/180.png">
     <link rel="stylesheet" href="/styles.css?v=__MEDIA_BAKER_VERSION__">
   </head>
   <body>
@@ -20,7 +20,7 @@
 
     <header class="topbar">
       <a class="brand" href="/" aria-label="Go to home">
-        <img class="brand-mark" src="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" alt="" draggable="false">
+        <img class="brand-mark" src="/app-icon/512.png" alt="" draggable="false">
         <span>Media Baker</span>
       </a>
       <label class="search-shell">
@@ -401,9 +401,37 @@
         <h2>Account</h2>
         <form id="selfAccountForm" class="self-account-form">
           <label>Username<input id="selfAccountUsername" type="text" autocomplete="username" required></label>
-          <label>Current password<input id="selfAccountCurrentPassword" type="password" autocomplete="current-password" required></label>
+          <label>Current password<input id="selfAccountCurrentPassword" type="password" autocomplete="current-password" placeholder="Required when changing username or password"></label>
           <label>New password<input id="selfAccountNewPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current password"></label>
           <label>Confirm new password<input id="selfAccountConfirmPassword" type="password" autocomplete="new-password"></label>
+          <section class="account-theme-settings" aria-labelledby="accountThemeHeading">
+            <div>
+              <p class="eyebrow">Appearance</p>
+              <h3 id="accountThemeHeading">Colour scheme</h3>
+            </div>
+            <div class="account-theme-controls">
+              <label>Accent colour
+                <select id="selfAccountThemePreset">
+                  <option value="#00d9ff">Cyan</option>
+                  <option value="#ff4d5e">Red</option>
+                  <option value="#ffd23f">Yellow</option>
+                  <option value="#ff5fb7">Pink</option>
+                  <option value="#35d07f">Green</option>
+                  <option value="#ff8a3d">Orange</option>
+                  <option value="#a970ff">Purple</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <div class="account-custom-colour">
+                <span>Custom colour</span>
+                <button id="openThemeColourPicker" class="theme-colour-button" type="button" title="Choose a custom accent colour" aria-label="Choose a custom accent colour">
+                  <span id="themeColourSwatch" class="theme-colour-swatch" aria-hidden="true"></span>
+                  <span id="themeColourValue">#00D9FF</span>
+                </button>
+                <input id="selfAccountThemeColour" class="visually-hidden-colour-input" type="color" value="#00d9ff" tabindex="-1" aria-hidden="true">
+              </div>
+            </div>
+          </section>
           <div class="action-row">
             <button id="saveSelfAccount" class="primary-button" type="submit">Save account</button>
             <button id="closeAccountPanel" class="secondary-button" type="button">Close</button>
@@ -479,6 +507,7 @@
             <button id="adminOptimizerTab" class="admin-nav-button" type="button">Optimise</button>
             <button id="adminSkipDetectionTab" class="admin-nav-button" type="button">Skip Detection</button>
             <button id="adminSettingsTab" class="admin-nav-button" type="button">Settings</button>
+            <button id="adminTasksTab" class="admin-nav-button" type="button">Tasks</button>
             <button id="adminHardwareTab" class="admin-nav-button" type="button">Hardware</button>
             <button id="adminCurrentlyPlayingTab" class="admin-nav-button" type="button">Currently Playing</button>
             <button id="adminLogsTab" class="admin-nav-button" type="button">Live Log</button>
@@ -515,6 +544,7 @@
                 <label><input id="accountCanReindex" type="checkbox"> Re-index libraries</label>
                 <label><input id="accountCanUsers" type="checkbox"> Manage users</label>
                 <label><input id="accountCanHardware" type="checkbox"> View hardware</label>
+                <label><input id="accountCanTasks" type="checkbox"> View tasks</label>
                 <label><input id="accountCanLogs" type="checkbox"> View logs</label>
                 <label><input id="accountCanHistory" type="checkbox"> View user history</label>
               </div>
@@ -794,6 +824,7 @@
                 <legend>General</legend>
                 <label>Log level<select id="settingsLogLevel"><option value="errors">Errors</option><option value="info">Info</option><option value="full">Full</option></select></label>
                 <label>Log retention days<input id="settingsLogRetentionDays" type="number" min="1" step="1"></label>
+                <label>App icon<select id="settingsAppIcon"></select></label>
                 <label>Preferred audio language<input id="settingsPreferredAudio" type="text" list="languageOptions" autocomplete="off"></label>
                 <label><input id="settingsEnableGpu" type="checkbox"> Enable GPU encoding</label>
               </fieldset>
@@ -858,7 +889,7 @@
                 <div id="ytDlpSettingsBody" class="settings-feature-body">
                   <label>Download path<input id="settingsYtDlpPath" type="text" autocomplete="off" placeholder="C:\MediaBaker\downloads"></label>
                   <label>Library title<input id="settingsYtDlpTitle" type="text" autocomplete="off"></label>
-                  <label class="settings-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlists from other providers</label>
+                  <label class="settings-toggle ytdlp-playlist-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlists from other providers</label>
                   <div class="action-row ytdlp-settings-actions">
                     <button id="settingsYtDlpUpdate" class="secondary-button settings-action-button" type="button">Update YT-DLP</button>
                     <button id="settingsYtDlpUploadCookies" class="secondary-button settings-action-button" type="button">Upload cookies.txt</button>
@@ -919,6 +950,43 @@
               </div>
             </form>
             <p id="settingsStatus" class="status"></p>
+          </section>
+          <section id="adminTasksPage" class="admin-page hidden">
+            <div class="admin-page-heading">
+              <div>
+                <p class="eyebrow">Operations</p>
+                <h2>Tasks</h2>
+              </div>
+              <p id="taskUpdatedAt" class="status task-updated-at"></p>
+            </div>
+            <div class="task-summary" aria-label="Task summary">
+              <div><strong id="taskRunningCount">0</strong><span>Running</span></div>
+              <div><strong id="taskQueuedCount">0</strong><span>Queued</span></div>
+              <div><strong id="taskFailedCount">0</strong><span>Failed</span></div>
+              <div><strong id="taskCompletedCount">0</strong><span>Completed</span></div>
+            </div>
+            <div class="task-filters">
+              <label>State
+                <select id="taskStateFilter">
+                  <option value="active">Active</option>
+                  <option value="all">All</option>
+                  <option value="running">Running</option>
+                  <option value="queued">Queued</option>
+                  <option value="failed">Failed</option>
+                  <option value="completed">Completed</option>
+                </select>
+              </label>
+              <label>Type
+                <select id="taskTypeFilter">
+                  <option value="">All types</option>
+                </select>
+              </label>
+              <label>Filter
+                <input id="taskSearchFilter" type="search" placeholder="Task, file, library, or phase">
+              </label>
+            </div>
+            <p id="taskStatus" class="status"></p>
+            <div id="taskList" class="task-list"></div>
           </section>
           <section id="adminHardwarePage" class="admin-page hidden">
             <div class="admin-page-heading">
@@ -1009,9 +1077,11 @@
 
     <div id="loginOverlay" class="login-overlay hidden">
       <form id="loginForm" class="login-modal">
-        <img class="login-mark" src="/icons/media-baker.svg?v=__MEDIA_BAKER_VERSION__" alt="" draggable="false">
-        <h1 id="loginTitle">Media Baker</h1>
-        <p id="loginPrompt">Sign in to browse your library.</p>
+        <div class="login-identity">
+          <img class="login-mark" src="/app-icon/512.png" alt="" draggable="false">
+          <h1 id="loginTitle">Media Baker</h1>
+          <p id="loginPrompt">Sign in to browse your library.</p>
+        </div>
         <input id="usernameInput" type="text" autocomplete="username" placeholder="Username" required>
         <input id="secretInput" type="password" autocomplete="current-password" placeholder="Password" required>
         <button class="primary-button" type="submit">Unlock</button>

@@ -68,6 +68,15 @@ class BackupService {
     };
   }
 
+  taskStatus() {
+    return {
+      running: Boolean(this.inFlight),
+      restoring: Boolean(this.restoreInFlight),
+      progress: this.progress,
+      lastResult: this.lastResult
+    };
+  }
+
   async list(directory = null) {
     const selected = path.resolve(directory || (await this.settings()).directory);
     const entries = await fsp.readdir(selected, { withFileTypes: true }).catch((err) => {

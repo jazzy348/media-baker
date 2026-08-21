@@ -8,6 +8,9 @@ const SETTINGS_KEY = "runtime";
 const VALID_LOG_LEVELS = new Set(["errors", "error", "info", "full"]);
 
 const DEFAULT_RUNTIME_SETTINGS = {
+  branding: {
+    icon: ""
+  },
   logging: {
     level: "info",
     retentionDays: 5
@@ -250,6 +253,9 @@ class AppSettingsService {
 
 function runtimeSettingsFromConfig(config) {
   return {
+    branding: {
+      icon: config.branding && config.branding.icon
+    },
     logging: {
       level: config.logging && config.logging.level,
       retentionDays: config.logging && config.logging.retentionDays
@@ -359,6 +365,7 @@ function runtimeSettingsFromConfig(config) {
 
 function applyRuntimeSettings(config, settings) {
   const normalized = normalizeRuntimeSettings(settings);
+  config.branding = normalized.branding;
   config.logging.level = normalized.logging.level;
   config.logging.retentionDays = normalized.logging.retentionDays;
   const updateWorkPath = config.updates && config.updates.workPath;
@@ -401,6 +408,9 @@ function applyRuntimeSettings(config, settings) {
 function normalizeRuntimeSettings(input = {}) {
   const merged = deepMerge(DEFAULT_RUNTIME_SETTINGS, input || {});
   return {
+    branding: {
+      icon: stringValue(merged.branding.icon, DEFAULT_RUNTIME_SETTINGS.branding.icon)
+    },
     logging: {
       level: normalizeLogLevel(merged.logging.level),
       retentionDays: intValue(merged.logging.retentionDays, DEFAULT_RUNTIME_SETTINGS.logging.retentionDays)

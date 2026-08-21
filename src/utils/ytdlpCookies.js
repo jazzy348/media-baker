@@ -9,7 +9,9 @@ function cookieFilePath(config) {
   return path.join(path.dirname(config.hls.cachePath), "yt-dlp", "youtube-cookies.txt");
 }
 
-async function cookieArgs(config) {
+async function cookieArgsForUrl(config, url) {
+  if (!isYoutubeUrl(url)) return [];
+
   const filePath = cookieFilePath(config);
   try {
     const stat = await fs.stat(filePath);
@@ -17,6 +19,18 @@ async function cookieArgs(config) {
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
+  }
+}
+
+function isYoutubeUrl(value) {
+  try {
+    const hostname = new URL(String(value || "")).hostname.toLowerCase().replace(/^www\./, "");
+    return hostname === "youtube.com"
+      || hostname === "music.youtube.com"
+      || hostname === "youtu.be"
+      || hostname.endsWith(".youtube.com");
+  } catch (err) {
+    return false;
   }
 }
 
@@ -62,8 +76,9 @@ function httpError(status, message) {
 }
 
 module.exports = {
-  cookieArgs,
+  cookieArgsForUrl,
   cookieCount,
   cookieFilePath,
+  isYoutubeUrl,
   sanitiseYoutubeCookies
 };

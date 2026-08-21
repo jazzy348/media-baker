@@ -7,7 +7,7 @@ const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 const { shareProgressUserId } = require("../utils/progressIdentity");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, backups, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -115,10 +115,27 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
     res.json({ entries: logger.recent(req.query.limit) });
   });
 
+  router.get("/tasks", requirePermission("canViewTasks"), async (req, res, next) => {
+    try {
+      res.json(await tasks.snapshot());
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/tasks/:taskId/queue", requirePermission("canViewTasks"), async (req, res, next) => {
+    try {
+      res.json(await tasks.queue(req.params.taskId, req.query.offset, req.query.limit));
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
       res.json({
-        settings: await appSettings.getPublic()
+        settings: await appSettings.getPublic(),
+        branding: branding.status()
       });
     } catch (err) {
       next(err);
@@ -127,12 +144,17 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.put("/settings", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
+      const requestedSettings = req.body && req.body.settings || req.body || {};
+      if (requestedSettings.branding && requestedSettings.branding.icon !== undefined) {
+        await branding.ensureSelection(requestedSettings.branding.icon);
+      }
       const previousOpenMovieEnabled = appSettings.isOpenMovieEnabled();
       const previousYtDlp = JSON.stringify(config.ytdlp || {});
       const previousIptv = JSON.stringify(config.iptv || {});
       const previousUpdates = JSON.stringify(config.updates || {});
-      await appSettings.save(req.body && req.body.settings || req.body || {});
+      await appSettings.save(requestedSettings);
       const settings = await appSettings.getPublic();
+      await branding.activate(settings.branding.icon);
       if (previousOpenMovieEnabled !== appSettings.isOpenMovieEnabled()) {
         logger.info(`[openmovie] endpoints ${appSettings.isOpenMovieEnabled() ? "enabled" : "disabled"}`);
       }
@@ -184,7 +206,8 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
         });
       }
       res.json({
-        settings
+        settings,
+        branding: branding.status()
       });
     } catch (err) {
       next(err);

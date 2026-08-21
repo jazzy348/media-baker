@@ -465,6 +465,14 @@ class MediaIndex {
     }));
   }
 
+  taskStatus() {
+    return {
+      fullReindex: Boolean(this.reindexInFlight),
+      libraryReindexes: [...this.libraryReindexInFlight.keys()],
+      pendingLibraries: [...this.libraryReindexPending]
+    };
+  }
+
   async previousCollection(library) {
     if (this.databaseBacked) {
       return {

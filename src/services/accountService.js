@@ -24,6 +24,7 @@ const DEFAULT_PERMISSIONS = {
   canViewAdmin: false,
   canViewHardware: false,
   canViewLogs: false,
+  canViewTasks: false,
   canViewUserHistory: false,
   isAdmin: false
 };
@@ -33,7 +34,8 @@ const DEFAULT_PLAYBACK_PREFERENCES = {
   subtitleLanguage: "",
   subtitleMode: "none",
   quality: "original",
-  audioChannels: "stereo"
+  audioChannels: "stereo",
+  themeColour: "#00d9ff"
 };
 
 class AccountService {
@@ -604,6 +606,7 @@ function normalizePermissions(value = {}) {
       canViewAdmin: true,
       canViewHardware: true,
       canViewLogs: true,
+      canViewTasks: true,
       canViewUserHistory: true,
       libraries: []
     };
@@ -621,6 +624,7 @@ function normalizePermissions(value = {}) {
     || permissions.canReindex
     || permissions.canViewHardware
     || permissions.canViewLogs
+    || permissions.canViewTasks
     || permissions.canViewUserHistory);
   return {
     ...DEFAULT_PERMISSIONS,
@@ -638,6 +642,7 @@ function normalizePermissions(value = {}) {
     canViewAdmin,
     canViewHardware: Boolean(permissions.canViewHardware),
     canViewLogs: Boolean(permissions.canViewLogs),
+    canViewTasks: Boolean(permissions.canViewTasks),
     canViewUserHistory: Boolean(permissions.canViewUserHistory),
     isAdmin: false
   };
@@ -656,8 +661,14 @@ function normalizePlaybackPreferences(value = {}) {
     subtitleLanguage: normalizePreferenceText(preferences.subtitleLanguage),
     subtitleMode: ["none", "preferred", "forced", "any"].includes(subtitleMode) ? subtitleMode : "none",
     quality: ["original", "medium", "low"].includes(quality) ? quality : "original",
-    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo"
+    audioChannels: ["stereo", "surround51", "stabby51", "preserve"].includes(audioChannels) ? audioChannels : "stereo",
+    themeColour: normalizeThemeColour(preferences.themeColour)
   };
+}
+
+function normalizeThemeColour(value) {
+  const colour = String(value || "").trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(colour) ? colour : DEFAULT_PLAYBACK_PREFERENCES.themeColour;
 }
 
 function normalizePreferenceText(value) {

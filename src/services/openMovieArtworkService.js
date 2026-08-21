@@ -4,13 +4,20 @@ const path = require("path");
 const logger = require("../utils/logger");
 
 const LABELLED_PLACEHOLDER_VERSION = 3;
+const OPENMOVIE_PLACEHOLDER_PATH = path.resolve(
+  __dirname,
+  "..",
+  "assets",
+  "openmovie",
+  "missing-poster.png"
+);
 
 class OpenMovieArtworkService {
   constructor(mediaIndex, metadata, imageProcessor, cachePath) {
     this.mediaIndex = mediaIndex;
     this.metadata = metadata;
     this.imageProcessor = imageProcessor;
-    this.placeholderPath = path.resolve(__dirname, "..", "..", "public", "icons", "media-baker-512.png");
+    this.placeholderPath = OPENMOVIE_PLACEHOLDER_PATH;
     this.labelledPlaceholderDirectory = path.join(cachePath, "openmovie-labelled-placeholders");
     this.labelledPlaceholderOperations = new Map();
   }

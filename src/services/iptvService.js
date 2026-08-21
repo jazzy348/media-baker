@@ -176,6 +176,19 @@ class IptvService {
     };
   }
 
+  taskStatus() {
+    return {
+      refreshing: Boolean(this.refreshPromise),
+      streams: [...this.streams.values()].map((stream) => ({
+        channelId: stream.channelId,
+        channelName: this.channelsById.get(stream.channelId)?.name || stream.channelId,
+        starting: Boolean(stream.starting),
+        exited: Boolean(stream.exited),
+        lastAccessAt: stream.lastAccessAt ? new Date(stream.lastAccessAt).toISOString() : null
+      }))
+    };
+  }
+
   guide(startValue, hoursValue) {
     const startMs = finiteDateMs(startValue, Date.now());
     const hours = Math.max(1, Math.min(Number.parseInt(hoursValue, 10) || 6, 24));

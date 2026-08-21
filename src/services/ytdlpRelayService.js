@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const logger = require("../utils/logger");
-const { cookieArgs } = require("../utils/ytdlpCookies");
+const { cookieArgsForUrl } = require("../utils/ytdlpCookies");
 
 const RELAY_IDLE_MS = 60 * 1000;
 const RELAY_START_TIMEOUT_MS = 30 * 1000;
@@ -88,6 +88,13 @@ class YtDlpRelayService {
     return publicRelay(relay);
   }
 
+  taskStatus() {
+    return [...this.relays.values()].map((relay) => ({
+      ...publicRelay(relay),
+      lastAccessAt: relay.lastAccessAt ? new Date(relay.lastAccessAt).toISOString() : null
+    }));
+  }
+
   async playlist(id) {
     const relay = this.getRelay(id);
     relay.lastAccessAt = Date.now();
@@ -132,7 +139,7 @@ class YtDlpRelayService {
     const sources = await resolveRelaySources(
       this.ytdlp.binaryPath,
       relay.url,
-      await cookieArgs(this.config)
+      await cookieArgsForUrl(this.config, relay.url)
     );
     const hardware = isH264Codec(sources.videoCodec)
       ? {}

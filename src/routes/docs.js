@@ -258,7 +258,7 @@ function openApiSpec() {
         })
       },
       "/api/auth/me/preferences": {
-        put: operation("Auth", "Update playback preferences", "Saves the authenticated user's preferred audio language, subtitle language/mode, quality, and audio channel mode.", true, {
+        put: operation("Auth", "Update account preferences", "Saves the authenticated user's playback preferences and interface theme colour.", true, {
           requestBody: jsonBody(objectSchema({
             preferences: { type: "object", additionalProperties: true }
           }))
@@ -368,6 +368,18 @@ function openApiSpec() {
       },
       "/api/admin/hardware": {
         get: operation("Admin", "Hardware usage", "Returns CPU, memory, GPU, and network samples.")
+      },
+      "/api/admin/tasks": {
+        get: operation("Admin", "Task overview", "Returns current and recent background work across indexing, metadata, keyframes, streaming, optimisation, downloads, live TV, backups, skip detection, and updates. Requires task-view permission.")
+      },
+      "/api/admin/tasks/{taskId}/queue": {
+        get: operation("Admin", "Task queue", "Returns one page from a task's pending work queue. Requires task-view permission.", true, {
+          parameters: [
+            pathParam("taskId"),
+            queryParam("offset", "integer"),
+            queryParam("limit", "integer")
+          ]
+        })
       },
       "/api/admin/logs": {
         get: operation("Admin", "Recent logs", "Returns recent in-memory app log entries.", true, {
