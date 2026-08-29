@@ -70,7 +70,9 @@ const DEFAULT_RUNTIME_SETTINGS = {
     downloadPath: "cache/yt-dlp",
     libraryTitle: "YT-DLP",
     allowPlaylists: false,
-    trackProgress: true
+    trackProgress: true,
+    subscriptionCheckIntervalSeconds: 24 * 60 * 60,
+    subscriptions: []
   },
   iptv: {
     enabled: false,
@@ -312,7 +314,9 @@ function runtimeSettingsFromConfig(config) {
       downloadPath: config.ytdlp && config.ytdlp.downloadPath,
       libraryTitle: config.ytdlp && config.ytdlp.libraryTitle,
       allowPlaylists: config.ytdlp && config.ytdlp.allowPlaylists,
-      trackProgress: config.ytdlp && config.ytdlp.trackProgress !== false
+      trackProgress: config.ytdlp && config.ytdlp.trackProgress !== false,
+      subscriptionCheckIntervalSeconds: config.ytdlp && config.ytdlp.subscriptionCheckIntervalSeconds,
+      subscriptions: config.ytdlp && config.ytdlp.subscriptions
     },
     iptv: {
       enabled: config.iptv && config.iptv.enabled,
@@ -470,7 +474,13 @@ function normalizeRuntimeSettings(input = {}) {
       downloadPath: stringValue(merged.ytdlp.downloadPath, DEFAULT_RUNTIME_SETTINGS.ytdlp.downloadPath),
       libraryTitle: stringValue(merged.ytdlp.libraryTitle, DEFAULT_RUNTIME_SETTINGS.ytdlp.libraryTitle),
       allowPlaylists: boolValue(merged.ytdlp.allowPlaylists, DEFAULT_RUNTIME_SETTINGS.ytdlp.allowPlaylists),
-      trackProgress: boolValue(merged.ytdlp.trackProgress, DEFAULT_RUNTIME_SETTINGS.ytdlp.trackProgress)
+      trackProgress: boolValue(merged.ytdlp.trackProgress, DEFAULT_RUNTIME_SETTINGS.ytdlp.trackProgress),
+      subscriptionCheckIntervalSeconds: intValue(
+        merged.ytdlp.subscriptionCheckIntervalSeconds,
+        DEFAULT_RUNTIME_SETTINGS.ytdlp.subscriptionCheckIntervalSeconds,
+        60 * 60
+      ),
+      subscriptions: ytdlpSubscriptionListValue(merged.ytdlp.subscriptions)
     },
     iptv: {
       enabled: boolValue(merged.iptv.enabled, DEFAULT_RUNTIME_SETTINGS.iptv.enabled),
@@ -665,6 +675,37 @@ function optimizerRetryListValue(value) {
     })
     .filter(Boolean)
     .slice(0, 200);
+}
+
+function ytdlpSubscriptionListValue(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set();
+  return value.map((entry) => {
+    const subscription = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+    const id = stringValue(subscription.id, "");
+    const url = stringValue(subscription.url, "");
+    const channelId = stringValue(subscription.channelId, "");
+    if (!id || !url || !channelId || seen.has(channelId)) {
+      return null;
+    }
+    seen.add(channelId);
+    return {
+      id,
+      url,
+      channelId,
+      title: stringValue(subscription.title, channelId),
+      folderName: stringValue(subscription.folderName, channelId),
+      createdAt: validIsoDate(subscription.createdAt) || new Date().toISOString(),
+      lastAttemptAt: validIsoDate(subscription.lastAttemptAt),
+      lastCheckedAt: validIsoDate(subscription.lastCheckedAt),
+      lastDownloadedAt: validIsoDate(subscription.lastDownloadedAt),
+      lastError: stringValue(subscription.lastError, "") || null,
+      backfillComplete: boolValue(subscription.backfillComplete, true)
+    };
+  }).filter(Boolean);
 }
 
 function validIsoDate(value) {

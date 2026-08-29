@@ -2861,6 +2861,7 @@ textarea {
 }
 
 .ytdlp-playlist-toggle {
+  align-self: end;
   height: 44px;
   min-height: 44px !important;
   padding: 10px 12px !important;
@@ -2965,6 +2966,65 @@ textarea {
 
 .ytdlp-settings-actions {
   grid-template-columns: repeat(3, minmax(150px, 1fr));
+}
+
+.ytdlp-subscriptions {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.ytdlp-subscriptions-heading h3,
+.ytdlp-subscriptions-heading p {
+  margin: 0;
+}
+
+.ytdlp-subscriptions-heading p,
+.ytdlp-subscription-details span {
+  color: var(--muted);
+}
+
+.ytdlp-subscription-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.ytdlp-subscription-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ytdlp-subscription-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-strong);
+  border-radius: 6px;
+}
+
+.ytdlp-subscription-details {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ytdlp-subscription-details strong,
+.ytdlp-subscription-details span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ytdlp-subscription-error {
+  color: #ff7373 !important;
 }
 
 .compact-feature-body {
@@ -3222,6 +3282,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .ytdlp-subscription-add {
+    grid-template-columns: 1fr;
+  }
+
   .duplicate-row code {
     white-space: normal;
     word-break: break-word;
@@ -3380,6 +3444,275 @@ textarea {
   position: static;
 }
 
+.player-overlay.watch-together-player {
+  place-items: stretch;
+  padding: 18px;
+}
+
+.player-overlay.watch-together-player .player-shell {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 100%;
+  max-width: none;
+  height: calc(100vh - 36px);
+  max-height: none;
+}
+
+.player-overlay.watch-together-player.player-status-visible .player-shell {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.player-overlay.watch-together-player.watch-together-panel-open .player-shell {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+}
+
+.player-overlay.watch-together-player .player-heading,
+.player-overlay.watch-together-player .video-player-slot,
+.player-overlay.watch-together-player > .player-shell > .status {
+  grid-column: 1;
+}
+
+.player-overlay.watch-together-player .video-player-slot {
+  display: grid;
+  min-height: 0;
+}
+
+.player-overlay.watch-together-player .video-playback-surface {
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+.watch-together-panel {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(120px, 1fr) auto;
+  gap: 14px;
+  min-height: 0;
+  padding: 16px;
+  background: rgba(13, 21, 28, 0.68);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: background 160ms ease;
+}
+
+.watch-together-panel-heading {
+  grid-row: 1;
+}
+
+.watch-together-host-controls {
+  grid-row: 2;
+}
+
+.watch-together-participants-section {
+  grid-row: 3;
+  min-height: 0;
+}
+
+.watch-together-chat {
+  grid-row: 4;
+}
+
+.watch-together-chat-form {
+  grid-row: 5;
+}
+
+.watch-together-panel:hover,
+.watch-together-panel:focus-within {
+  background: rgba(13, 21, 28, 0.96);
+}
+
+.watch-together-panel-heading,
+.watch-together-participant,
+.watch-together-host-controls,
+.watch-together-chat-form {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.watch-together-panel-heading p,
+.watch-together-panel-heading strong {
+  margin: 0;
+}
+
+.watch-together-host-controls {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.watch-together-participants {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 114px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.watch-together-participant {
+  height: 54px;
+  min-height: 54px;
+  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.watch-together-participant > div {
+  min-width: 0;
+}
+
+.watch-together-participant strong,
+.watch-together-participant-meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch-together-participant .compact-button {
+  flex: 0 0 auto;
+}
+
+.watch-together-participant-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.watch-together-chat {
+  display: flex;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.watch-together-message {
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.watch-together-message.system {
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.watch-together-message strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--cyan);
+  font-size: 12px;
+}
+
+.watch-together-chat-form input {
+  min-width: 0;
+  min-height: 38px;
+  flex: 1;
+  padding: 8px 10px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: 0;
+  font: inherit;
+}
+
+.watch-together-chat-form input:focus {
+  border-color: rgba(var(--accent-rgb), 0.72);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
+}
+
+.watch-together-join-modal {
+  width: min(430px, calc(100vw - 32px));
+}
+
+.watch-together-join-modal input {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: 8px;
+  outline: 0;
+  font: inherit;
+}
+
+.watch-together-join-modal input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+.watch-together-join-modal input:focus {
+  border-color: rgba(var(--accent-rgb), 0.72);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
+}
+
+.watch-ended-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(rgba(5, 7, 10, 0.76), rgba(5, 7, 10, 0.96)),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 154px),
+    repeating-linear-gradient(0deg, rgba(var(--accent-rgb), 0.06) 0 1px, transparent 1px 226px),
+    radial-gradient(circle at 50% 12%, rgba(var(--accent-rgb), 0.24), transparent 36%),
+    var(--bg);
+}
+
+.watch-ended-card {
+  display: grid;
+  width: min(520px, 100%);
+  justify-items: center;
+  gap: 14px;
+  padding: 42px 34px;
+  text-align: center;
+  background: rgba(12, 17, 23, 0.94);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.5);
+}
+
+.watch-ended-mark {
+  width: auto;
+  max-width: min(220px, 70vw);
+  height: 150px;
+  object-fit: contain;
+  filter: drop-shadow(0 12px 28px rgba(var(--accent-rgb), 0.16));
+}
+
+.watch-ended-card .eyebrow,
+.watch-ended-card h1,
+.watch-ended-card p {
+  margin: 0;
+}
+
+.watch-ended-card h1 {
+  font-size: clamp(30px, 7vw, 44px);
+}
+
+.watch-ended-card p:last-child {
+  max-width: 390px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.admin-activity-tabs {
+  width: min(420px, 100%);
+  margin-bottom: 18px;
+}
+
 .video-playback-surface {
   position: relative;
   width: 100%;
@@ -3400,6 +3733,8 @@ textarea {
 }
 
 .web-player {
+  position: relative;
+  z-index: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -3480,6 +3815,7 @@ textarea {
 
 .video-controls {
   position: absolute;
+  z-index: 4;
   right: 12px;
   bottom: 12px;
   left: 12px;
@@ -3497,6 +3833,10 @@ textarea {
   opacity: 1;
   transform: translateY(0);
   transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.video-controls.shuffle-available {
+  grid-template-columns: 38px 44px minmax(90px, 1fr) 44px 38px 90px 38px 38px 38px;
 }
 
 .video-playback-surface.controls-hidden {
@@ -3533,6 +3873,12 @@ textarea {
   background: var(--cyan);
   border-color: var(--cyan);
   outline: 0;
+}
+
+.video-control-button.active {
+  color: var(--accent-contrast);
+  background: var(--cyan);
+  border-color: var(--cyan);
 }
 
 .video-control-button:disabled {
@@ -3601,6 +3947,18 @@ textarea {
   aspect-ratio: auto;
   border: 0;
   border-radius: 0;
+}
+
+.video-playback-surface:fullscreen .video-controls,
+.video-playback-surface:-webkit-full-screen .video-controls {
+  position: fixed;
+  z-index: 2147483647;
+}
+
+.video-playback-surface:fullscreen .video-skip-prompt,
+.video-playback-surface:-webkit-full-screen .video-skip-prompt {
+  position: fixed;
+  z-index: 2147483646;
 }
 
 .video-mini-player {
@@ -3672,6 +4030,10 @@ textarea {
   min-height: 40px;
   padding: 4px 6px;
   gap: 5px;
+}
+
+.video-mini-player .video-controls.shuffle-available {
+  grid-template-columns: 34px 38px minmax(70px, 1fr) 38px 34px 34px 34px 34px;
 }
 
 .video-mini-player .video-skip-prompt {
@@ -3898,6 +4260,28 @@ textarea {
   color: #ff8a8a;
 }
 
+@media (min-width: 761px) and (max-width: 1100px) {
+  .player-overlay.watch-together-player.watch-together-panel-open .player-shell {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  }
+
+  .player-overlay.watch-together-player.watch-together-panel-open .video-controls {
+    grid-template-columns: 34px 38px minmax(60px, 1fr) 38px 34px minmax(52px, 72px) 34px 34px;
+    gap: 5px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .player-overlay.watch-together-player.watch-together-panel-open .video-control-button {
+    width: 34px;
+  }
+
+  .player-overlay.watch-together-player.watch-together-panel-open .video-volume {
+    display: block;
+    min-width: 52px;
+  }
+}
+
 @media (max-width: 760px) {
   .image-viewer {
     inset: 0 0 44vh;
@@ -3920,6 +4304,29 @@ textarea {
     padding: 12px;
   }
 
+  .player-overlay.watch-together-player {
+    padding: 0;
+  }
+
+  .player-overlay.watch-together-player .player-shell,
+  .player-overlay.watch-together-player.watch-together-panel-open .player-shell {
+    grid-template-columns: 1fr;
+    width: 100%;
+    height: 100vh;
+    padding: 10px;
+    border: 0;
+  }
+
+  .watch-together-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    grid-column: 1;
+    grid-row: 1 / -1;
+    border-radius: 0;
+    background: rgba(7, 12, 17, 0.97);
+  }
+
   .video-controls {
     right: 7px;
     bottom: 7px;
@@ -3930,6 +4337,15 @@ textarea {
     gap: 5px;
   }
 
+  .video-controls.shuffle-available {
+    grid-template-columns: 30px 34px minmax(40px, 1fr) 34px 30px 30px 30px 30px;
+    gap: 3px;
+  }
+
+  .video-controls.shuffle-available .video-control-button {
+    width: 30px;
+  }
+
   .video-control-button {
     width: 34px;
     height: 30px;
@@ -3937,6 +4353,20 @@ textarea {
 
   .video-volume {
     display: none;
+  }
+
+  .player-overlay.watch-together-player .video-controls {
+    grid-template-columns: 30px 34px minmax(40px, 1fr) 34px 30px minmax(42px, 54px) 30px 30px;
+    gap: 3px;
+  }
+
+  .player-overlay.watch-together-player .video-control-button {
+    width: 30px;
+  }
+
+  .player-overlay.watch-together-player .video-volume {
+    display: block;
+    min-width: 42px;
   }
 
   .video-mini-player {

@@ -32,6 +32,7 @@ function openApiSpec() {
       { name: "Libraries" },
       { name: "OpenMovie" },
       { name: "Playback Progress" },
+      { name: "Watch Together" },
       { name: "YT-DLP" },
       { name: "Streams" },
       { name: "Health" }
@@ -79,6 +80,27 @@ function openApiSpec() {
         SettingsRequest: objectSchema({
           settings: { type: "object", additionalProperties: true }
         }),
+        WatchTogetherRoom: objectSchema({
+          id: { type: "string" },
+          mediaType: { type: "string" },
+          mediaId: { type: "string" },
+          mediaTitle: { type: "string" },
+          libraryTitle: { type: "string" },
+          durationSeconds: { type: "number", minimum: 0 },
+          hostName: { type: "string" },
+          everyoneCanControl: { type: "boolean" },
+          createdAt: { type: "string", format: "date-time" },
+          expiresAt: { type: "string", format: "date-time" }
+        }, ["id", "mediaType", "mediaId", "mediaTitle", "hostName", "everyoneCanControl"]),
+        WatchTogetherParticipant: objectSchema({
+          id: { type: "string" },
+          name: { type: "string" },
+          isHost: { type: "boolean" },
+          connected: { type: "boolean" },
+          ready: { type: "boolean" },
+          blocksPlayback: { type: "boolean" },
+          loggedIn: { type: "boolean" }
+        }, ["id", "name", "isHost", "connected", "ready", "loggedIn"]),
         OpenMoviePosterAtlas: objectSchema({
           url: { type: "string" },
           slot: { type: "integer", minimum: 0, maximum: 11 },
@@ -179,8 +201,12 @@ function openApiSpec() {
         OpenMovieBootstrap: objectSchema({
           moviesUrl: { type: "string" },
           tvUrl: { type: "string" },
-          onDeckUrl: { type: "string" }
-        }, ["moviesUrl", "tvUrl", "onDeckUrl"]),
+          onDeckUrl: { type: "string" },
+          futureUrlsUrl: {
+            type: "string",
+            description: "Encrypted continuation URL whose starting movie, episode, variant, and On Deck page positions are fixed when authentication succeeds. Add an optional count query parameter; it defaults to 1000."
+          }
+        }, ["moviesUrl", "tvUrl", "onDeckUrl", "futureUrlsUrl"]),
         OpenMovieFutureUrlSequence: objectSchema({
           startId: { type: "integer", minimum: 1 },
           endId: { type: "integer", minimum: 1 },
@@ -200,12 +226,16 @@ function openApiSpec() {
           }
         }, ["startPage", "endPage", "urls"]),
         OpenMovieFutureUrls: objectSchema({
+          nextUrl: {
+            type: "string",
+            description: "Encrypted continuation URL for the sequences immediately following this response."
+          },
           count: { type: "integer", minimum: 1, maximum: 5000 },
           movies: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
           episodes: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
           variants: { $ref: "#/components/schemas/OpenMovieFutureUrlSequence" },
           onDeckPages: { $ref: "#/components/schemas/OpenMovieFuturePageSequence" }
-        }, ["count", "movies", "episodes", "variants", "onDeckPages"]),
+        }, ["nextUrl", "count", "movies", "episodes", "variants", "onDeckPages"]),
         OpenMovieShow: objectSchema({
           library: { type: "string" },
           libraryTitle: { type: "string" },
@@ -292,6 +322,38 @@ function openApiSpec() {
           parameters: [pathParam("id")]
         })
       },
+      "/api/admin/playback-sync/accounts": {
+        get: operation("Admin", "List playback-sync accounts", "Returns Media Baker account IDs and usernames for an external playback synchroniser. Administrator accounts only.")
+      },
+      "/api/admin/playback-sync/catalog": {
+        get: operation("Admin", "List playback-sync catalogue", "Returns a paginated matching catalogue of progress-enabled movie and TV libraries. Administrator accounts only.", true, {
+          parameters: [
+            { name: "offset", in: "query", required: false, schema: { type: "integer", minimum: 0, default: 0 } },
+            { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 1000, default: 500 } }
+          ]
+        })
+      },
+      "/api/admin/playback-sync/import": {
+        post: operation("Admin", "Import playback progress", "Upserts up to 500 matched playback records without deleting history or downgrading watched items. Administrator accounts only.", true, {
+          requestBody: jsonBody(objectSchema({
+            userId: { type: "string" },
+            records: {
+              type: "array",
+              minItems: 1,
+              maxItems: 500,
+              items: objectSchema({
+                mediaType: { type: "string" },
+                mediaId: { type: "string" },
+                status: { type: "string", enum: ["in_progress", "watched"] },
+                positionSeconds: { type: "number", minimum: 0 },
+                durationSeconds: { type: "number", exclusiveMinimum: 0 },
+                updatedAt: { type: "string", format: "date-time" },
+                watchedAt: { type: "string", format: "date-time", nullable: true }
+              })
+            }
+          }))
+        })
+      },
       "/api/admin/api-keys": {
         get: operation("Admin", "List API keys", "Requires API-key-management permission."),
         post: operation("Admin", "Create API key", "Returns the raw API key once.", true, {
@@ -323,6 +385,18 @@ function openApiSpec() {
           requestBody: jsonBody(objectSchema({ contents: { type: "string" } }))
         }),
         delete: operation("Admin", "Remove YouTube cookies", "Deletes the stored YouTube cookie file. Requires settings-management permission.")
+      },
+      "/api/admin/ytdlp/subscriptions": {
+        post: operation("Admin", "Subscribe to a YouTube channel", "Downloads the channel's existing videos, then downloads future uploads on the configured schedule. Requires settings-management permission.", true, {
+          requestBody: jsonBody(objectSchema({
+            url: { type: "string", example: "https://www.youtube.com/@example" }
+          }))
+        })
+      },
+      "/api/admin/ytdlp/subscriptions/{id}": {
+        delete: operation("Admin", "Remove a YouTube channel subscription", "Stops checking the channel and leaves its downloaded media in the library. Requires settings-management permission.", true, {
+          parameters: [pathParam("id")]
+        })
       },
       "/api/admin/skip-detection": {
         get: operation("Admin", "Skip detection status", "Returns checkpoint progress, the current episode and phase, ETA, marker counts, and failures. Requires settings-management permission.")
@@ -388,6 +462,14 @@ function openApiSpec() {
       },
       "/api/admin/currently-playing": {
         get: operation("Admin", "Currently playing", "Lists users with recent HLS segment activity.")
+      },
+      "/api/admin/watch-together": {
+        get: operation("Admin", "Active Watch Together rooms", "Lists active rooms and their connected participants. Requires user-history view permission.")
+      },
+      "/api/admin/watch-together/{roomId}": {
+        delete: operation("Admin", "Close Watch Together room", "Closes an active room for every participant. Requires a full admin account.", true, {
+          parameters: [pathParam("roomId")]
+        })
       },
       "/api/admin/history": {
         get: operation("Admin", "User watch history timeline", "Lists watched and in-progress activity with server-side user, timespan, and pagination filters.", true, {
@@ -487,7 +569,7 @@ function openApiSpec() {
         })
       },
       "/api/catalog/{mediaType}/{id}/metadata/search": {
-        get: operation("Catalog", "Search metadata candidates", "Returns TMDb or MusicBrainz candidates for manual matching.", true, {
+        get: operation("Catalog", "Search metadata candidates", "Returns TMDb or Deezer candidates for manual matching.", true, {
           parameters: [pathParam("mediaType"), pathParam("id"), queryParam("title"), queryParam("year", "integer")]
         })
       },
@@ -595,15 +677,15 @@ function openApiSpec() {
       },
       "/api/ytdlp/downloads": {
         get: operation("YT-DLP", "List downloads", "Returns active and recent YT-DLP download progress records."),
-        post: operation("YT-DLP", "Start download or recording", "Starts a URL download into the managed YT-DLP library. Live recordings are normalised to a continuous 48 kHz AAC timeline before indexing.", true, {
+        post: operation("YT-DLP", "Start download, channel subscription, or recording", "Starts a URL download into the managed YT-DLP library. YouTube channels can be downloaded once or downloaded in full and subscribed for future uploads. Live recordings are normalised to a continuous 48 kHz AAC timeline before indexing.", true, {
           requestBody: jsonBody(objectSchema({
             url: { type: "string", example: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
-            mode: { type: "string", enum: ["download", "record"] }
+            mode: { type: "string", enum: ["download", "channel-download", "channel-subscribe", "record"] }
           }))
         })
       },
       "/api/ytdlp/inspect": {
-        post: operation("YT-DLP", "Inspect URL", "Returns the title, extractor, and current live status without downloading the media.", true, {
+        post: operation("YT-DLP", "Inspect URL", "Returns the title, extractor, channel classification, and current live status without downloading the media.", true, {
           requestBody: jsonBody(objectSchema({
             url: { type: "string" }
           }))
@@ -773,8 +855,41 @@ function openApiSpec() {
           parameters: [pathParam("cacheKey"), pathParam("filename"), queryParam("playbackToken")]
         })
       },
+      "/api/watch-together/rooms": {
+        post: operation("Watch Together", "Create room", "Creates a synchronized room for one media item. The account must have Copy URL permission and access to the selected library.", true, {
+          requestBody: jsonBody(objectSchema({
+            mediaType: { type: "string" },
+            mediaId: { type: "string" },
+            audio: { type: "string" },
+            subtitle: { type: "string" },
+            audioChannels: { type: "string", enum: ["preserve", "stereo", "surround51", "stabby51"] },
+            quality: { type: "string", enum: ["original", "medium", "low"] }
+          }, ["mediaType", "mediaId"]))
+        })
+      },
+      "/api/watch-together/join": {
+        post: operation("Watch Together", "Join room", "Joins using an invite token. Account authentication is optional; guests must supply a temporary name and stable per-tab client ID. The returned ticket connects to `/api/watch-together/socket?ticket=...`.", false, {
+          requestBody: jsonBody(objectSchema({
+            inviteToken: { type: "string" },
+            name: { type: "string", maxLength: 32 },
+            clientId: { type: "string" }
+          }, ["inviteToken", "clientId"]))
+        })
+      },
+      "/api/watch-streams/{libraryKey}/{itemId}/master.m3u8": {
+        get: operation("Watch Together", "Serve room playback", "Serves the shared HLS rendition using the room-scoped token returned by the join endpoint.", true, {
+          security: [{ PlaybackToken: [] }],
+          parameters: [pathParam("libraryKey"), pathParam("itemId"), queryParam("playbackToken")]
+        })
+      },
+      "/api/watch-streams/hls/{cacheKey}/{filename}": {
+        get: operation("Watch Together", "Serve room HLS media", "Serves room-scoped playlists and segments after validating that the participant is still allowed in the room.", true, {
+          security: [{ PlaybackToken: [] }],
+          parameters: [pathParam("cacheKey"), pathParam("filename"), queryParam("playbackToken")]
+        })
+      },
       "/api/openmovie/auth": {
-        get: operation("OpenMovie", "Create OpenMovie capability URLs", "This is the only OpenMovie endpoint that accepts an API key. It returns opaque, deployment-specific capability URLs for movies, TV, and On Deck. The API key is not embedded in those URLs.", true, {
+        get: operation("OpenMovie", "Create OpenMovie capability URLs", "This is the only OpenMovie endpoint that accepts an API key. It returns opaque, deployment-specific capability URLs for movies, TV, On Deck, and future URL generation. The future URL capability has its starting positions encrypted into it and accepts only an optional count query parameter, which defaults to 1000. The API key is not embedded in those URLs.", true, {
           security: openMovieSecurity(),
           responses: {
             200: {
@@ -786,30 +901,18 @@ function openApiSpec() {
           }
         })
       },
-      "/api/openmovie/auth/future-urls": {
-        get: operation("OpenMovie", "Generate future OpenMovie capability URLs", "Uses the current next movie, episode, and playback-variant IDs to generate ordered capability URL batches without reserving IDs or writing registry data. It also returns On Deck page and dynamic atlas capabilities for pages 1 through count. This bootstrap endpoint accepts an API key; the generated capability URLs do not.", true, {
-          security: openMovieSecurity(),
-          parameters: [{
-            name: "count",
-            in: "query",
-            required: true,
-            schema: { type: "integer", minimum: 1, maximum: 5000 },
-            description: "Number of future URLs to generate for each independent ID sequence and On Deck page sequence."
-          }],
-          responses: {
-            200: {
-              description: "Future movie, episode, playback-variant, and On Deck page capability URL sequences",
-              content: { "application/json": { schema: { $ref: "#/components/schemas/OpenMovieFutureUrls" } } }
-            },
-            400: errorResponse(),
-            401: errorResponse(),
-            404: errorResponse()
-          }
-        })
-      },
       "/api/openmovie/access/{token}": {
-        get: operation("OpenMovie", "Use an OpenMovie capability", "Executes the single operation encoded by an AES-256-GCM capability. Responses contain further opaque URLs for pagination, artwork, poster atlases, playback variants, and HLS playback. API keys are rejected on this endpoint; current account and library permissions are checked on every request.", false, {
-          parameters: [pathParam("token")],
+        get: operation("OpenMovie", "Use an OpenMovie capability", "Executes the single operation encoded by an AES-256-GCM capability. Responses contain further opaque URLs for pagination, future URL batches, artwork, poster atlases, playback variants, and HLS playback. API keys are rejected on this endpoint; current account and library permissions are checked on every request.", false, {
+          parameters: [
+            pathParam("token"),
+            {
+              name: "count",
+              in: "query",
+              required: false,
+              schema: { type: "integer", minimum: 1, maximum: 5000, default: 1000 },
+              description: "Used only by a future-URL capability. The encrypted token determines all starting positions."
+            }
+          ],
           responses: {
             200: {
               description: "Capability-specific JSON, artwork, atlas image, or HLS redirect"

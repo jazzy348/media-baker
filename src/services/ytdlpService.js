@@ -10,19 +10,22 @@ const {
   isYoutubeUrl,
   sanitiseYoutubeCookies
 } = require("../utils/ytdlpCookies");
+const { ytdlpRuntimeArgs } = require("../utils/ytdlpRuntime");
 
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const VALIDATION_TTL_MS = 60 * 1000;
 const INDEX_REFRESH_DELAY_MS = 750;
 const LIBRARY_KEY = "yt-dlp";
+const MIN_SUBSCRIPTION_INTERVAL_SECONDS = 60 * 60;
 const MAX_DIAGNOSTIC_LINES = 30;
 const MAX_DIAGNOSTIC_LENGTH = 1600;
 
 class YtDlpService {
-  constructor(config, ffmpeg) {
+  constructor(config, ffmpeg, appSettings = null) {
     this.rootConfig = config;
     this.config = config.ytdlp;
     this.ffmpeg = ffmpeg;
+    this.appSettings = appSettings;
     this.downloads = new Map();
     this.validation = null;
     this.validationAt = 0;
@@ -31,6 +34,8 @@ class YtDlpService {
     this.lastUpdateError = null;
     this.lastUpdateMessage = null;
     this.updatePromise = null;
+    this.subscriptionTimer = null;
+    this.subscriptionCheckPromise = null;
     this.onDownloadComplete = null;
     this.indexRefreshTimer = null;
     this.indexRefreshPromise = Promise.resolve();
@@ -49,7 +54,10 @@ class YtDlpService {
     }
 
     this.ensureReady()
-      .then(() => this.updateIfNeeded())
+      .then(async () => {
+        await this.updateIfNeeded();
+        this.scheduleSubscriptionChecks();
+      })
       .catch((err) => {
         logger.info(`[yt-dlp] startup check failed message="${err.message}"`);
       });
@@ -72,6 +80,10 @@ class YtDlpService {
     if (this.indexRefreshTimer) {
       clearTimeout(this.indexRefreshTimer);
       this.indexRefreshTimer = null;
+    }
+    if (this.subscriptionTimer) {
+      clearTimeout(this.subscriptionTimer);
+      this.subscriptionTimer = null;
     }
   }
 
@@ -188,8 +200,272 @@ class YtDlpService {
       lastUpdateError: this.lastUpdateError,
       lastUpdateMessage: this.lastUpdateMessage,
       updating: Boolean(this.updatePromise),
+      checkingSubscriptions: Boolean(this.subscriptionCheckPromise),
+      subscriptionCheckIntervalSeconds: this.subscriptionIntervalSeconds(),
+      subscriptions: this.subscriptions().map(publicSubscription),
       downloads: [...this.downloads.values()].map(publicDownload)
     };
+  }
+
+  subscriptions() {
+    return Array.isArray(this.config.subscriptions) ? this.config.subscriptions : [];
+  }
+
+  subscriptionIntervalSeconds() {
+    return Math.max(
+      MIN_SUBSCRIPTION_INTERVAL_SECONDS,
+      Number(this.config.subscriptionCheckIntervalSeconds) || 24 * 60 * 60
+    );
+  }
+
+  async addSubscription(url, userId = "system") {
+    const subscription = await this.createSubscription(url);
+    this.startSubscriptionDownload(subscription, userId);
+    return publicSubscription(subscription);
+  }
+
+  startSubscriptionDownload(subscription, userId) {
+    const active = [...this.downloads.values()].find((download) =>
+      download.subscriptionId === subscription.id && !["complete", "failed"].includes(download.status)
+    );
+    if (active) return active;
+
+    const record = createDownloadRecord(subscription.url, userId, {
+      title: subscription.title,
+      playlistTitle: subscription.title,
+      isPlaylist: true,
+      subscriptionId: subscription.id,
+      message: `Downloading existing videos from ${subscription.title}...`
+    });
+    this.downloads.set(record.id, record);
+    this.downloadSubscription(record, subscription).catch(() => {});
+    return record;
+  }
+
+  async createSubscription(url, options = {}) {
+    await this.ensureReady();
+    const inputUrl = validInputUrl(url);
+    if (!isYoutubeUrl(inputUrl)) {
+      throw httpError(400, "Only YouTube channel subscriptions are supported.");
+    }
+
+    const authenticationArgs = await cookieArgsForUrl(this.rootConfig, inputUrl);
+    const channel = await inspectYoutubeChannel(this.config.binaryPath, inputUrl, authenticationArgs);
+    const existing = this.subscriptions().find((entry) => entry.channelId === channel.channelId);
+    if (existing && options.reuseExisting) {
+      const archivePath = this.subscriptionArchivePath(existing);
+      await fs.mkdir(path.dirname(archivePath), { recursive: true });
+      await fs.appendFile(archivePath, "", "utf8");
+      existing.backfillComplete = false;
+      existing.lastAttemptAt = new Date().toISOString();
+      existing.lastError = null;
+      await this.persistSubscriptions(this.subscriptions());
+      logger.info(`[yt-dlp] channel backfill requested id=${existing.id} channel="${logValue(existing.title)}"`);
+      return existing;
+    }
+    if (existing) {
+      throw httpError(409, `"${channel.title}" is already subscribed.`);
+    }
+
+    const id = crypto.randomBytes(8).toString("hex");
+    const folderName = uniqueSubscriptionFolderName(channel.title, channel.channelId, this.subscriptions());
+    const subscription = {
+      id,
+      url: channel.url,
+      channelId: channel.channelId,
+      title: channel.title,
+      folderName,
+      createdAt: new Date().toISOString(),
+      lastAttemptAt: new Date().toISOString(),
+      lastCheckedAt: null,
+      lastDownloadedAt: null,
+      lastError: null,
+      backfillComplete: false
+    };
+
+    await fs.mkdir(path.join(this.config.downloadPath, folderName), { recursive: true });
+    const archivePath = this.subscriptionArchivePath(subscription);
+    await fs.mkdir(path.dirname(archivePath), { recursive: true });
+    await fs.writeFile(archivePath, "", { flag: "wx" });
+    await this.persistSubscriptions([...this.subscriptions(), subscription]);
+    logger.info(`[yt-dlp] channel subscribed id=${id} channel="${logValue(channel.title)}"`);
+    this.scheduleSubscriptionChecks();
+    return subscription;
+  }
+
+  async removeSubscription(id) {
+    const subscription = this.subscriptions().find((entry) => entry.id === String(id));
+    if (!subscription) {
+      throw httpError(404, "YT-DLP channel subscription not found.");
+    }
+
+    for (const record of this.downloads.values()) {
+      if (record.subscriptionId === subscription.id && !["complete", "failed"].includes(record.status)) {
+        record.cancelled = true;
+        record.child?.kill();
+      }
+    }
+    await this.persistSubscriptions(this.subscriptions().filter((entry) => entry.id !== subscription.id));
+    await fs.rm(this.subscriptionArchivePath(subscription), { force: true }).catch(() => {});
+    logger.info(`[yt-dlp] channel subscription removed id=${subscription.id} channel="${logValue(subscription.title)}"`);
+    this.scheduleSubscriptionChecks();
+    return publicSubscription(subscription);
+  }
+
+  async persistSubscriptions(subscriptions) {
+    if (!this.appSettings) {
+      throw new Error("YT-DLP subscriptions require the app settings service.");
+    }
+    await this.appSettings.save({ ytdlp: { subscriptions } });
+  }
+
+  subscriptionArchivePath(subscription) {
+    const cacheRoot = path.dirname(this.rootConfig.hls.cachePath);
+    return path.join(cacheRoot, "yt-dlp-subscriptions", `${subscription.id}.txt`);
+  }
+
+  async seedSubscriptionArchive(subscription, authenticationArgs) {
+    const archivePath = this.subscriptionArchivePath(subscription);
+    await fs.mkdir(path.dirname(archivePath), { recursive: true });
+    logger.info(`[yt-dlp] establishing channel baseline id=${subscription.id} channel="${logValue(subscription.title)}"`);
+    await execOutput(this.config.binaryPath, [
+      "--simulate",
+      "--force-write-archive",
+      "--download-archive", archivePath,
+      "--playlist-end", "1",
+      "--yes-playlist",
+      "--no-warnings",
+      ...authenticationArgs,
+      subscription.url
+    ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
+    await fs.appendFile(archivePath, "", "utf8");
+  }
+
+  scheduleSubscriptionChecks() {
+    if (this.subscriptionTimer) {
+      clearTimeout(this.subscriptionTimer);
+      this.subscriptionTimer = null;
+    }
+    if (!this.config.enabled || this.subscriptions().length === 0 || this.subscriptionCheckPromise) {
+      return;
+    }
+
+    const intervalMs = this.subscriptionIntervalSeconds() * 1000;
+    const nextDueAt = Math.min(...this.subscriptions().map((subscription) => {
+      const previous = Date.parse(subscription.lastAttemptAt || subscription.createdAt || 0);
+      return (Number.isFinite(previous) ? previous : 0) + intervalMs;
+    }));
+    const delayMs = Math.max(1000, Math.min(0x7fffffff, nextDueAt - Date.now()));
+    this.subscriptionTimer = setTimeout(() => {
+      this.subscriptionTimer = null;
+      this.runDueSubscriptionChecks().catch((err) => {
+        logger.error(`[yt-dlp] channel subscription check failed message="${err.message}"`, err);
+      });
+    }, delayMs);
+    this.subscriptionTimer.unref?.();
+  }
+
+  runDueSubscriptionChecks() {
+    if (this.subscriptionCheckPromise) return this.subscriptionCheckPromise;
+    this.subscriptionCheckPromise = this.performDueSubscriptionChecks().finally(() => {
+      this.subscriptionCheckPromise = null;
+      this.scheduleSubscriptionChecks();
+    });
+    return this.subscriptionCheckPromise;
+  }
+
+  async performDueSubscriptionChecks() {
+    await this.ensureReady();
+    const intervalMs = this.subscriptionIntervalSeconds() * 1000;
+    const due = this.subscriptions().filter((subscription) => {
+      const previous = Date.parse(subscription.lastAttemptAt || subscription.createdAt || 0);
+      return !Number.isFinite(previous) || Date.now() - previous >= intervalMs;
+    });
+    for (const subscription of due) {
+      if (!this.subscriptions().some((entry) => entry.id === subscription.id)) continue;
+      await this.checkSubscription(subscription);
+    }
+  }
+
+  async checkSubscription(subscription) {
+    const current = this.subscriptions().find((entry) => entry.id === subscription.id);
+    if (!current) return;
+    const active = [...this.downloads.values()].some((download) =>
+      download.subscriptionId === current.id && !["complete", "failed"].includes(download.status)
+    );
+    const now = new Date().toISOString();
+    current.lastAttemptAt = now;
+    await this.persistSubscriptions(this.subscriptions());
+    if (active) {
+      logger.info(`[yt-dlp] channel check skipped id=${current.id} reason=download-active`);
+      return;
+    }
+
+    const record = createDownloadRecord(current.url, "system", {
+      title: current.title,
+      playlistTitle: current.title,
+      isPlaylist: true,
+      subscriptionId: current.id,
+      message: `Checking ${current.title} for new videos...`
+    });
+    this.downloads.set(record.id, record);
+    logger.info(`[yt-dlp] checking channel id=${current.id} channel="${logValue(current.title)}"`);
+    try {
+      if (!await fileExists(this.subscriptionArchivePath(current))) {
+        if (current.backfillComplete === false) {
+          const archivePath = this.subscriptionArchivePath(current);
+          await fs.mkdir(path.dirname(archivePath), { recursive: true });
+          await fs.writeFile(archivePath, "");
+        } else {
+          const authenticationArgs = await cookieArgsForUrl(this.rootConfig, current.url);
+          await this.seedSubscriptionArchive(current, authenticationArgs);
+        }
+        const latest = this.subscriptions().find((entry) => entry.id === current.id);
+        if (!latest) return;
+        if (latest.backfillComplete !== false) {
+          latest.lastCheckedAt = new Date().toISOString();
+          latest.lastError = null;
+          await this.persistSubscriptions(this.subscriptions());
+          record.completeMessage = "Channel baseline restored. No historical videos were downloaded.";
+          finishDownload(record, "complete", null);
+          logger.info(`[yt-dlp] channel baseline restored id=${current.id}; historical videos skipped`);
+          return;
+        }
+      }
+      await this.downloadSubscription(record, current);
+    } catch (err) {
+      // downloadSubscription records the failure for the subscription and download.
+    }
+  }
+
+  async downloadSubscription(record, subscription) {
+    try {
+      await this.prepareDownload(record, subscription.url, {
+        subscription,
+        stopAtExisting: subscription.backfillComplete !== false
+      });
+      const latest = this.subscriptions().find((entry) => entry.id === subscription.id);
+      if (!latest) return;
+      latest.lastCheckedAt = new Date().toISOString();
+      latest.lastError = null;
+      latest.backfillComplete = true;
+      if (record.outputPaths.length > 0) {
+        latest.lastDownloadedAt = latest.lastCheckedAt;
+      }
+      await this.persistSubscriptions(this.subscriptions());
+      logger.info(`[yt-dlp] channel check complete id=${subscription.id} downloaded=${record.outputPaths.length}`);
+    } catch (err) {
+      if (record.status !== "failed") {
+        finishDownload(record, "failed", err.message);
+      }
+      const latest = this.subscriptions().find((entry) => entry.id === subscription.id);
+      if (latest) {
+        latest.lastError = err.message;
+        await this.persistSubscriptions(this.subscriptions());
+      }
+      logger.error(`[yt-dlp] channel check failed id=${subscription.id} message="${logValue(err.message)}"`);
+      throw err;
+    }
   }
 
   async cookieStatus() {
@@ -237,6 +513,22 @@ class YtDlpService {
   async inspect(url) {
     await this.ensureReady();
     const inputUrl = validInputUrl(url);
+    if (isYoutubeChannelUrl(inputUrl)) {
+      const channel = await inspectYoutubeChannel(
+        this.config.binaryPath,
+        inputUrl,
+        await cookieArgsForUrl(this.rootConfig, inputUrl)
+      );
+      return {
+        url: channel.url,
+        title: channel.title,
+        isLive: false,
+        liveStatus: "not_live",
+        extractor: "youtube:channel",
+        isChannel: true,
+        channelId: channel.channelId
+      };
+    }
     const inspection = await inspectMedia(
       this.config.binaryPath,
       inputUrl,
@@ -247,7 +539,8 @@ class YtDlpService {
       title: inspection.title,
       isLive: inspection.isLive,
       liveStatus: inspection.liveStatus,
-      extractor: inspection.extractor
+      extractor: inspection.extractor,
+      isChannel: false
     };
   }
 
@@ -255,56 +548,82 @@ class YtDlpService {
     await this.ensureReady();
     const inputUrl = validInputUrl(url);
 
-    const id = crypto.randomBytes(8).toString("hex");
-    const record = {
-      id,
-      url: inputUrl,
-      userId,
-      status: "starting",
-      percent: 0,
-      speed: null,
-      eta: null,
-      filename: null,
-      outputPath: null,
-      outputPaths: [],
-      fileCount: 0,
-      title: null,
-      playlistTitle: null,
-      isPlaylist: false,
+    if (!options.live && isYoutubeChannelUrl(inputUrl)) {
+      if (options.subscribeChannel) {
+        const subscription = await this.createSubscription(inputUrl, {
+          reuseExisting: true
+        });
+        return publicDownload(this.startSubscriptionDownload(subscription, userId));
+      }
+      return this.startOneTimeChannelDownload(inputUrl, userId);
+    }
+
+    const record = createDownloadRecord(inputUrl, userId, {
       isLive: Boolean(options.live),
-      liveStatus: options.live ? "is_live" : "not_live",
-      items: [],
-      activeItemId: null,
-      message: "Reading media information...",
-      error: null,
-      diagnostics: [],
-      startedAt: new Date().toISOString(),
-      finishedAt: null
-    };
-    this.downloads.set(id, record);
+      liveStatus: options.live ? "is_live" : "not_live"
+    });
+    this.downloads.set(record.id, record);
 
     this.prepareDownload(record, inputUrl).catch((err) => {
-      finishDownload(record, "failed", err.message);
-      logger.error(`[yt-dlp] download setup failed id=${id} message="${err.message}"`, err);
+      if (record.status !== "failed") finishDownload(record, "failed", err.message);
+      logger.error(`[yt-dlp] download setup failed id=${record.id} message="${err.message}"`, err);
     });
 
     return publicDownload(record);
   }
 
-  async prepareDownload(record, inputUrl) {
-    const allowPlaylist = this.config.allowPlaylists || isExplicitPlaylistUrl(inputUrl);
+  async startOneTimeChannelDownload(inputUrl, userId) {
+    const authenticationArgs = await cookieArgsForUrl(this.rootConfig, inputUrl);
+    const channel = await inspectYoutubeChannel(this.config.binaryPath, inputUrl, authenticationArgs);
+    const existing = this.subscriptions().find((subscription) => subscription.channelId === channel.channelId);
+    const folderName = existing && existing.folderName || safeFolderName(channel.title) || safeFolderName(channel.channelId) || "YouTube Channel";
+    const record = createDownloadRecord(channel.url, userId, {
+      title: channel.title,
+      playlistTitle: channel.title,
+      isPlaylist: true,
+      message: `Downloading all videos from ${channel.title}...`
+    });
+    this.downloads.set(record.id, record);
+    this.prepareDownload(record, channel.url, { channelFolderName: folderName }).catch((err) => {
+      if (record.status !== "failed") finishDownload(record, "failed", err.message);
+      logger.error(`[yt-dlp] channel download setup failed id=${record.id} message="${err.message}"`, err);
+    });
+    return publicDownload(record);
+  }
+
+  async prepareDownload(record, inputUrl, options = {}) {
+    const subscription = options.subscription || null;
+    const channelFolderName = String(options.channelFolderName || "").trim();
+    const allowPlaylist = Boolean(subscription || channelFolderName) || this.config.allowPlaylists || isExplicitPlaylistUrl(inputUrl);
     const authenticationArgs = await cookieArgsForUrl(this.rootConfig, inputUrl);
     logger.full(`[yt-dlp] authentication id=${record.id} provider=${isYoutubeUrl(inputUrl) ? "youtube" : "other"} cookies=${authenticationArgs.length > 0}`);
-    let inspection = null;
-    try {
-      inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist, authenticationArgs);
-      applyInspection(record, inspection);
-    } catch (err) {
-      logger.info(`[yt-dlp] playlist inspection failed id=${record.id} message="${err.message}"; continuing`);
-      record.isPlaylist = isExplicitPlaylistUrl(inputUrl);
+    if (!subscription && !channelFolderName) {
+      try {
+        const inspection = await inspectDownload(this.config.binaryPath, inputUrl, allowPlaylist, authenticationArgs);
+        applyInspection(record, inspection);
+      } catch (err) {
+        logger.info(`[yt-dlp] playlist inspection failed id=${record.id} message="${err.message}"; continuing`);
+        record.isPlaylist = isExplicitPlaylistUrl(inputUrl);
+      }
     }
 
-    const args = downloadArgs(this.config.downloadPath, inputUrl, allowPlaylist, record.isPlaylist, record.isLive, authenticationArgs);
+    const args = downloadArgs(
+      this.config.downloadPath,
+      inputUrl,
+      allowPlaylist,
+      record.isPlaylist,
+      record.isLive,
+      authenticationArgs,
+      subscription
+        ? {
+            archivePath: this.subscriptionArchivePath(subscription),
+            folderName: subscription.folderName,
+            stopAtExisting: options.stopAtExisting !== false
+          }
+        : channelFolderName
+          ? { folderName: channelFolderName }
+          : null
+    );
     logger.info(`[yt-dlp] download starting id=${record.id} playlist=${record.isPlaylist} live=${record.isLive} items=${record.items.length} url="${inputUrl}" output="${this.config.downloadPath}"`);
     logger.full(`[yt-dlp] command ${this.config.binaryPath} ${args.map(quoteArg).join(" ")}`);
 
@@ -315,37 +634,55 @@ class YtDlpService {
     record.status = "downloading";
     record.message = record.isPlaylist ? "Starting playlist download..." : "Starting download...";
     record.processId = child.pid || null;
+    record.child = child;
 
-    const stdout = createLineBuffer((lines) => this.handleProgress(record, lines));
-    const stderr = createLineBuffer((lines) => {
-      this.handleProgress(record, lines);
-      rememberDownloadDiagnostics(record, lines);
-    });
-    child.stdout.on("data", stdout.push);
-    child.stderr.on("data", stderr.push);
-    child.on("error", (err) => {
-      finishDownload(record, "failed", err.message);
-      logger.error(`[yt-dlp] download spawn failed id=${record.id} message="${err.message}"`, err);
-    });
-    child.on("close", (code) => {
-      stdout.flush();
-      stderr.flush();
-      if (record.status === "failed") return;
-      if (code === 0) {
-        this.finishSuccessfulDownload(record)
-          .then(() => {
-            finishDownload(record, "complete", null);
-            logger.info(`[yt-dlp] post-download index complete id=${record.id}`);
-          })
-          .catch((err) => {
-            finishDownload(record, "failed", `Download completed, but indexing failed: ${err.message}`);
-            logger.error(`[yt-dlp] post-download reindex failed id=${record.id} message="${err.message}"`, err);
-          });
-        return;
-      }
-      const error = ytdlpFailureMessage(record, code);
-      finishDownload(record, "failed", error);
-      logger.error(`[yt-dlp] download failed id=${record.id} code=${code} message="${logValue(error)}"`);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const stdout = createLineBuffer((lines) => this.handleProgress(record, lines));
+      const stderr = createLineBuffer((lines) => {
+        this.handleProgress(record, lines);
+        rememberDownloadDiagnostics(record, lines);
+      });
+      child.stdout.on("data", stdout.push);
+      child.stderr.on("data", stderr.push);
+      child.on("error", (err) => {
+        if (settled) return;
+        settled = true;
+        finishDownload(record, "failed", err.message);
+        logger.error(`[yt-dlp] download spawn failed id=${record.id} message="${err.message}"`, err);
+        reject(err);
+      });
+      child.on("close", async (code) => {
+        if (settled) return;
+        settled = true;
+        record.child = null;
+        stdout.flush();
+        stderr.flush();
+        if (record.cancelled) {
+          const error = new Error("YT-DLP channel subscription was removed.");
+          finishDownload(record, "failed", error.message);
+          reject(error);
+          return;
+        }
+        if (code !== 0) {
+          const error = new Error(ytdlpFailureMessage(record, code));
+          finishDownload(record, "failed", error.message);
+          logger.error(`[yt-dlp] download failed id=${record.id} code=${code} message="${logValue(error.message)}"`);
+          reject(error);
+          return;
+        }
+        try {
+          await this.finishSuccessfulDownload(record);
+          finishDownload(record, "complete", null);
+          logger.info(`[yt-dlp] post-download index complete id=${record.id}`);
+          resolve(record);
+        } catch (err) {
+          const message = `Download completed, but indexing failed: ${err.message}`;
+          finishDownload(record, "failed", message);
+          logger.error(`[yt-dlp] post-download reindex failed id=${record.id} message="${err.message}"`, err);
+          reject(new Error(message));
+        }
+      });
     });
   }
 
@@ -364,6 +701,10 @@ class YtDlpService {
       record.filename = record.outputPath ? path.basename(record.outputPath) : record.filename;
     }
 
+    if (record.outputPaths.length === 0) {
+      record.completeMessage = "No new videos found.";
+      return;
+    }
     markDownloadIndexing(record);
     logger.info(`[yt-dlp] download complete id=${record.id}; indexing library`);
     await this.flushIndexRefresh(record);
@@ -509,11 +850,41 @@ function ytDlpLibrary(settings) {
 const ITEM_MARKER = "__MEDIA_BAKER_ITEM__";
 const FILE_MARKER = "__MEDIA_BAKER_FILE__";
 
+function createDownloadRecord(url, userId, overrides = {}) {
+  return {
+    id: crypto.randomBytes(8).toString("hex"),
+    url,
+    userId,
+    status: "starting",
+    percent: 0,
+    speed: null,
+    eta: null,
+    filename: null,
+    outputPath: null,
+    outputPaths: [],
+    fileCount: 0,
+    title: null,
+    playlistTitle: null,
+    isPlaylist: false,
+    isLive: false,
+    liveStatus: "not_live",
+    items: [],
+    activeItemId: null,
+    message: "Reading media information...",
+    error: null,
+    diagnostics: [],
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    ...overrides
+  };
+}
+
 async function inspectDownload(binaryPath, url, allowPlaylist, authenticationArgs) {
   const stdout = await execOutput(binaryPath, [
     "--flat-playlist",
     "--dump-single-json",
     "--no-warnings",
+    ...ytdlpRuntimeArgs(),
     allowPlaylist ? "--yes-playlist" : "--no-playlist",
     ...authenticationArgs,
     url
@@ -549,6 +920,7 @@ async function inspectMedia(binaryPath, url, authenticationArgs) {
     "--dump-single-json",
     "--skip-download",
     "--no-warnings",
+    ...ytdlpRuntimeArgs(),
     "--no-playlist",
     ...authenticationArgs,
     url
@@ -559,6 +931,32 @@ async function inspectMedia(binaryPath, url, authenticationArgs) {
     isLive: Boolean(data.is_live) || data.live_status === "is_live",
     liveStatus: data.live_status || (data.is_live ? "is_live" : "not_live"),
     extractor: data.extractor_key || data.extractor || null
+  };
+}
+
+async function inspectYoutubeChannel(binaryPath, url, authenticationArgs) {
+  const stdout = await execOutput(binaryPath, [
+    "--flat-playlist",
+    "--playlist-end", "1",
+    "--dump-single-json",
+    "--no-warnings",
+    ...ytdlpRuntimeArgs(),
+    "--yes-playlist",
+    ...authenticationArgs,
+    url
+  ], { timeout: 120000, maxBuffer: 20 * 1024 * 1024 });
+  const data = JSON.parse(stdout);
+  const extractor = String(data.extractor_key || data.extractor || "").toLowerCase();
+  const channelId = String(data.channel_id || data.uploader_id || "").trim();
+  const title = String(data.channel || data.uploader || data.playlist_title || data.title || "").trim();
+  const channelUrl = String(data.channel_url || data.uploader_url || data.webpage_url || url).trim();
+  if (!extractor.includes("youtube") || !channelId || !title) {
+    throw httpError(400, "The URL did not resolve to a YouTube channel.");
+  }
+  return {
+    channelId,
+    title,
+    url: youtubeVideosUrl(channelUrl)
   };
 }
 
@@ -574,13 +972,16 @@ function applyInspection(record, inspection) {
     : "Media information loaded.";
 }
 
-function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive, authenticationArgs) {
-  const outputTemplate = isPlaylist
-    ? "%(playlist).150B/%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
-    : "%(title).200B [%(id)s].%(ext)s";
+function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive, authenticationArgs, channelDownload = null) {
+  const outputTemplate = channelDownload
+    ? `${channelDownload.folderName}/%(upload_date>%Y-%m-%d)s - %(title).180B [%(id)s].%(ext)s`
+    : isPlaylist
+      ? "%(playlist).150B/%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
+      : "%(title).200B [%(id)s].%(ext)s";
   const args = [
     "--newline",
     "--progress",
+    ...ytdlpRuntimeArgs(),
     allowPlaylist ? "--yes-playlist" : "--no-playlist",
     "--print",
     `before_dl:${ITEM_MARKER}%(id)s\t%(playlist_index|0)s\t%(title)s`,
@@ -593,6 +994,12 @@ function downloadArgs(downloadPath, url, allowPlaylist, isPlaylist, isLive, auth
     "-o",
     outputTemplate
   ];
+  if (channelDownload && channelDownload.archivePath) {
+    args.push("--download-archive", channelDownload.archivePath);
+    if (channelDownload.stopAtExisting) {
+      args.push("--break-on-existing", "--break-per-input");
+    }
+  }
   if (isLive) {
     args.push(
       "--hls-use-mpegts",
@@ -756,6 +1163,27 @@ function isExplicitPlaylistUrl(value) {
   }
 }
 
+function isYoutubeChannelUrl(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (host !== "youtube.com" && host !== "music.youtube.com" && !host.endsWith(".youtube.com")) {
+      return false;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length === 0) return false;
+    const first = parts[0].toLowerCase();
+    const channelTabs = new Set(["videos", "featured", "shorts", "streams", "playlists"]);
+    if (first.startsWith("@") && first.length > 1) {
+      return parts.length === 1 || parts.length === 2 && channelTabs.has(parts[1].toLowerCase());
+    }
+    if (!["channel", "c", "user"].includes(first) || parts.length < 2) return false;
+    return parts.length === 2 || parts.length === 3 && channelTabs.has(parts[2].toLowerCase());
+  } catch (err) {
+    return false;
+  }
+}
+
 function validInputUrl(value) {
   const supplied = String(value || "").trim();
   const markdownLink = supplied.match(/^\[[^\]]*\]\((https?:\/\/[^\s)]+)\)$/i);
@@ -770,6 +1198,41 @@ function validInputUrl(value) {
     throw httpError(400, "A valid http(s) URL is required.");
   }
   return parsed.toString();
+}
+
+function youtubeVideosUrl(value) {
+  const parsed = new URL(value);
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.pathname = parsed.pathname.replace(/\/(?:videos|featured|shorts|streams|playlists)\/?$/i, "").replace(/\/$/, "");
+  parsed.pathname = `${parsed.pathname}/videos`;
+  return parsed.toString();
+}
+
+function uniqueSubscriptionFolderName(title, channelId, subscriptions) {
+  const base = safeFolderName(title) || safeFolderName(channelId) || "YouTube Channel";
+  const used = new Set(subscriptions.map((subscription) => String(subscription.folderName || "").toLowerCase()));
+  if (!used.has(base.toLowerCase())) return base;
+  const suffix = safeFolderName(channelId).slice(-12) || crypto.randomBytes(4).toString("hex");
+  return `${base} [${suffix}]`.slice(0, 150);
+}
+
+function safeFolderName(value) {
+  return String(value || "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim()
+    .slice(0, 120);
+}
+
+async function fileExists(filePath) {
+  try {
+    return (await fs.stat(filePath)).isFile();
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
+  }
 }
 
 function rememberDownloadDiagnostics(record, output) {
@@ -838,7 +1301,7 @@ function finishDownload(record, status, error) {
   record.finishedAt = new Date().toISOString();
   record.percent = status === "complete" ? 100 : record.percent;
   record.error = error;
-  record.message = error || (status === "complete" ? "Download complete." : record.message);
+  record.message = error || (status === "complete" ? record.completeMessage || "Download complete." : record.message);
   if (status === "complete") {
     record.items.forEach((item) => {
       if (item.status === "queued") {
@@ -866,8 +1329,31 @@ function markDownloadIndexing(record) {
 }
 
 function publicDownload(record) {
-  const { processId, diagnostics, ...publicRecord } = record;
+  const {
+    processId,
+    diagnostics,
+    child,
+    cancelled,
+    completeMessage,
+    ...publicRecord
+  } = record;
   return publicRecord;
+}
+
+function publicSubscription(subscription) {
+  return {
+    id: subscription.id,
+    url: subscription.url,
+    channelId: subscription.channelId,
+    title: subscription.title,
+    folderName: subscription.folderName,
+    createdAt: subscription.createdAt,
+    lastAttemptAt: subscription.lastAttemptAt,
+    lastCheckedAt: subscription.lastCheckedAt,
+    lastDownloadedAt: subscription.lastDownloadedAt,
+    lastError: subscription.lastError,
+    backfillComplete: subscription.backfillComplete !== false
+  };
 }
 
 async function installedByApt(binaryPath) {

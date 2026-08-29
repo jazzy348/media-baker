@@ -52,6 +52,27 @@ class PlaybackTokenService {
     });
   }
 
+  createWatchStreamToken(roomId, participantId, mediaType, mediaId) {
+    return this.sign({
+      scope: "watch-stream",
+      roomId,
+      participantId,
+      mediaType,
+      mediaId
+    });
+  }
+
+  createWatchHlsToken(cacheKey, roomId, participantId, mediaType, mediaId) {
+    return this.sign({
+      scope: "watch-hls",
+      cacheKey,
+      roomId,
+      participantId,
+      mediaType,
+      mediaId
+    });
+  }
+
   createRelayToken(relayId, userId = null) {
     return this.sign({
       scope: "relay-hls",

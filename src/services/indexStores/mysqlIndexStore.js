@@ -176,8 +176,11 @@ class MysqlIndexStore {
   async getTrack(collection, id) {
     await this.init();
     const [rows] = await this.pool.execute(
-      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number,
-              track_number, title, filename, file_path, added_at_ms, mtime_ms
+      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number, disc_total,
+              track_number, track_total, title, filename, file_path, added_at_ms, mtime_ms, size_bytes,
+              artists_json, album_artist, compilation, musicbrainz_artist_ids_json, musicbrainz_album_artist_id,
+              musicbrainz_release_id, musicbrainz_release_group_id, musicbrainz_recording_id, musicbrainz_track_id,
+              has_embedded_artwork, local_artwork_path, music_tags_read
        FROM media_tracks WHERE collection = ? AND id = ? LIMIT 1`,
       [collection, id]
     );
@@ -223,26 +226,29 @@ class MysqlIndexStore {
 
   async getArtist(collection, id) {
     await this.init();
-    const [rows] = await this.pool.execute("SELECT id, name, path FROM media_artists WHERE collection = ? AND id = ? LIMIT 1", [collection, id]);
+    const [rows] = await this.pool.execute("SELECT id, name, path, musicbrainz_artist_id FROM media_artists WHERE collection = ? AND id = ? LIMIT 1", [collection, id]);
     if (!rows[0]) {
       return null;
     }
     const music = await this.loadMusicCollectionForArtist(collection, id);
-    return { id: rows[0].id, name: rows[0].name, path: rows[0].path, albums: music };
+    return { id: rows[0].id, name: rows[0].name, path: rows[0].path, musicBrainzArtistId: rows[0].musicbrainz_artist_id || null, albums: music };
   }
 
   async getAlbum(collection, artistId, albumId) {
     await this.init();
     const [albumRows] = await this.pool.execute(
-      "SELECT id, artist_id, name, release_year, path FROM media_albums WHERE collection = ? AND artist_id = ? AND id = ? LIMIT 1",
+      "SELECT id, artist_id, name, release_year, path, local_artwork_path, has_embedded_artwork, musicbrainz_release_id, musicbrainz_release_group_id FROM media_albums WHERE collection = ? AND artist_id = ? AND id = ? LIMIT 1",
       [collection, artistId, albumId]
     );
     if (!albumRows[0]) {
       return null;
     }
     const [trackRows] = await this.pool.execute(
-      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number,
-              track_number, title, filename, file_path, added_at_ms, mtime_ms
+      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number, disc_total,
+              track_number, track_total, title, filename, file_path, added_at_ms, mtime_ms, size_bytes,
+              artists_json, album_artist, compilation, musicbrainz_artist_ids_json, musicbrainz_album_artist_id,
+              musicbrainz_release_id, musicbrainz_release_group_id, musicbrainz_recording_id, musicbrainz_track_id,
+              has_embedded_artwork, local_artwork_path, music_tags_read
        FROM media_tracks WHERE collection = ? AND artist_id = ? AND album_id = ?
        ORDER BY disc_number, track_number, filename`,
       [collection, artistId, albumId]
@@ -252,12 +258,15 @@ class MysqlIndexStore {
 
   async loadMusicCollectionForArtist(collection, artistId) {
     const [albumRows] = await this.pool.execute(
-      "SELECT id, artist_id, name, release_year, path FROM media_albums WHERE collection = ? AND artist_id = ? ORDER BY release_year, name",
+      "SELECT id, artist_id, name, release_year, path, local_artwork_path, has_embedded_artwork, musicbrainz_release_id, musicbrainz_release_group_id FROM media_albums WHERE collection = ? AND artist_id = ? ORDER BY release_year, name",
       [collection, artistId]
     );
     const [trackRows] = await this.pool.execute(
-      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number,
-              track_number, title, filename, file_path, added_at_ms, mtime_ms
+      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number, disc_total,
+              track_number, track_total, title, filename, file_path, added_at_ms, mtime_ms, size_bytes,
+              artists_json, album_artist, compilation, musicbrainz_artist_ids_json, musicbrainz_album_artist_id,
+              musicbrainz_release_id, musicbrainz_release_group_id, musicbrainz_recording_id, musicbrainz_track_id,
+              has_embedded_artwork, local_artwork_path, music_tags_read
        FROM media_tracks WHERE collection = ? AND artist_id = ? ORDER BY disc_number, track_number, filename`,
       [collection, artistId]
     );
@@ -278,12 +287,19 @@ class MysqlIndexStore {
   async loadFileIdentities(collection, type) {
     await this.init();
     const table = type === "music" ? "media_tracks" : "media_movies";
+    const musicColumns = type === "music"
+      ? `, artist_id, artist_name, album_id, album_name, release_year, disc_number, disc_total,
+           track_number, track_total, title, filename, artists_json, album_artist, compilation,
+           musicbrainz_artist_ids_json, musicbrainz_album_artist_id, musicbrainz_release_id,
+           musicbrainz_release_group_id, musicbrainz_recording_id, musicbrainz_track_id,
+           has_embedded_artwork, local_artwork_path, music_tags_read`
+      : "";
     const [rows] = await this.pool.execute(
-      `SELECT id, file_path, added_at_ms, mtime_ms, size_bytes FROM ${table} WHERE collection = ?`,
+      `SELECT id, file_path, added_at_ms, mtime_ms, size_bytes${musicColumns} FROM ${table} WHERE collection = ?`,
       [collection]
     );
     if (type !== "tv") {
-      return rows.map(fileIdentityFromRow);
+      return type === "music" ? rows.map(trackFromRow) : rows.map(fileIdentityFromRow);
     }
 
     const [episodeRows] = await this.pool.execute(
@@ -388,7 +404,7 @@ class MysqlIndexStore {
   async searchMusicCollection(collection, tokens, metadataIds, limit) {
     const artistWhere = tokenWhere(["a.name"], tokens);
     const albumWhere = tokenWhere(["a.name", "r.name"], tokens);
-    const trackWhere = tokenWhere(["t.artist_name", "t.album_name", "t.title"], tokens);
+    const trackWhere = tokenWhere(["t.artist_name", "t.album_artist", "t.artists_json", "t.album_name", "t.title"], tokens);
     const metadataClause = idClause(metadataIds, "t.id");
     const [artistRows] = await this.pool.execute(
       `SELECT a.id, a.name, a.path, COUNT(DISTINCT r.id) AS album_count,
@@ -570,6 +586,7 @@ class MysqlIndexStore {
         id VARCHAR(64) NOT NULL,
         name VARCHAR(512) NOT NULL,
         path TEXT NOT NULL,
+        musicbrainz_artist_id VARCHAR(64) NULL,
         PRIMARY KEY (collection, id),
         INDEX idx_media_artists_name (name)
       )
@@ -583,6 +600,10 @@ class MysqlIndexStore {
         name VARCHAR(512) NOT NULL,
         release_year INT NULL,
         path TEXT NOT NULL,
+        local_artwork_path TEXT NULL,
+        has_embedded_artwork BOOLEAN NOT NULL DEFAULT FALSE,
+        musicbrainz_release_id VARCHAR(64) NULL,
+        musicbrainz_release_group_id VARCHAR(64) NULL,
         PRIMARY KEY (collection, id),
         INDEX idx_media_albums_artist (collection, artist_id)
       )
@@ -599,12 +620,26 @@ class MysqlIndexStore {
         release_year INT NULL,
         disc_number INT NULL,
         track_number INT NULL,
+        disc_total INT NULL,
+        track_total INT NULL,
         title VARCHAR(512) NOT NULL,
         filename VARCHAR(512) NOT NULL,
         file_path TEXT NOT NULL,
         added_at_ms DOUBLE NULL,
         mtime_ms DOUBLE NULL,
         size_bytes DOUBLE NULL,
+        artists_json TEXT NULL,
+        album_artist VARCHAR(512) NULL,
+        compilation BOOLEAN NOT NULL DEFAULT FALSE,
+        musicbrainz_artist_ids_json TEXT NULL,
+        musicbrainz_album_artist_id VARCHAR(64) NULL,
+        musicbrainz_release_id VARCHAR(64) NULL,
+        musicbrainz_release_group_id VARCHAR(64) NULL,
+        musicbrainz_recording_id VARCHAR(64) NULL,
+        musicbrainz_track_id VARCHAR(64) NULL,
+        has_embedded_artwork BOOLEAN NOT NULL DEFAULT FALSE,
+        local_artwork_path TEXT NULL,
+        music_tags_read BOOLEAN NOT NULL DEFAULT FALSE,
         PRIMARY KEY (collection, id),
         INDEX idx_media_tracks_album (collection, album_id),
         INDEX idx_media_tracks_title (title)
@@ -618,6 +653,25 @@ class MysqlIndexStore {
     await ensureColumn(this.pool, "media_episodes", "size_bytes", "DOUBLE NULL");
     await ensureColumn(this.pool, "media_movies", "size_bytes", "DOUBLE NULL");
     await ensureColumn(this.pool, "media_tracks", "size_bytes", "DOUBLE NULL");
+    await ensureColumn(this.pool, "media_artists", "musicbrainz_artist_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_albums", "local_artwork_path", "TEXT NULL");
+    await ensureColumn(this.pool, "media_albums", "has_embedded_artwork", "BOOLEAN NOT NULL DEFAULT FALSE");
+    await ensureColumn(this.pool, "media_albums", "musicbrainz_release_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_albums", "musicbrainz_release_group_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "disc_total", "INT NULL");
+    await ensureColumn(this.pool, "media_tracks", "track_total", "INT NULL");
+    await ensureColumn(this.pool, "media_tracks", "artists_json", "TEXT NULL");
+    await ensureColumn(this.pool, "media_tracks", "album_artist", "VARCHAR(512) NULL");
+    await ensureColumn(this.pool, "media_tracks", "compilation", "BOOLEAN NOT NULL DEFAULT FALSE");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_artist_ids_json", "TEXT NULL");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_album_artist_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_release_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_release_group_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_recording_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "musicbrainz_track_id", "VARCHAR(64) NULL");
+    await ensureColumn(this.pool, "media_tracks", "has_embedded_artwork", "BOOLEAN NOT NULL DEFAULT FALSE");
+    await ensureColumn(this.pool, "media_tracks", "local_artwork_path", "TEXT NULL");
+    await ensureColumn(this.pool, "media_tracks", "music_tags_read", "BOOLEAN NOT NULL DEFAULT FALSE");
 
     this.initialized = true;
     logger.info(`[index] MySQL index store ready host=${this.config.host} database=${this.config.database}`);
@@ -719,16 +773,19 @@ class MysqlIndexStore {
 
   async loadMusicCollection(collection) {
     const [artistRows] = await this.pool.execute(
-      "SELECT id, name, path FROM media_artists WHERE collection = ? ORDER BY name",
+      "SELECT id, name, path, musicbrainz_artist_id FROM media_artists WHERE collection = ? ORDER BY name",
       [collection]
     );
     const [albumRows] = await this.pool.execute(
-      "SELECT id, artist_id, name, release_year, path FROM media_albums WHERE collection = ? ORDER BY release_year, name",
+      "SELECT id, artist_id, name, release_year, path, local_artwork_path, has_embedded_artwork, musicbrainz_release_id, musicbrainz_release_group_id FROM media_albums WHERE collection = ? ORDER BY release_year, name",
       [collection]
     );
     const [trackRows] = await this.pool.execute(
-      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number,
-              track_number, title, filename, file_path, added_at_ms, mtime_ms, size_bytes
+      `SELECT id, artist_id, artist_name, album_id, album_name, release_year, disc_number, disc_total,
+              track_number, track_total, title, filename, file_path, added_at_ms, mtime_ms, size_bytes,
+              artists_json, album_artist, compilation, musicbrainz_artist_ids_json, musicbrainz_album_artist_id,
+              musicbrainz_release_id, musicbrainz_release_group_id, musicbrainz_recording_id, musicbrainz_track_id,
+              has_embedded_artwork, local_artwork_path, music_tags_read
        FROM media_tracks WHERE collection = ? ORDER BY disc_number, track_number, filename`,
       [collection]
     );
@@ -742,6 +799,10 @@ class MysqlIndexStore {
         name: row.name,
         year: row.release_year,
         path: row.path,
+        localArtworkPath: row.local_artwork_path || null,
+        hasEmbeddedArtwork: Boolean(row.has_embedded_artwork),
+        musicBrainzReleaseId: row.musicbrainz_release_id || null,
+        musicBrainzReleaseGroupId: row.musicbrainz_release_group_id || null,
         tracks: []
       };
       const albums = albumsByArtist.get(row.artist_id) || [];
@@ -758,8 +819,22 @@ class MysqlIndexStore {
         albumName: row.album_name,
         year: row.release_year,
         disc: row.disc_number,
+        discTotal: row.disc_total,
         track: row.track_number,
+        trackTotal: row.track_total,
         title: row.title,
+        artists: jsonArray(row.artists_json),
+        albumArtist: row.album_artist || row.artist_name,
+        compilation: Boolean(row.compilation),
+        musicBrainzArtistIds: jsonArray(row.musicbrainz_artist_ids_json),
+        musicBrainzAlbumArtistId: row.musicbrainz_album_artist_id || null,
+        musicBrainzReleaseId: row.musicbrainz_release_id || null,
+        musicBrainzReleaseGroupId: row.musicbrainz_release_group_id || null,
+        musicBrainzRecordingId: row.musicbrainz_recording_id || null,
+        musicBrainzTrackId: row.musicbrainz_track_id || null,
+        hasEmbeddedArtwork: Boolean(row.has_embedded_artwork),
+        localArtworkPath: row.local_artwork_path || null,
+        musicTagsRead: Boolean(row.music_tags_read),
         filename: row.filename,
         filePath: row.file_path,
         addedAtMs: numberOrNull(row.added_at_ms),
@@ -778,6 +853,7 @@ class MysqlIndexStore {
         id: row.id,
         name: row.name,
         path: row.path,
+        musicBrainzArtistId: row.musicbrainz_artist_id || null,
         albums: albumsByArtist.get(row.id) || []
       })),
       tracksById
@@ -847,21 +923,29 @@ class MysqlIndexStore {
     const albums = [];
     const tracks = [];
     for (const artist of musicIndex.artists || []) {
-      artists.push([collection, artist.id, artist.name, artist.path]);
+      artists.push([collection, artist.id, artist.name, artist.path, artist.musicBrainzArtistId || null]);
       for (const album of artist.albums || []) {
-        albums.push([collection, album.id, artist.id, album.name, album.year, album.path]);
+        albums.push([collection, album.id, artist.id, album.name, album.year, album.path,
+          album.localArtworkPath || null, album.hasEmbeddedArtwork ? 1 : 0,
+          album.musicBrainzReleaseId || null, album.musicBrainzReleaseGroupId || null]);
         for (const track of album.tracks || []) {
           tracks.push([
-            collection, track.id, artist.id, artist.name, album.id, album.name, album.year,
+            collection, track.id, artist.id, track.artistName || artist.name, album.id, album.name, album.year,
             track.disc, track.track, track.title, track.filename, track.filePath,
-            track.addedAtMs || null, track.mtimeMs || null, track.sizeBytes ?? null
+            track.addedAtMs || null, track.mtimeMs || null, track.sizeBytes ?? null,
+            track.discTotal || null, track.trackTotal || null, JSON.stringify(track.artists || []),
+            track.albumArtist || artist.name, track.compilation ? 1 : 0,
+            JSON.stringify(track.musicBrainzArtistIds || []), track.musicBrainzAlbumArtistId || null,
+            track.musicBrainzReleaseId || null, track.musicBrainzReleaseGroupId || null,
+            track.musicBrainzRecordingId || null, track.musicBrainzTrackId || null,
+            track.hasEmbeddedArtwork ? 1 : 0, track.localArtworkPath || null, track.musicTagsRead ? 1 : 0
           ]);
         }
       }
     }
-    await bulkInsert(connection, "media_artists", ["collection", "id", "name", "path"], artists);
-    await bulkInsert(connection, "media_albums", ["collection", "id", "artist_id", "name", "release_year", "path"], albums);
-    await bulkInsert(connection, "media_tracks", ["collection", "id", "artist_id", "artist_name", "album_id", "album_name", "release_year", "disc_number", "track_number", "title", "filename", "file_path", "added_at_ms", "mtime_ms", "size_bytes"], tracks);
+    await bulkInsert(connection, "media_artists", ["collection", "id", "name", "path", "musicbrainz_artist_id"], artists);
+    await bulkInsert(connection, "media_albums", ["collection", "id", "artist_id", "name", "release_year", "path", "local_artwork_path", "has_embedded_artwork", "musicbrainz_release_id", "musicbrainz_release_group_id"], albums);
+    await bulkInsert(connection, "media_tracks", ["collection", "id", "artist_id", "artist_name", "album_id", "album_name", "release_year", "disc_number", "track_number", "title", "filename", "file_path", "added_at_ms", "mtime_ms", "size_bytes", "disc_total", "track_total", "artists_json", "album_artist", "compilation", "musicbrainz_artist_ids_json", "musicbrainz_album_artist_id", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_recording_id", "musicbrainz_track_id", "has_embedded_artwork", "local_artwork_path", "music_tags_read"], tracks);
   }
 }
 
@@ -963,12 +1047,27 @@ function trackFromRow(row) {
     albumName: row.album_name,
     year: row.release_year,
     disc: row.disc_number,
+    discTotal: row.disc_total,
     track: row.track_number,
+    trackTotal: row.track_total,
     title: row.title,
+    artists: jsonArray(row.artists_json),
+    albumArtist: row.album_artist || row.artist_name,
+    compilation: Boolean(row.compilation),
+    musicBrainzArtistIds: jsonArray(row.musicbrainz_artist_ids_json),
+    musicBrainzAlbumArtistId: row.musicbrainz_album_artist_id || null,
+    musicBrainzReleaseId: row.musicbrainz_release_id || null,
+    musicBrainzReleaseGroupId: row.musicbrainz_release_group_id || null,
+    musicBrainzRecordingId: row.musicbrainz_recording_id || null,
+    musicBrainzTrackId: row.musicbrainz_track_id || null,
+    hasEmbeddedArtwork: Boolean(row.has_embedded_artwork),
+    localArtworkPath: row.local_artwork_path || null,
+    musicTagsRead: Boolean(row.music_tags_read),
     filename: row.filename,
     filePath: row.file_path,
     addedAtMs: numberOrNull(row.added_at_ms),
-    mtimeMs: numberOrNull(row.mtime_ms)
+    mtimeMs: numberOrNull(row.mtime_ms),
+    sizeBytes: numberOrNull(row.size_bytes)
   };
 }
 
@@ -1005,8 +1104,22 @@ function albumsFromRows(albumRows, trackRows) {
     name: row.name,
     year: row.release_year,
     path: row.path,
+    localArtworkPath: row.local_artwork_path || null,
+    hasEmbeddedArtwork: Boolean(row.has_embedded_artwork),
+    musicBrainzReleaseId: row.musicbrainz_release_id || null,
+    musicBrainzReleaseGroupId: row.musicbrainz_release_group_id || null,
     tracks: tracksByAlbum.get(row.id) || []
   }));
+}
+
+function jsonArray(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function showSummaryFromRow(row) {

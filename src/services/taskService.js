@@ -54,6 +54,7 @@ function indexTasks(indexScanScheduler, mediaIndex) {
   if (!scheduled && !direct) return [];
   const activeLibraries = direct && direct.libraryReindexes || [];
   const pendingLibraries = direct && direct.pendingLibraries || [];
+  const scanProgress = direct && direct.libraryProgress && direct.libraryProgress[0] || null;
   const running = Boolean(scheduled && scheduled.running || direct && direct.fullReindex || activeLibraries.length);
   const failed = scheduled && scheduled.lastError;
   return [task({
@@ -62,9 +63,15 @@ function indexTasks(indexScanScheduler, mediaIndex) {
     title: "Library index scan",
     subtitle: activeLibraries.length ? `Re-indexing ${activeLibraries.join(", ")}` : scheduled && scheduled.pendingReason ? `Queued: ${scheduled.pendingReason}` : null,
     state: failed && !running ? "failed" : running ? "running" : pendingLibraries.length || scheduled && scheduled.queued ? "queued" : "idle",
-    phase: direct && direct.fullReindex ? "Full library scan" : activeLibraries.length ? "Scanning library" : "Waiting",
-    startedAt: scheduled && scheduled.lastStartedAt,
-    updatedAt: scheduled && scheduled.lastFinishedAt,
+    phase: scanProgress && scanProgress.phase
+      || (direct && direct.fullReindex ? "Full library scan" : activeLibraries.length ? "Scanning library" : "Waiting"),
+    startedAt: scanProgress && scanProgress.startedAt || scheduled && scheduled.lastStartedAt,
+    updatedAt: scanProgress && scanProgress.updatedAt || scheduled && scheduled.lastFinishedAt,
+    current: scanProgress && scanProgress.current,
+    total: scanProgress && scanProgress.total,
+    etaSeconds: scanProgress && scanProgress.etaSeconds,
+    detail: scanProgress && scanProgress.detail,
+    filePath: scanProgress && scanProgress.filePath,
     error: failed || null,
     queueTotal: pendingLibraries.length
   })];
@@ -346,6 +353,7 @@ function basename(filePath) {
 }
 
 function numeric(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }

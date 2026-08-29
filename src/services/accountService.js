@@ -7,6 +7,7 @@ const mysql = require("mysql2/promise");
 const scryptAsync = util.promisify(crypto.scrypt);
 const TOKEN_BYTES = 32;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 const API_KEY_PREFIX = "st_";
 
 const DEFAULT_PERMISSIONS = {
@@ -434,13 +435,47 @@ class AccountService {
       return null;
     }
 
-    if (session.expiresAtMs < Date.now()) {
+    const now = Date.now();
+    if (session.expiresAtMs < now) {
       await this.removeSession(sessionKey);
       return null;
     }
 
     const account = await this.findById(session.accountId);
-    return account ? publicAccount(account) : null;
+    if (!account) {
+      return null;
+    }
+
+    if (session.expiresAtMs - now <= SESSION_TTL_MS - SESSION_TOUCH_INTERVAL_MS) {
+      await this.touchSession(sessionKey, session.accountId, now + SESSION_TTL_MS);
+    }
+
+    return publicAccount(account);
+  }
+
+  async touchSession(tokenHash, accountId, expiresAtMs) {
+    if (this.config.mysql.enabled) {
+      await this.pool.execute(
+        `UPDATE user_sessions
+         SET expires_at = ?
+         WHERE token_hash = ? AND user_id = ? AND expires_at >= CURRENT_TIMESTAMP`,
+        [new Date(expiresAtMs), tokenHash, accountId]
+      );
+      return;
+    }
+
+    const data = await this.readJson();
+    const session = (data.sessions || []).find((entry) => (
+      entry.tokenHash === tokenHash
+      && entry.accountId === accountId
+      && sessionExpiryMs(entry) >= Date.now()
+    ));
+    if (!session) {
+      return;
+    }
+
+    session.expiresAt = new Date(expiresAtMs).toISOString();
+    await this.writeJson(data);
   }
 
   async saveSession(tokenHash, accountId, expiresAtMs) {

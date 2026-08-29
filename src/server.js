@@ -1,4 +1,5 @@
 const { createApp } = require("./app");
+const http = require("http");
 const config = require("./config");
 const logger = require("./utils/logger");
 
@@ -15,7 +16,9 @@ if (typeof process.send === "function") {
 createApp()
   .then((app) => {
     application = app;
-    server = app.listen(config.port, () => {
+    server = http.createServer(app);
+    app.locals.services.watchTogether.attach(server);
+    server.listen(config.port, () => {
       logger.info(`Media Baker listening on http://localhost:${config.port}`);
     });
     server.once("error", (err) => {
@@ -53,6 +56,12 @@ async function stop(reason) {
     await application?.locals?.services?.keyframes?.close();
   } catch (error) {
     logger.error(`[keyframes] shutdown flush failed message="${error.message}"`, error);
+  }
+
+  try {
+    await application?.locals?.services?.watchTogether?.close();
+  } catch (error) {
+    logger.error(`[watch-together] shutdown failed message="${error.message}"`, error);
   }
 
   if (!server) {

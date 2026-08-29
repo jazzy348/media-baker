@@ -16,6 +16,9 @@
       const start = url.searchParams.get("start");
       return { name: "live-tv", start: start ? new Date(start) : new Date(), pinnedToNow: !start };
     }
+    if (segments[0] === "watch" && segments[1] && segments.length === 2) {
+      return { name: "watch", inviteToken: segments[1] };
+    }
     if (segments[0] === "libraries" && segments[1]) {
       if (segments[2] === "artists" && segments[3] && segments[4] === "albums" && segments[5]) {
         return { name: "album", libraryKey: segments[1], artistId: segments[3], albumId: segments[5] };
@@ -97,6 +100,14 @@
     return pinnedToNow ? "/live-tv" : `/live-tv?start=${encodeURIComponent(start.toISOString())}`;
   }
 
+  function watchPath(inviteToken) {
+    return `/watch/${encodeURIComponent(inviteToken)}`;
+  }
+
+  function watchEndedPath() {
+    return "/watch-ended";
+  }
+
   function artistPath(libraryKey, artistId) {
     return `${libraryPath(libraryKey)}/artists/${encodeURIComponent(artistId)}`;
   }
@@ -124,6 +135,8 @@
     seasonPath,
     artistPath,
     albumPath,
-    liveTvPath
+    liveTvPath,
+    watchPath,
+    watchEndedPath
   });
 })(window);

@@ -32,14 +32,20 @@ function parseMusicFile(libraryPath, filePath) {
   const filename = path.basename(filePath, path.extname(filePath));
   const trackMatch = filename.match(/^\s*(?:(\d{1,2})[-_.])?(\d{1,3})(?:\s*[-_.]\s*|\s+)(.+)$/);
   const artist = directoryParts.length > 0 ? directoryParts[0] : "Unknown Artist";
-  const albumFolder = directoryParts.length >= 2 ? directoryParts[directoryParts.length - 1] : "Unknown Album";
+  const deepestDirectory = directoryParts.length >= 2 ? directoryParts[directoryParts.length - 1] : "Unknown Album";
+  const discFolder = deepestDirectory.match(/^(?:cd|disc|disk)\s*0*(\d+)$/i);
+  const albumFolder = discFolder && directoryParts.length >= 2
+    ? directoryParts[directoryParts.length - 2]
+    : deepestDirectory;
   const album = parseMovieFolder(albumFolder);
 
   return {
     artist: cleanReleaseName(artist),
     album: album.title,
     year: album.year,
-    disc: trackMatch && trackMatch[1] ? Number.parseInt(trackMatch[1], 10) : 1,
+    disc: discFolder
+      ? Number.parseInt(discFolder[1], 10)
+      : trackMatch && trackMatch[1] ? Number.parseInt(trackMatch[1], 10) : 1,
     track: trackMatch ? Number.parseInt(trackMatch[2], 10) : null,
     title: cleanReleaseName(trackMatch ? trackMatch[3] : filename)
   };
@@ -124,11 +130,12 @@ function normalizeEpisodeMatch(match, pattern) {
 
 function parseMovieFolder(folderName) {
   const normalized = normalizeSeparators(folderName);
-  const leadingYear = normalized.match(/^((?:19|20)\d{2})(?:\s*[-:]\s*|\s+)(.+)$/);
+  const leadingYear = normalized.match(/^(?:\(((?:19|20)\d{2})\)|\[((?:19|20)\d{2})\]|((?:19|20)\d{2}))(?:\s*[-:]\s*|\s+)(.+)$/);
   if (leadingYear) {
+    const year = leadingYear[1] || leadingYear[2] || leadingYear[3];
     return {
-      title: cleanReleaseName(leadingYear[2]),
-      year: Number.parseInt(leadingYear[1], 10)
+      title: cleanReleaseName(leadingYear[4]),
+      year: Number.parseInt(year, 10)
     };
   }
 

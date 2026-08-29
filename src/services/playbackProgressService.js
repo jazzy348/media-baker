@@ -43,6 +43,26 @@ class PlaybackProgressService {
     return this.store.removeUser(normalizedUserId);
   }
 
+  async importRecords(userId, records = []) {
+    const normalizedUserId = String(userId || "").trim();
+    if (!normalizedUserId) throw new Error("Import user is required");
+
+    const summary = { imported: 0, updated: 0, unchanged: 0 };
+    for (const input of records) {
+      const incoming = importedRecord(normalizedUserId, input);
+      const current = await this.store.get(normalizedUserId, incoming.mediaType, incoming.mediaId);
+      const merged = mergeImportedRecord(current, incoming);
+      if (!merged) {
+        summary.unchanged += 1;
+        continue;
+      }
+      await this.store.saveImported(merged);
+      if (current) summary.updated += 1;
+      else summary.imported += 1;
+    }
+    return summary;
+  }
+
   async recordSegmentDelivery(userId, mediaType, mediaId, cacheKey, playbackSessionId, segment, options = {}) {
     if (!segment || !Number.isFinite(segment.startSeconds) || !Number.isFinite(segment.durationSeconds)) {
       return null;
@@ -710,6 +730,67 @@ function emptyProgress(mediaType, mediaId) {
 function watchedThreshold(config) {
   const percent = Math.max(1, Math.min(Number(config.playback.watchedThresholdPercent) || 10, 95));
   return percent / 100;
+}
+
+function importedRecord(userId, input = {}) {
+  const mediaType = String(input.mediaType || "").trim();
+  const mediaId = String(input.mediaId || "").trim();
+  const status = input.status === STATUS_WATCHED ? STATUS_WATCHED : STATUS_IN_PROGRESS;
+  const durationSeconds = Math.max(0, Number(input.durationSeconds) || 0);
+  const positionSeconds = status === STATUS_WATCHED
+    ? durationSeconds
+    : Math.max(0, Math.min(durationSeconds, Number(input.positionSeconds) || 0));
+  if (!mediaType || !mediaId || durationSeconds <= 0) {
+    throw new Error("Imported playback records require mediaType, mediaId, and durationSeconds");
+  }
+  const updatedAt = validImportTime(input.updatedAt) || new Date().toISOString();
+  return {
+    userId,
+    mediaType,
+    mediaId,
+    status,
+    positionSeconds,
+    durationSeconds,
+    cacheKey: null,
+    updatedAt,
+    watchedAt: status === STATUS_WATCHED
+      ? validImportTime(input.watchedAt) || updatedAt
+      : null
+  };
+}
+
+function mergeImportedRecord(current, incoming) {
+  if (!current) return incoming;
+  const currentTime = timeMs(current.updatedAt);
+  const incomingTime = timeMs(incoming.updatedAt);
+
+  if (current.status === STATUS_WATCHED && incoming.status !== STATUS_WATCHED) return null;
+  if (current.status === STATUS_WATCHED && incoming.status === STATUS_WATCHED && currentTime >= incomingTime) return null;
+  if (incoming.status === STATUS_IN_PROGRESS) {
+    const positionSeconds = Math.max(Number(current.positionSeconds) || 0, incoming.positionSeconds);
+    if (current.status === STATUS_IN_PROGRESS
+      && currentTime >= incomingTime
+      && positionSeconds <= Number(current.positionSeconds || 0)) {
+      return null;
+    }
+    return {
+      ...current,
+      ...incoming,
+      positionSeconds,
+      durationSeconds: Math.max(Number(current.durationSeconds) || 0, incoming.durationSeconds),
+      updatedAt: incomingTime >= currentTime ? incoming.updatedAt : current.updatedAt
+    };
+  }
+  return {
+    ...current,
+    ...incoming,
+    durationSeconds: Math.max(Number(current.durationSeconds) || 0, incoming.durationSeconds)
+  };
+}
+
+function validImportTime(value) {
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
 function watchedCompletionPosition(positionSeconds, durationSeconds, segment) {

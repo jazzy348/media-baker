@@ -1,6 +1,6 @@
 {
   "name": "media-baker",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Local media library indexer and HLS baking API.",
   "repository": {
     "type": "git",
@@ -15,10 +15,12 @@
     "adm-zip": "^0.6.0",
     "express": "^4.19.2",
     "fast-xml-parser": "^5.10.1",
+    "music-metadata": "^11.15.0",
     "mysql2": "^3.11.5",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "ws": "^8.21.3"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   }
 }

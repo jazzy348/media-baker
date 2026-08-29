@@ -1,7 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { createId } = require("../utils/mediaParsers");
-const { MusicBrainzMetadataProvider } = require("./musicBrainzMetadataProvider");
+const { DeezerMetadataProvider, MUSIC_METADATA_VERSION } = require("./deezerMetadataProvider");
 const { CachedImageService } = require("./cachedImageService");
 const { StaticImageService } = require("./staticImageService");
 const { CustomMetadataClient, assetIdFromPath } = require("./customMetadataClient");
@@ -19,7 +19,7 @@ class MetadataService {
     this.cachedImages = cachedImages || new CachedImageService(config, new StaticImageService(ffmpeg));
     this.customMetadata = new CustomMetadataClient(config);
     this.posterDir = path.join(this.config.cachePath, "posters");
-    this.musicBrainz = new MusicBrainzMetadataProvider(this.posterDir, this.cachedImages, this.customMetadata);
+    this.musicMetadata = new DeezerMetadataProvider(this.posterDir, this.cachedImages, this.customMetadata);
     this.thumbnailDir = path.join(this.config.cachePath, "thumbnails");
     this.preloadInFlight = null;
     this.preloadStatus = null;
@@ -34,6 +34,13 @@ class MetadataService {
   async getForMedia(mediaType, mediaFile) {
     let cached = await this.store.get(mediaType, mediaFile.id);
     if (cached) {
+      if (this.config.enabled
+        && isMusicMediaType(this.appConfig, mediaType)
+        && musicRecordNeedsIdentityRefresh(cached, mediaFile, this.musicMetadata.providerName())) {
+        const query = await this.queryForMedia(mediaType, mediaFile);
+        cached = await this.fetchMusicRecord(mediaType, mediaFile, query);
+        await this.store.save(cached);
+      }
       if (this.customMetadata.active() && cached.found && recordNeedsCoreRefresh(cached)) {
         cached = await this.refreshIncompleteCustomRecord(mediaType, mediaFile, cached);
       }
@@ -118,7 +125,7 @@ class MetadataService {
       if (!posterFilename && customArtworkId && !isEpisodeFile(mediaFile)) {
         posterPath = `custom-asset:${customArtworkId}`;
         const filename = kind === "music"
-          ? safePosterFilename(`musicbrainz-release-${cached.providerId}-500.webp`)
+          ? safePosterFilename(`music-album-${mediaFile.albumId || cached.providerId || mediaFile.id}-500.webp`)
           : posterFilenameFor(kind, cached.providerId, this.config.posterSize, posterPath);
         posterFilename = await this.cachePosterFile(posterPath, filename);
       }
@@ -128,7 +135,12 @@ class MetadataService {
         ...item,
         ...(kind === "music" ? {
           artistName: item.artist || mediaFile.artistName,
+          albumArtist: item.albumArtist || mediaFile.albumArtist || item.artist || mediaFile.artistName,
           albumName: item.title || mediaFile.albumName,
+          releaseGroupId: item.releaseGroupId || mediaFile.musicBrainzReleaseGroupId || null,
+          musicBrainzReleaseId: mediaFile.musicBrainzReleaseId || null,
+          musicIdentity: musicQueryIdentity(mediaFile),
+          musicMetadataVersion: MUSIC_METADATA_VERSION,
           trackTitle: mediaFile.title,
           aliases: [mediaFile.artistName, mediaFile.albumName].filter(Boolean)
         } : {})
@@ -297,8 +309,9 @@ class MetadataService {
     }
 
     if (music) {
-      logger.info(`[metadata] manual search mediaType=${mediaType} id=${mediaFile.id} provider=musicbrainz album="${query.title}" artist="${query.artist || "unknown"}"`);
-      const candidates = await this.musicBrainz.search(mediaFile, {
+      const provider = this.musicMetadata.providerName();
+      logger.info(`[metadata] manual search mediaType=${mediaType} id=${mediaFile.id} provider=${provider} album="${query.title}" artist="${query.artist || "unknown"}"`);
+      const candidates = await this.musicMetadata.search(mediaFile, {
         ...input,
         title: query.title,
         artist: input.artist || query.artist,
@@ -306,9 +319,9 @@ class MetadataService {
       });
       return {
         available: true,
-        provider: "musicbrainz",
+        provider,
         query,
-        candidates: candidates.map((candidate) => this.musicBrainz.candidate(candidate))
+        candidates: candidates.map((candidate) => this.musicMetadata.candidate(candidate))
       };
     }
 
@@ -335,8 +348,8 @@ class MetadataService {
     }
 
     if (music) {
-      const result = await this.musicBrainz.lookup(providerId);
-      const record = await this.musicBrainz.createRecord(mediaType, mediaFile, result);
+      const result = await this.musicMetadata.lookup(providerId);
+      const record = await this.musicMetadata.createRecord(mediaType, mediaFile, result);
       await this.store.save(record);
       return toPublicRecord(record, false);
     }
@@ -583,6 +596,8 @@ class MetadataService {
     let copiedCount = 0;
     let missingCount = 0;
     let failedCount = 0;
+    let consecutiveTransientFailures = 0;
+    let stoppedForBackendFailure = false;
 
     this.preloadQueue = mediaFiles;
     this.preloadStatus = {
@@ -605,17 +620,19 @@ class MetadataService {
       this.preloadStatus.current = taskMediaSummary(media);
       try {
         const cached = await this.store.get(media.mediaType, media.file.id);
-        if (cached && !cached.found && !options.retryMissing) {
+        const staleMusic = isMusicMediaType(this.appConfig, media.mediaType)
+          && musicRecordNeedsIdentityRefresh(cached, media.file, this.musicMetadata.providerName());
+        if (cached && !cached.found && !options.retryMissing && !staleMusic) {
           cachedCount += 1;
           continue;
         }
 
-        if (cached && cached.found && (cached.posterFilename || cached.posterUnavailable)) {
+        if (cached && cached.found && (cached.posterFilename || cached.posterUnavailable) && !staleMusic) {
           cachedCount += 1;
           continue;
         }
 
-        if (cached && cached.found && !cached.posterFilename) {
+        if (cached && cached.found && !cached.posterFilename && !staleMusic) {
           const repaired = await this.ensurePosterForRecord(cached);
           if (repaired.posterFilename) {
             posterRepairedCount += 1;
@@ -639,6 +656,7 @@ class MetadataService {
 
         logger.full(`[metadata] preload fetch mediaType=${media.mediaType} id=${media.file.id} query="${query.title}" year=${query.year || "none"}`);
         const record = await this.fetchRecordForMedia(media.mediaType, media.file, query);
+        consecutiveTransientFailures = 0;
 
         await this.store.save(record);
         recordsByQuery.set(queryKey, record);
@@ -652,6 +670,15 @@ class MetadataService {
       } catch (err) {
         failedCount += 1;
         logger.error(`[metadata] preload item failed mediaType=${media.mediaType} id=${media.file.id} message="${err.message}"`, err);
+        if (isTransientMetadataBackendError(err)) {
+          consecutiveTransientFailures += 1;
+          if (consecutiveTransientFailures >= 3) {
+            stoppedForBackendFailure = true;
+            logger.error(`[metadata] background preload paused after ${consecutiveTransientFailures} consecutive metadata backend failures; remaining items will be retried by the next preload`);
+          }
+        } else {
+          consecutiveTransientFailures = 0;
+        }
       } finally {
         this.preloadStatus = {
           ...this.preloadStatus,
@@ -663,6 +690,7 @@ class MetadataService {
           failed: failedCount
         };
       }
+      if (stoppedForBackendFailure) break;
     }
 
     this.preloadStatus = {
@@ -672,7 +700,8 @@ class MetadataService {
       current: null
     };
     this.preloadQueue = [];
-    logger.info(`[metadata] background preload complete cached=${cachedCount} fetched=${fetchedCount} posterRepaired=${posterRepairedCount} posterUnavailable=${posterUnavailableCount} copied=${copiedCount} missing=${missingCount} failed=${failedCount}`);
+    const deferredCount = Math.max(0, mediaFiles.length - this.preloadStatus.processed);
+    logger.info(`[metadata] background preload complete cached=${cachedCount} fetched=${fetchedCount} posterRepaired=${posterRepairedCount} posterUnavailable=${posterUnavailableCount} copied=${copiedCount} missing=${missingCount} failed=${failedCount} deferred=${deferredCount}`);
   }
 
   async runMissingRecheck(mediaIndex, limit) {
@@ -784,8 +813,9 @@ class MetadataService {
     }
 
     logger.full(`[metadata] poster cache miss filename="${path.basename(filename)}" provider=${record.provider} mediaType=${record.mediaType} id=${record.mediaId}`);
-    if (record.provider === "musicbrainz") {
-      const repaired = await this.musicBrainz.ensurePoster({ ...record, posterFilename: null });
+    if (isStoredMusicRecord(record)) {
+      if (!isCurrentMusicRecord(record, this.musicMetadata.providerName())) return null;
+      const repaired = await this.musicMetadata.ensurePoster({ ...record, posterFilename: null });
       await this.store.save(repaired);
       return repaired.posterFilename ? this.posterFilePath(repaired.posterFilename) : null;
     }
@@ -1242,12 +1272,42 @@ class MetadataService {
 
   async fetchMusicRecord(mediaType, mediaFile, query = metadataQuery(this.appConfig, mediaType, mediaFile)) {
     if (!isSearchableMusicQuery(query)) {
-      return createMissingRecord(mediaType, mediaFile.id, "musicbrainz", JSON.stringify(musicQueryIdentity(mediaFile, query)));
+      if (mediaFile.localArtworkPath || mediaFile.hasEmbeddedArtwork) {
+        return this.createLocalMusicRecord(mediaType, mediaFile);
+      }
+      return createMissingRecord(mediaType, mediaFile.id, this.musicMetadata.providerName(), JSON.stringify({
+        musicIdentity: musicQueryIdentity(mediaFile),
+        musicMetadataVersion: MUSIC_METADATA_VERSION
+      }));
     }
-    const result = await this.musicBrainz.find(mediaFile, query);
-    return result
-      ? this.musicBrainz.createRecord(mediaType, mediaFile, result)
-      : createMissingRecord(mediaType, mediaFile.id, "musicbrainz", JSON.stringify(musicQueryIdentity(mediaFile, query)));
+    const result = await this.musicMetadata.find(mediaFile, {
+      ...query,
+      language: this.config.language,
+      artworkLanguages: this.config.posterLanguages
+    });
+    if (result) return this.musicMetadata.createRecord(mediaType, mediaFile, result);
+    if (mediaFile.localArtworkPath || mediaFile.hasEmbeddedArtwork) {
+      return this.createLocalMusicRecord(mediaType, mediaFile);
+    }
+    return createMissingRecord(mediaType, mediaFile.id, this.musicMetadata.providerName(), JSON.stringify({
+      musicIdentity: musicQueryIdentity(mediaFile),
+      musicMetadataVersion: MUSIC_METADATA_VERSION
+    }));
+  }
+
+  createLocalMusicRecord(mediaType, mediaFile) {
+    return this.musicMetadata.createRecord(mediaType, mediaFile, {
+      id: "",
+      title: mediaFile.albumName || "Unknown Album",
+      artist: mediaFile.albumArtist || mediaFile.artistName || "Unknown Artist",
+      releaseDate: mediaFile.year ? `${mediaFile.year}-01-01` : null,
+      releaseYear: Number.parseInt(mediaFile.year, 10) || null,
+      overview: null,
+      coverUrl: null,
+      customPosterPath: null,
+      details: true,
+      raw: {}
+    });
   }
 
   async fetchRecordForMedia(mediaType, mediaFile, query = metadataQuery(this.appConfig, mediaType, mediaFile)) {
@@ -1268,8 +1328,9 @@ class MetadataService {
       return record;
     }
 
-    if (record.provider === "musicbrainz") {
-      const updated = await this.musicBrainz.ensurePoster(record);
+    if (isStoredMusicRecord(record)) {
+      if (!isCurrentMusicRecord(record, this.musicMetadata.providerName())) return record;
+      const updated = await this.musicMetadata.ensurePoster(record);
       await this.store.save(updated);
       return updated;
     }
@@ -1472,11 +1533,25 @@ class MetadataService {
 
 function metadataQuery(config, mediaType, mediaFile) {
   if (kindForMediaType(config, mediaType) === "music") {
+    if (mediaFile.musicEntityType === "artist") {
+      const artist = cleanMetadataSearchText(mediaFile.artistName || mediaFile.title || "Unknown Artist");
+      return {
+        kind: "music",
+        searchType: "artist",
+        title: artist,
+        artist,
+        year: null,
+        artistId: mediaFile.musicBrainzArtistId || mediaFile.musicBrainzAlbumArtistId || null
+      };
+    }
     return {
       kind: "music",
+      searchType: "album",
       title: cleanMetadataSearchText(mediaFile.albumName || "Unknown Album"),
-      artist: cleanMetadataSearchText(mediaFile.artistName || "Unknown Artist"),
-      year: mediaFile.year || null
+      artist: cleanMetadataSearchText(mediaFile.albumArtist || mediaFile.artistName || "Unknown Artist"),
+      year: mediaFile.year || null,
+      releaseId: mediaFile.musicBrainzReleaseId || null,
+      releaseGroupId: mediaFile.musicBrainzReleaseGroupId || null
     };
   }
   if (kindForMediaType(config, mediaType) === "movie") {
@@ -1536,7 +1611,15 @@ function posterLanguageRank(poster, languageRank) {
 }
 
 function metadataQueryKey(query) {
-  return `${query.kind}:${query.title.toLowerCase()}:${String(query.artist || "").toLowerCase()}:${query.year || ""}`;
+  return [
+    query.kind,
+    query.searchType || "",
+    query.title.toLowerCase(),
+    String(query.artist || "").toLowerCase(),
+    query.year || "",
+    query.releaseId || "",
+    query.releaseGroupId || ""
+  ].join(":");
 }
 
 function listIndexedMediaFiles(index) {
@@ -1587,7 +1670,20 @@ function episodeFiles(collection, mediaType) {
 }
 
 function musicFiles(collection, mediaType) {
-  return Object.values(collection && collection.tracksById || {}).map((file) => ({ mediaType, file }));
+  const artists = (collection && collection.artists || []).map((artist) => ({
+    mediaType,
+    file: {
+      id: artist.id,
+      title: artist.name,
+      artistId: artist.id,
+      artistName: artist.name,
+      filePath: artist.path || null,
+      musicBrainzArtistId: artist.musicBrainzArtistId || null,
+      musicEntityType: "artist"
+    }
+  }));
+  const tracks = Object.values(collection && collection.tracksById || {}).map((file) => ({ mediaType, file }));
+  return [...artists, ...tracks];
 }
 
 function copyRecordForMedia(record, mediaType, mediaId, mediaFile = null) {
@@ -1596,12 +1692,16 @@ function copyRecordForMedia(record, mediaType, mediaId, mediaFile = null) {
     mediaType,
     mediaId
   };
-  if (record.provider === "musicbrainz" && mediaFile) {
+  if (isStoredMusicRecord(record) && mediaFile) {
     const source = parseSourceJson(record.sourceJson) || {};
-    copied.title = mediaFile.title || mediaFile.filename;
+    copied.title = mediaFile.musicEntityType === "artist"
+      ? mediaFile.artistName || mediaFile.title
+      : mediaFile.title || mediaFile.filename;
     copied.sourceJson = JSON.stringify({
       ...source,
-      trackTitle: copied.title,
+      ...(mediaFile.musicEntityType === "artist" ? { artistName: copied.title } : { trackTitle: copied.title }),
+      musicIdentity: musicQueryIdentity(mediaFile),
+      musicMetadataVersion: MUSIC_METADATA_VERSION,
       aliases: uniqueText([...(source.aliases || []), mediaFile.artistName, mediaFile.albumName])
     });
   }
@@ -1873,16 +1973,55 @@ function createMissingRecord(mediaType, mediaId, provider, sourceJson = null) {
 }
 
 function recordNeedsCoreRefresh(record) {
+  const source = parseSourceJson(record && record.sourceJson) || {};
+  if (source.musicEntityType === "artist") return !record.title;
   return !record.title || !record.releaseYear || !record.overview;
 }
 
-function musicQueryIdentity(mediaFile, query = null) {
+function musicQueryIdentity(mediaFile) {
+  if (mediaFile.musicEntityType === "artist") {
+    return {
+      entityType: "artist",
+      artistName: String(mediaFile.artistName || mediaFile.title || "Unknown Artist").trim(),
+      artistId: mediaFile.musicBrainzArtistId || mediaFile.musicBrainzAlbumArtistId || null
+    };
+  }
   return {
-    artistName: String(query && query.artist || mediaFile.artistName || "Unknown Artist").trim(),
-    albumName: String(query && query.title || mediaFile.albumName || "Unknown Album").trim(),
-    year: Number.parseInt(query && query.year || mediaFile.year, 10) || null,
-    trackTitle: String(mediaFile.title || mediaFile.filename || "").trim()
+    entityType: "album",
+    artistName: String(mediaFile.albumArtist || mediaFile.artistName || "Unknown Artist").trim(),
+    albumName: String(mediaFile.albumName || "Unknown Album").trim(),
+    year: Number.parseInt(mediaFile.year, 10) || null,
+    releaseId: mediaFile.musicBrainzReleaseId || null,
+    releaseGroupId: mediaFile.musicBrainzReleaseGroupId || null
   };
+}
+
+function musicRecordNeedsIdentityRefresh(record, mediaFile, provider) {
+  if (!record) return false;
+  if (record.provider !== provider) return true;
+  const source = parseSourceJson(record.sourceJson) || {};
+  if (source.musicMetadataVersion !== MUSIC_METADATA_VERSION) return true;
+  const cachedIdentity = source.musicIdentity || {
+    artistName: source.artistName,
+    albumName: source.albumName,
+    year: source.year,
+    releaseId: source.releaseId || source.musicBrainzReleaseId,
+    releaseGroupId: source.releaseGroupId
+  };
+  return JSON.stringify(cachedIdentity) !== JSON.stringify(musicQueryIdentity(mediaFile));
+}
+
+function isStoredMusicRecord(record) {
+  if (!record) return false;
+  if (["deezer", "musicbrainz"].includes(record.provider)) return true;
+  const source = parseSourceJson(record.sourceJson) || {};
+  return Boolean(source.musicIdentity);
+}
+
+function isCurrentMusicRecord(record, provider) {
+  if (!isStoredMusicRecord(record) || record.provider !== provider) return false;
+  const source = parseSourceJson(record.sourceJson) || {};
+  return source.musicMetadataVersion === MUSIC_METADATA_VERSION;
 }
 
 function musicQueryNeedsTagFallback(query) {
@@ -1892,6 +2031,9 @@ function musicQueryNeedsTagFallback(query) {
 
 function isSearchableMusicQuery(query) {
   const title = cleanMetadataSearchText(query && query.title);
+  if (query && query.searchType === "artist") {
+    return Boolean(title) && !/^unknown artist$/i.test(title);
+  }
   return Boolean(title)
     && !/^unknown album$/i.test(title)
     && !/^(?:cd|disc|disk)\s*\d+$/i.test(title);
@@ -2162,6 +2304,11 @@ function taskMediaSummary(media) {
 
 function cloneTaskMedia(media) {
   return media ? { ...media } : null;
+}
+
+function isTransientMetadataBackendError(err) {
+  const status = Number(err && err.status);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 module.exports = { MetadataService };

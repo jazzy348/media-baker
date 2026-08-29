@@ -8,9 +8,9 @@ const logger = require("../utils/logger");
 const SEEK_AHEAD_THRESHOLD_SECONDS = 30;
 const SEEK_PRE_ROLL_SECONDS = 24;
 const SEEK_REASSERT_INTERVAL_MS = 1500;
-const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-keyframe-timeline-v24";
+const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-keyframe-timeline-v25";
 const HLS_CACHE_FORMAT_MARKER = ".hls-cache-format";
-const KEYFRAME_CACHE_FORMAT_VERSION = 1;
+const KEYFRAME_CACHE_FORMAT_VERSION = 2;
 const MAXIMUM_COPIED_SEGMENT_SECONDS = 60;
 const MEBIBYTE = 1024 * 1024;
 const STORAGE_MONITOR_INTERVAL_MS = 3000;
@@ -2179,10 +2179,13 @@ function buildKeyframeSegmentTimeline(keyframes, probe, videoStream, targetSecon
   if (normalized.length === 0 || normalized[0] > 0.5) return [];
 
   const starts = [0];
+  let nextBoundary = targetSeconds;
   for (const timestamp of normalized) {
-    const currentStart = starts[starts.length - 1];
-    if (timestamp >= currentStart + targetSeconds && duration - timestamp > 0.05) {
+    if (timestamp >= nextBoundary && duration - timestamp > 0.05) {
       starts.push(timestamp);
+      while (nextBoundary <= timestamp) {
+        nextBoundary += targetSeconds;
+      }
     }
   }
   return starts.map((startSeconds, index) => ({

@@ -654,14 +654,15 @@ async function itemsForCategory(mediaIndex, category, indexedCollection = null) 
       subtitle: `${track.artistName} - ${track.albumName}`,
       artistId: track.artistId,
       artistName: track.artistName,
+      albumArtist: track.albumArtist || track.artistName,
       albumId: track.albumId,
       albumName: track.albumName,
       disc: track.disc,
       track: track.track,
       filePath: track.filePath,
       addedAtMs: track.addedAtMs || track.mtimeMs || 0,
-      searchText: `${track.artistName} ${track.albumName} ${track.title}`,
-      fallbackSearchText: `${track.artistName} ${track.albumName} ${track.title}`
+      searchText: `${track.artistName} ${(track.artists || []).join(" ")} ${track.albumArtist || ""} ${track.albumName} ${track.title}`,
+      fallbackSearchText: `${track.artistName} ${(track.artists || []).join(" ")} ${track.albumArtist || ""} ${track.albumName} ${track.title}`
     }));
   }
   if (category.kind === "image") {
@@ -787,8 +788,8 @@ async function libraryItemsForCategory(mediaIndex, category, indexedCollection =
         subtitle: `${albumCount} albums - ${trackCount} tracks`,
         artistId: artist.id,
         artistName: artist.name,
-        metadataId: artist.metadataId || (tracks[0] ? tracks[0].id : null),
-        metadataIds: artist.metadataId ? [artist.metadataId] : tracks.map((track) => track.id),
+        metadataId: artist.id,
+        metadataIds: tracks.map((track) => track.id),
         addedAtMs: artist.addedAtMs || tracks.reduce((latest, track) => Math.max(latest, track.addedAtMs || track.mtimeMs || 0), 0),
         searchText: artist.name,
         fallbackSearchText: artist.name
@@ -841,6 +842,7 @@ function itemFromMediaFile(mediaType, mediaFile) {
     episode: mediaFile.episode,
     artistId: mediaFile.artistId,
     artistName: mediaFile.artistName,
+    albumArtist: mediaFile.albumArtist || mediaFile.artistName,
     albumId: mediaFile.albumId,
     albumName: mediaFile.albumName,
     disc: mediaFile.disc,

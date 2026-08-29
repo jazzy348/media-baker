@@ -18,7 +18,8 @@ const OPERATIONS = Object.freeze({
   MOVIE_PLAYBACK: 9,
   EPISODE_PLAYBACK: 10,
   VARIANT_PLAYBACK: 11,
-  ON_DECK_POSTER_ATLAS: 12
+  ON_DECK_POSTER_ATLAS: 12,
+  FUTURE_URLS: 13
 });
 
 const ON_DECK_PAGE_SIZE = 12;
@@ -29,11 +30,12 @@ class OpenMovieCapabilityService {
     if (this.key.length !== 32) throw new Error("OpenMovie capability key must be 32 bytes");
   }
 
-  bootstrap(apiKeyId) {
+  bootstrap(apiKeyId, nextIds) {
     return {
       moviesUrl: this.url(OPERATIONS.MOVIES, apiKeyId, 1),
       tvUrl: this.url(OPERATIONS.TV, apiKeyId, 1),
-      onDeckUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, 1)
+      onDeckUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, 1),
+      futureUrlsUrl: this.futureUrlsUrl(apiKeyId, nextIds)
     };
   }
 
@@ -103,8 +105,26 @@ class OpenMovieCapabilityService {
     };
   }
 
+  futureUrlsUrl(apiKeyId, nextIds) {
+    return this.url(
+      OPERATIONS.FUTURE_URLS,
+      apiKeyId,
+      nextIds.movie,
+      nextIds.episode,
+      nextIds.variant,
+      nextIds.onDeckPage || 1
+    );
+  }
+
   futureUrls(apiKeyId, nextIds, count) {
+    const onDeckPage = nextIds.onDeckPage || 1;
     return {
+      nextUrl: this.futureUrlsUrl(apiKeyId, {
+        movie: nextIds.movie + count,
+        episode: nextIds.episode + count,
+        variant: nextIds.variant + count,
+        onDeckPage: onDeckPage + count
+      }),
       count,
       movies: futureSequence(nextIds.movie, count, (id) => ({
         posterUrl: this.url(OPERATIONS.MOVIE_POSTER, apiKeyId, id),
@@ -119,7 +139,7 @@ class OpenMovieCapabilityService {
       variants: futureSequence(nextIds.variant, count, (id) => ({
         playbackUrl: this.url(OPERATIONS.VARIANT_PLAYBACK, apiKeyId, id)
       })),
-      onDeckPages: futurePageSequence(count, (page) => ({
+      onDeckPages: futurePageSequence(onDeckPage, count, (page) => ({
         pageUrl: this.url(OPERATIONS.ON_DECK, apiKeyId, page),
         posterAtlasUrl: this.url(OPERATIONS.ON_DECK_POSTER_ATLAS, apiKeyId, page)
       }))
@@ -215,11 +235,11 @@ function futureSequence(startId, count, createUrls) {
   };
 }
 
-function futurePageSequence(count, createUrls) {
+function futurePageSequence(startPage, count, createUrls) {
   return {
-    startPage: 1,
-    endPage: count,
-    urls: Array.from({ length: count }, (_, index) => createUrls(index + 1))
+    startPage,
+    endPage: startPage + count - 1,
+    urls: Array.from({ length: count }, (_, index) => createUrls(startPage + index))
   };
 }
 

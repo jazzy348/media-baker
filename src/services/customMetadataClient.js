@@ -61,17 +61,41 @@ class CustomMetadataClient {
   }
 
   async artwork(assetId) {
-    const response = await fetch(this.url(`/api/v1/assets/${encodeURIComponent(assetId)}`), { headers: this.headers(false) });
-    if (!response.ok) throw new Error(`Custom metadata artwork request failed with HTTP ${response.status}`);
+    let response;
+    try {
+      response = await fetch(this.url(`/api/v1/assets/${encodeURIComponent(assetId)}`), {
+        headers: this.headers(false),
+        signal: AbortSignal.timeout(30000)
+      });
+    } catch (err) {
+      const requestError = new Error(`Custom metadata artwork request failed: ${err.message || "network error"}`);
+      requestError.status = 502;
+      requestError.cause = err;
+      throw requestError;
+    }
+    if (!response.ok) {
+      const requestError = new Error(`Custom metadata artwork request failed with HTTP ${response.status}`);
+      requestError.status = response.status;
+      throw requestError;
+    }
     return Buffer.from(await response.arrayBuffer());
   }
 
   async request(path, options = {}) {
-    const response = await fetch(this.url(path), {
-      method: options.method || "GET",
-      headers: this.headers(Boolean(options.body)),
-      body: options.body ? JSON.stringify(options.body) : undefined
-    });
+    let response;
+    try {
+      response = await fetch(this.url(path), {
+        method: options.method || "GET",
+        headers: this.headers(Boolean(options.body)),
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: AbortSignal.timeout(30000)
+      });
+    } catch (err) {
+      const requestError = new Error(`Custom metadata request failed: ${err.message || "network error"}`);
+      requestError.status = 502;
+      requestError.cause = err;
+      throw requestError;
+    }
     if (!response.ok) {
       let message = `Custom metadata request failed with HTTP ${response.status}`;
       try {
@@ -80,7 +104,9 @@ class CustomMetadataClient {
       } catch (err) {
         // Keep the HTTP status when the response is not JSON.
       }
-      throw new Error(message);
+      const requestError = new Error(message);
+      requestError.status = response.status;
+      throw requestError;
     }
     return response.json();
   }

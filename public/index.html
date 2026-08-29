@@ -197,6 +197,7 @@
           <button id="playStream" class="primary-button" type="button">Play</button>
           <button id="pregenerateHls" class="secondary-button" type="button">Pre-generate HLS</button>
           <button id="copyUrl" class="secondary-button" type="button">Copy URL</button>
+          <button id="startWatchTogether" class="secondary-button" type="button">Watch Together</button>
         </div>
         <p id="copyStatus" class="status"></p>
         <div id="manualCopyBar" class="manual-copy-bar hidden">
@@ -286,6 +287,7 @@
             <h2 id="playerTitle"></h2>
           </div>
           <div class="player-heading-actions">
+            <button id="toggleWatchTogetherPanel" class="music-icon-button hidden" type="button" title="Participants and chat" aria-label="Participants and chat" aria-expanded="false">&#9776;</button>
             <button id="minimizeVideoPlayer" class="music-icon-button" type="button" title="Minimize player" aria-label="Minimize player"><span aria-hidden="true">&#8722;</span></button>
             <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
           </div>
@@ -305,13 +307,46 @@
               <span id="videoDuration" class="video-time">0:00</span>
               <button id="videoMute" class="video-control-button" type="button" title="Mute" aria-label="Mute">&#128266;</button>
               <input id="videoVolume" class="video-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+              <button id="videoShuffle" class="video-control-button hidden" type="button" title="Enable shuffle" aria-label="Enable shuffle" aria-pressed="false">&#8644;</button>
               <button id="videoPictureInPicture" class="video-control-button" type="button" title="Picture in Picture" aria-label="Picture in Picture">&#9635;</button>
               <button id="videoFullscreen" class="video-control-button" type="button" title="Fullscreen" aria-label="Fullscreen">&#9974;</button>
             </div>
           </div>
         </div>
-        <p id="playerStatus" class="status"></p>
+        <p id="playerStatus" class="status hidden"></p>
+        <aside id="watchTogetherPanel" class="watch-together-panel hidden" aria-label="Watch Together participants and chat">
+          <div class="watch-together-panel-heading">
+            <div><p class="eyebrow">Watch Together</p><strong id="watchTogetherRoomStatus">Waiting for the host</strong></div>
+            <button id="closeWatchTogetherPanel" class="music-icon-button" type="button" title="Close panel" aria-label="Close panel">x</button>
+          </div>
+          <div id="watchTogetherHostControls" class="watch-together-host-controls hidden">
+            <label class="checkbox-row"><input id="watchTogetherEveryoneControls" type="checkbox"> Everyone can control playback</label>
+            <button id="copyWatchTogetherInvite" class="secondary-button compact-button" type="button">Copy invite link</button>
+            <input id="watchTogetherInviteFallback" class="hidden" type="text" readonly aria-label="Watch Together invite URL">
+            <button id="closeWatchTogetherRoom" class="secondary-button compact-button" type="button">Close room</button>
+          </div>
+          <div class="watch-together-participants-section">
+            <p class="eyebrow">Participants</p>
+            <div id="watchTogetherParticipants" class="watch-together-participants"></div>
+          </div>
+          <div id="watchTogetherChat" class="watch-together-chat" aria-live="polite"></div>
+          <form id="watchTogetherChatForm" class="watch-together-chat-form">
+            <input id="watchTogetherChatInput" type="text" maxlength="500" autocomplete="off" placeholder="Message the room">
+            <button class="primary-button compact-button" type="submit">Send</button>
+          </form>
+        </aside>
       </div>
+    </div>
+
+    <div id="watchTogetherJoinOverlay" class="choice-overlay hidden" aria-hidden="true">
+      <form id="watchTogetherJoinForm" class="choice-modal watch-together-join-modal">
+        <p class="eyebrow">Watch Together</p>
+        <h2>Join the room</h2>
+        <p id="watchTogetherJoinPrompt">Choose a temporary name for this room.</p>
+        <input id="watchTogetherGuestName" type="text" maxlength="32" autocomplete="nickname" placeholder="Your name" required>
+        <button class="primary-button" type="submit">Join</button>
+        <p id="watchTogetherJoinStatus" class="error"></p>
+      </form>
     </div>
 
     <aside id="videoMiniPlayer" class="video-mini-player hidden" aria-hidden="true">
@@ -324,7 +359,7 @@
         <button id="closeVideoMiniPlayer" class="music-icon-button" type="button" title="Close player" aria-label="Close player">x</button>
       </div>
       <div id="videoMiniPlayerSlot" class="video-mini-player-slot"></div>
-      <p id="videoMiniStatus" class="status"></p>
+      <p id="videoMiniStatus" class="status hidden"></p>
     </aside>
 
     <aside id="musicPlayer" class="music-player hidden" aria-hidden="true">
@@ -347,7 +382,7 @@
       <div class="music-player-volume">
         <button id="musicMute" class="music-command-button" type="button">Mute</button>
         <input id="musicVolume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
-        <p id="musicPlayerStatus" class="status"></p>
+        <p id="musicPlayerStatus" class="status hidden"></p>
       </div>
     </aside>
 
@@ -364,6 +399,18 @@
             <button id="closeDownloadPanel" class="secondary-button" type="button">Close</button>
           </div>
         </form>
+        <section id="channelDownloadChoice" class="live-download-choice hidden">
+          <div>
+            <p class="eyebrow">YouTube channel</p>
+            <strong id="channelDownloadTitle"></strong>
+            <p>Download the current channel once, or subscribe and continue downloading new uploads.</p>
+          </div>
+          <div class="action-row">
+            <button id="downloadChannel" class="primary-button" type="button">Download channel</button>
+            <button id="subscribeChannel" class="secondary-button" type="button">Subscribe</button>
+            <button id="cancelChannelChoice" class="secondary-button" type="button">Back</button>
+          </div>
+        </section>
         <section id="liveDownloadChoice" class="live-download-choice hidden">
           <div>
             <p class="eyebrow">Live stream</p>
@@ -848,7 +895,7 @@
                   <div class="metadata-source-setting">
                     <span>Metadata source</span>
                     <div class="segmented-control metadata-source-control" role="group" aria-label="Metadata source">
-                      <button id="settingsMetadataProvidersMode" class="active" type="button" aria-pressed="true">TMDb and MusicBrainz</button>
+                      <button id="settingsMetadataProvidersMode" class="active" type="button" aria-pressed="true">TMDb and Deezer</button>
                       <button id="settingsMetadataCustomMode" type="button" aria-pressed="false">Custom</button>
                     </div>
                   </div>
@@ -890,6 +937,7 @@
                   <label>Download path<input id="settingsYtDlpPath" type="text" autocomplete="off" placeholder="C:\MediaBaker\downloads"></label>
                   <label>Library title<input id="settingsYtDlpTitle" type="text" autocomplete="off"></label>
                   <label class="settings-toggle ytdlp-playlist-toggle"><input id="settingsYtDlpPlaylists" type="checkbox"> Allow playlists from other providers</label>
+                  <label>Channel check interval hours<input id="settingsYtDlpSubscriptionHours" type="number" min="1" step="1"></label>
                   <div class="action-row ytdlp-settings-actions">
                     <button id="settingsYtDlpUpdate" class="secondary-button settings-action-button" type="button">Update YT-DLP</button>
                     <button id="settingsYtDlpUploadCookies" class="secondary-button settings-action-button" type="button">Upload cookies.txt</button>
@@ -897,6 +945,20 @@
                     <input id="settingsYtDlpCookieFile" class="hidden" type="file" accept=".txt,text/plain">
                   </div>
                   <p id="settingsYtDlpStatus" class="status ytdlp-settings-status"></p>
+                  <section class="ytdlp-subscriptions" aria-labelledby="ytdlpSubscriptionsTitle">
+                    <div class="ytdlp-subscriptions-heading">
+                      <div>
+                        <h3 id="ytdlpSubscriptionsTitle">YouTube channel subscriptions</h3>
+                        <p>New uploads are downloaded into a folder named after the channel.</p>
+                      </div>
+                    </div>
+                    <div class="ytdlp-subscription-add">
+                      <label>Channel URL<input id="settingsYtDlpSubscriptionUrl" type="url" autocomplete="off" placeholder="https://www.youtube.com/@channel"></label>
+                      <button id="settingsYtDlpAddSubscription" class="secondary-button settings-action-button" type="button">Add channel</button>
+                    </div>
+                    <p id="settingsYtDlpSubscriptionStatus" class="status"></p>
+                    <div id="settingsYtDlpSubscriptions" class="ytdlp-subscription-list"></div>
+                  </section>
                 </div>
               </fieldset>
               <fieldset>
@@ -1035,7 +1097,12 @@
                 <h2>Currently Playing</h2>
               </div>
             </div>
+            <div class="segmented-control admin-activity-tabs">
+              <button id="currentlyPlayingPlaybackTab" class="active" type="button">Playback</button>
+              <button id="currentlyPlayingRoomsTab" type="button">Watch Together</button>
+            </div>
             <div id="currentlyPlayingList" class="library-manager-list"></div>
+            <div id="watchTogetherAdminList" class="library-manager-list hidden"></div>
           </section>
           <section id="adminHistoryPage" class="admin-page hidden">
             <div class="admin-page-heading">

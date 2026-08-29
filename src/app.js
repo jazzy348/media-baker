@@ -33,6 +33,8 @@ const { UpdateService } = require("./services/updateService");
 const { BackupService } = require("./services/backupService");
 const { OptimiserService } = require("./services/optimiserService");
 const { TaskService } = require("./services/taskService");
+const { WatchTogetherStore } = require("./services/watchTogetherStore");
+const { WatchTogetherService } = require("./services/watchTogetherService");
 const { SkipMarkerStore } = require("./services/skipMarkerStore");
 const { SkipDetectionWorkerClient } = require("./services/skipDetectionWorkerClient");
 const { OpenMovieIdStore } = require("./services/openMovieIdStore");
@@ -41,7 +43,8 @@ const { OpenMovieCapabilityService } = require("./services/openMovieCapabilitySe
 const { OpenMoviePosterAtlasStore } = require("./services/openMoviePosterAtlasStore");
 const { OpenMoviePosterAtlasService } = require("./services/openMoviePosterAtlasService");
 const { OpenMovieArtworkService } = require("./services/openMovieArtworkService");
-const { createAuthMiddleware, createStreamAuthMiddleware } = require("./middleware/auth");
+const { PlaybackSyncService } = require("./services/playbackSyncService");
+const { createAuthMiddleware, createStreamAuthMiddleware, createWatchTogetherStreamMiddleware } = require("./middleware/auth");
 const createAuthRoutes = require("./routes/auth");
 const createAdminRoutes = require("./routes/admin");
 const createHealthRoutes = require("./routes/health");
@@ -58,6 +61,7 @@ const createDocsRoutes = require("./routes/docs");
 const createAppInfoRoutes = require("./routes/appInfo");
 const createBrandingRoutes = require("./routes/branding");
 const createOpenMovieRoutes = require("./routes/openMovie");
+const createWatchTogetherRoutes = require("./routes/watchTogether");
 const logger = require("./utils/logger");
 
 async function createApp() {
@@ -108,6 +112,12 @@ async function createApp() {
       res.setHeader("Cache-Control", "no-cache, must-revalidate");
     }
   }));
+  app.get("/watch-ended", (req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    res.sendFile(path.join(publicPath, "watch-together-ended.html"), (err) => {
+      if (err) next(err);
+    });
+  });
   const cachedImages = new CachedImageService(config, imageProcessor);
   const progressStore = new PlaybackProgressStore(config);
   const progress = new PlaybackProgressService(config, progressStore);
@@ -123,6 +133,7 @@ async function createApp() {
   }
   const metadataStore = new MetadataStore(config);
   const metadata = new MetadataService(config, metadataStore, ffmpeg, cachedImages);
+  const playbackSync = new PlaybackSyncService({ accountService, mediaIndex, metadataStore, progress });
   const subtitles = new SubtitleService(config);
   const openMovieIdStore = new OpenMovieIdStore(config);
   const openMovieArtwork = new OpenMovieArtworkService(
@@ -142,6 +153,7 @@ async function createApp() {
   const openMovie = new OpenMovieService(mediaIndex, openMovieIdStore, metadata, ffmpeg, subtitles, openMoviePosterAtlases);
   const openMovieCapabilities = new OpenMovieCapabilityService(appSettings.openMovieEncryptionKey());
   mediaIndex.addUpdateListener(async (libraryKey, details = {}) => {
+    playbackSync.invalidateCatalog();
     hls.queueKeyframeIndex(details.changedMedia);
     await keyframes.removeMany(details.removedMedia);
     mediaIndex.consumeChangedVideoMedia();
@@ -160,7 +172,17 @@ async function createApp() {
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
   const playbackTokens = new PlaybackTokenService(playbackSecret, config.hls.ttlSeconds);
-  const ytdlp = new YtDlpService(config, ffmpeg);
+  const watchTogetherStore = new WatchTogetherStore(config);
+  const watchTogether = new WatchTogetherService({
+    store: watchTogetherStore,
+    mediaIndex,
+    playbackTokens,
+    progress,
+    playbackSync,
+    skipDetection
+  });
+  await watchTogether.init();
+  const ytdlp = new YtDlpService(config, ffmpeg, appSettings);
   const ytdlpRelay = new YtDlpRelayService(config, ffmpeg);
   const iptv = new IptvService(config, ffmpeg, cachedImages);
   const updates = new UpdateService(config);
@@ -197,6 +219,7 @@ async function createApp() {
     fallbackStream,
     metadataStore,
     metadata,
+    playbackSync,
     openMovieIdStore,
     openMovieArtwork,
     openMoviePosterAtlasStore,
@@ -214,6 +237,8 @@ async function createApp() {
     appSettings,
     hardware,
     playbackTokens,
+    watchTogetherStore,
+    watchTogether,
     ytdlp,
     ytdlpRelay,
     iptv,
@@ -248,15 +273,23 @@ async function createApp() {
   app.use("/api/streams", createStreamAuthMiddleware(playbackTokens), createStreamRoutes(app.locals.services));
   app.use("/api/relay-streams", createStreamAuthMiddleware(playbackTokens), createYtDlpRelayPlaybackRoutes(app.locals.services));
   app.use("/api/auth", createAuthRoutes(app.locals.services));
+  app.use("/api/watch-together", createWatchTogetherRoutes(app.locals.services));
   app.use("/api/docs", createDocsRoutes());
   app.get(["/", "/index.html"], serveWebApp);
   app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
+  app.get(/^\/watch\/[^/]+\/?$/, serveWebApp);
   app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
   app.use(
     "/api/web-streams",
     createAuthMiddleware(accountService, libraryService),
     createStreamAuthMiddleware(playbackTokens),
     createStreamRoutes(app.locals.services, { surface: "web" })
+  );
+  app.use(
+    "/api/watch-streams",
+    createStreamAuthMiddleware(playbackTokens),
+    createWatchTogetherStreamMiddleware(watchTogether),
+    createStreamRoutes(app.locals.services, { surface: "watch" })
   );
   app.use("/api/openmovie", createOpenMovieRoutes(app.locals.services));
   app.use(createAuthMiddleware(accountService, libraryService));
@@ -334,7 +367,8 @@ function shouldServeFallbackStream(req, fallbackStream) {
 }
 
 function isWebStreamRequest(req) {
-  return String(req.originalUrl || "").startsWith("/api/web-streams/");
+  const url = String(req.originalUrl || "");
+  return url.startsWith("/api/web-streams/") || url.startsWith("/api/watch-streams/");
 }
 
 function isBrowserRequest(req) {

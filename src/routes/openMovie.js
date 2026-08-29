@@ -36,17 +36,11 @@ module.exports = function createOpenMovieRoutes(services) {
     next();
   });
 
-  router.get("/auth", createApiKeyAuthMiddleware(accountService), (req, res) => {
-    res.json(openMovieCapabilities.bootstrap(req.apiKeyId));
-  });
-
-  router.get("/auth/future-urls", createApiKeyAuthMiddleware(accountService), async (req, res, next) => {
+  router.get("/auth", createApiKeyAuthMiddleware(accountService), async (req, res, next) => {
     try {
-      const count = futureUrlCount(req.query.count);
-      res.json(openMovieCapabilities.futureUrls(
+      res.json(openMovieCapabilities.bootstrap(
         req.apiKeyId,
-        await openMovieIdStore.peekNextIds(),
-        count
+        await openMovieIdStore.peekNextIds()
       ));
     } catch (err) {
       next(err);
@@ -92,6 +86,17 @@ module.exports = function createOpenMovieRoutes(services) {
               items.length
             ));
           }
+        case OPERATIONS.FUTURE_URLS:
+          return res.json(openMovieCapabilities.futureUrls(
+            capability.apiKeyId,
+            {
+              movie: capabilityInteger(capability, 0),
+              episode: capabilityInteger(capability, 1),
+              variant: capabilityInteger(capability, 2),
+              onDeckPage: capabilityInteger(capability, 3)
+            },
+            futureUrlCount(req.query.count)
+          ));
         case OPERATIONS.MOVIE_POSTER:
           return serveItemPoster("movie", capability, access, services, req, res, next);
         case OPERATIONS.EPISODE_POSTER:
@@ -220,6 +225,7 @@ function capabilityInteger(capability, index, fallback = null) {
 }
 
 function futureUrlCount(value) {
+  if (value === undefined || value === "") return 1000;
   const count = Number.parseInt(value, 10);
   if (!Number.isSafeInteger(count) || count < 1 || count > 5000) {
     throw httpError(400, "count must be an integer between 1 and 5000");

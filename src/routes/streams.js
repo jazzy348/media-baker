@@ -7,7 +7,7 @@ const logger = require("../utils/logger");
 
 module.exports = function createStreamRoutes({ mediaIndex, hls, images, playbackTokens, progress, skipDetection }, options = {}) {
   const router = express.Router();
-  const streamSurface = options.surface === "web" ? "web" : "copy";
+  const streamSurface = ["web", "watch"].includes(options.surface) ? options.surface : "copy";
 
   router.get("/:mediaType/:id/image", async (req, res, next) => {
     try {
@@ -50,7 +50,7 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
         res.type(contentTypeFor(req.params.filename));
         res.send(rewritePlaylistUrls(
           playlist,
-          `/api/${streamSurface === "web" ? "web-streams" : "streams"}/hls/${req.params.cacheKey}`,
+          `${streamBasePath(streamSurface)}/hls/${req.params.cacheKey}`,
           req.playbackToken,
           streamAuthQuery(req, streamSurface)
         ));
@@ -87,7 +87,7 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
 
         const progressLibrary = mediaIndex.libraryForKey(req.playbackTokenPayload.mediaType);
         if (progress
-          && streamSurface !== "web"
+          && streamSurface === "copy"
           && progressLibrary
           && req.playbackTokenPayload.mediaType
           && req.playbackTokenPayload.mediaId) {
@@ -133,7 +133,7 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       logger.info(`[stream] serving playlist cacheKey=${stream.cacheKey} playlist="${stream.playlistPath}"`);
       const playlist = await hls.getPlaylist(stream.cacheKey);
       const library = mediaIndex.libraryForKey(req.params.mediaType);
-      const completionStartSeconds = streamSurface !== "web"
+      const completionStartSeconds = streamSurface === "copy"
         && library
         && library.type === "tv"
         && skipDetection
@@ -142,7 +142,15 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
         : null;
       const hlsToken = streamSurface === "web"
         ? playbackTokens.createWebHlsToken(stream.cacheKey, req.params.mediaType, req.params.id, req.playbackTokenPayload.userId || "global")
-        : playbackTokens.createCopyHlsToken(
+        : streamSurface === "watch"
+          ? playbackTokens.createWatchHlsToken(
+            stream.cacheKey,
+            req.playbackTokenPayload.roomId,
+            req.playbackTokenPayload.participantId,
+            req.params.mediaType,
+            req.params.id
+          )
+          : playbackTokens.createCopyHlsToken(
           stream.cacheKey,
           req.params.mediaType,
           req.params.id,
@@ -152,7 +160,7 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, playback
       res.type(contentTypeFor("master.m3u8"));
       res.send(rewritePlaylistUrls(
         playlist,
-        `/api/${streamSurface === "web" ? "web-streams" : "streams"}/hls/${stream.cacheKey}`,
+        `${streamBasePath(streamSurface)}/hls/${stream.cacheKey}`,
         hlsToken,
         streamAuthQuery(req, streamSurface)
       ));
@@ -203,6 +211,12 @@ function canUseWebStream(req, mediaType, surface) {
   if (req.allowedLibraryKey) return req.allowedLibraryKey === mediaType;
   if (Array.isArray(req.allowedLibraryKeys)) return req.allowedLibraryKeys.includes(mediaType);
   return true;
+}
+
+function streamBasePath(surface) {
+  if (surface === "web") return "/api/web-streams";
+  if (surface === "watch") return "/api/watch-streams";
+  return "/api/streams";
 }
 
 function streamAuthQuery(req, surface) {

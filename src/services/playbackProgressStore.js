@@ -167,6 +167,52 @@ class PlaybackProgressStore {
     return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
   }
 
+  async saveImported(record) {
+    await this.init();
+    const updated = normalizeRecord(record);
+    const updatedAt = validIso(updated.updatedAt) || new Date().toISOString();
+    const createdAt = validIso(updated.createdAt) || updatedAt;
+
+    if (this.config.mysql.enabled) {
+      await this.pool.execute(
+        `INSERT INTO playback_progress
+          (user_id, media_type, media_id, status, position_seconds, duration_seconds,
+           cache_key, created_at, updated_at, watched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+          status = VALUES(status),
+          position_seconds = VALUES(position_seconds),
+          duration_seconds = VALUES(duration_seconds),
+          cache_key = VALUES(cache_key),
+          updated_at = VALUES(updated_at),
+          watched_at = VALUES(watched_at)`,
+        [
+          updated.userId,
+          updated.mediaType,
+          updated.mediaId,
+          updated.status,
+          updated.positionSeconds,
+          updated.durationSeconds,
+          updated.cacheKey,
+          new Date(createdAt),
+          new Date(updatedAt),
+          updated.watchedAt ? new Date(updated.watchedAt) : null
+        ]
+      );
+      return { ...updated, createdAt, updatedAt };
+    }
+
+    const data = await this.readJson();
+    data[recordKey(updated.userId, updated.mediaType, updated.mediaId)] = {
+      ...updated,
+      createdAt,
+      updatedAt
+    };
+    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
+    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
+    return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
+  }
+
   async removeUser(userId) {
     await this.init();
     const normalizedUserId = String(userId || "").trim();
@@ -305,6 +351,11 @@ function fromMysqlRecord(row) {
 function validTime(value) {
   const timestamp = Date.parse(value || "");
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function validIso(value) {
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
 function timeMs(value) {

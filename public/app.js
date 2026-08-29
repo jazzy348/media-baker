@@ -54,7 +54,8 @@ const state = {
   updateStatus: null,
   ytdlpAdminStatus: null,
   branding: null,
-  dismissedUpdateVersion: null
+  dismissedUpdateVersion: null,
+  selectedPlaybackShuffle: null
 };
 
 const LIBRARY_PAGE_SIZE = 72;
@@ -141,6 +142,7 @@ const els = {
   playStream: document.getElementById("playStream"),
   pregenerateHls: document.getElementById("pregenerateHls"),
   copyUrl: document.getElementById("copyUrl"),
+  startWatchTogether: document.getElementById("startWatchTogether"),
   rematchMetadata: document.getElementById("rematchMetadata"),
   markWatched: document.getElementById("markWatched"),
   removeOnDeck: document.getElementById("removeOnDeck"),
@@ -186,12 +188,31 @@ const els = {
   videoDuration: document.getElementById("videoDuration"),
   videoMute: document.getElementById("videoMute"),
   videoVolume: document.getElementById("videoVolume"),
+  videoShuffle: document.getElementById("videoShuffle"),
   videoPictureInPicture: document.getElementById("videoPictureInPicture"),
   videoFullscreen: document.getElementById("videoFullscreen"),
   webPlayer: document.getElementById("webPlayer"),
   playerCategory: document.getElementById("playerCategory"),
   playerTitle: document.getElementById("playerTitle"),
   playerStatus: document.getElementById("playerStatus"),
+  toggleWatchTogetherPanel: document.getElementById("toggleWatchTogetherPanel"),
+  watchTogetherPanel: document.getElementById("watchTogetherPanel"),
+  closeWatchTogetherPanel: document.getElementById("closeWatchTogetherPanel"),
+  watchTogetherRoomStatus: document.getElementById("watchTogetherRoomStatus"),
+  watchTogetherHostControls: document.getElementById("watchTogetherHostControls"),
+  watchTogetherEveryoneControls: document.getElementById("watchTogetherEveryoneControls"),
+  copyWatchTogetherInvite: document.getElementById("copyWatchTogetherInvite"),
+  watchTogetherInviteFallback: document.getElementById("watchTogetherInviteFallback"),
+  closeWatchTogetherRoom: document.getElementById("closeWatchTogetherRoom"),
+  watchTogetherParticipants: document.getElementById("watchTogetherParticipants"),
+  watchTogetherChat: document.getElementById("watchTogetherChat"),
+  watchTogetherChatForm: document.getElementById("watchTogetherChatForm"),
+  watchTogetherChatInput: document.getElementById("watchTogetherChatInput"),
+  watchTogetherJoinOverlay: document.getElementById("watchTogetherJoinOverlay"),
+  watchTogetherJoinForm: document.getElementById("watchTogetherJoinForm"),
+  watchTogetherJoinPrompt: document.getElementById("watchTogetherJoinPrompt"),
+  watchTogetherGuestName: document.getElementById("watchTogetherGuestName"),
+  watchTogetherJoinStatus: document.getElementById("watchTogetherJoinStatus"),
   videoMiniPlayer: document.getElementById("videoMiniPlayer"),
   videoMiniPlayerDrag: document.getElementById("videoMiniPlayerDrag"),
   videoMiniPlayerSlot: document.getElementById("videoMiniPlayerSlot"),
@@ -219,6 +240,11 @@ const els = {
   downloadForm: document.getElementById("downloadForm"),
   downloadUrlInput: document.getElementById("downloadUrlInput"),
   startDownload: document.getElementById("startDownload"),
+  channelDownloadChoice: document.getElementById("channelDownloadChoice"),
+  channelDownloadTitle: document.getElementById("channelDownloadTitle"),
+  downloadChannel: document.getElementById("downloadChannel"),
+  subscribeChannel: document.getElementById("subscribeChannel"),
+  cancelChannelChoice: document.getElementById("cancelChannelChoice"),
   liveDownloadChoice: document.getElementById("liveDownloadChoice"),
   liveDownloadTitle: document.getElementById("liveDownloadTitle"),
   recordLiveStream: document.getElementById("recordLiveStream"),
@@ -360,6 +386,9 @@ const els = {
   adminTasksPage: document.getElementById("adminTasksPage"),
   adminHardwarePage: document.getElementById("adminHardwarePage"),
   adminCurrentlyPlayingPage: document.getElementById("adminCurrentlyPlayingPage"),
+  currentlyPlayingPlaybackTab: document.getElementById("currentlyPlayingPlaybackTab"),
+  currentlyPlayingRoomsTab: document.getElementById("currentlyPlayingRoomsTab"),
+  watchTogetherAdminList: document.getElementById("watchTogetherAdminList"),
   adminLogsPage: document.getElementById("adminLogsPage"),
   adminHistoryPage: document.getElementById("adminHistoryPage"),
   accountForm: document.getElementById("accountForm"),
@@ -453,11 +482,16 @@ const els = {
   settingsYtDlpPath: document.getElementById("settingsYtDlpPath"),
   settingsYtDlpTitle: document.getElementById("settingsYtDlpTitle"),
   settingsYtDlpPlaylists: document.getElementById("settingsYtDlpPlaylists"),
+  settingsYtDlpSubscriptionHours: document.getElementById("settingsYtDlpSubscriptionHours"),
   settingsYtDlpUpdate: document.getElementById("settingsYtDlpUpdate"),
   settingsYtDlpUploadCookies: document.getElementById("settingsYtDlpUploadCookies"),
   settingsYtDlpRemoveCookies: document.getElementById("settingsYtDlpRemoveCookies"),
   settingsYtDlpCookieFile: document.getElementById("settingsYtDlpCookieFile"),
   settingsYtDlpStatus: document.getElementById("settingsYtDlpStatus"),
+  settingsYtDlpSubscriptionUrl: document.getElementById("settingsYtDlpSubscriptionUrl"),
+  settingsYtDlpAddSubscription: document.getElementById("settingsYtDlpAddSubscription"),
+  settingsYtDlpSubscriptionStatus: document.getElementById("settingsYtDlpSubscriptionStatus"),
+  settingsYtDlpSubscriptions: document.getElementById("settingsYtDlpSubscriptions"),
   settingsIptvEnabled: document.getElementById("settingsIptvEnabled"),
   iptvSettingsBody: document.getElementById("iptvSettingsBody"),
   settingsIptvSourceType: document.getElementById("settingsIptvSourceType"),
@@ -521,9 +555,11 @@ let autoAdvanceInFlight = false;
 let musicSeeking = false;
 let videoSeeking = false;
 let videoControlsHideTimer = null;
+let playerStatusHideTimer = null;
 let activeSkipMarkers = [];
 let dismissedSkipMarkers = new Set();
 let activePlaybackMedia = null;
+let activePlaybackShuffle = null;
 let webProgressLastReportedAt = 0;
 let webProgressRequest = null;
 let seekEndRecoveryAttempted = false;
@@ -550,6 +586,7 @@ let downloadHomeRefreshPromise = null;
 let onDeckRefreshTimer = null;
 let onDeckRefreshPromise = null;
 let hasActiveDownloads = false;
+let pendingChannelDownload = null;
 let pendingLiveDownload = null;
 let pendingLiveRelay = null;
 let liveTvRefreshTimer = null;
@@ -561,6 +598,11 @@ let routeRenderDepth = 0;
 let userHistoryItems = [];
 let userHistoryNextOffset = null;
 let userHistoryLoading = false;
+let watchTogetherSession = null;
+let pendingWatchTogetherInvite = null;
+let pendingWatchTogetherState = null;
+let watchTogetherSuppressControlsUntil = 0;
+let currentlyPlayingAdminView = "playback";
 const downloadStatuses = new Map();
 
 els.loginForm.addEventListener("submit", async (event) => {
@@ -640,9 +682,12 @@ els.liveTvLater.addEventListener("click", () => shiftLiveTvGuide(1));
 els.liveTvFilter.addEventListener("input", filterLiveTvChannels);
 els.closeDownloadPanel.addEventListener("click", closeDownloadPanel);
 els.downloadForm.addEventListener("submit", startYtDlpDownload);
+els.downloadChannel.addEventListener("click", downloadYtDlpChannel);
+els.subscribeChannel.addEventListener("click", subscribeYtDlpChannel);
+els.cancelChannelChoice.addEventListener("click", clearYtDlpDownloadChoice);
 els.recordLiveStream.addEventListener("click", recordYtDlpLiveStream);
 els.relayLiveStream.addEventListener("click", relayYtDlpLiveStream);
-els.cancelLiveChoice.addEventListener("click", clearLiveDownloadChoice);
+els.cancelLiveChoice.addEventListener("click", clearYtDlpDownloadChoice);
 els.playLiveRelay.addEventListener("click", playYtDlpLiveRelay);
 els.copyLiveRelay.addEventListener("click", copyYtDlpLiveRelay);
 els.closeLiveRelay.addEventListener("click", closeDownloadPanel);
@@ -695,6 +740,17 @@ els.settingsYtDlpUpdate.addEventListener("click", forceYtDlpUpdate);
 els.settingsYtDlpUploadCookies.addEventListener("click", () => els.settingsYtDlpCookieFile.click());
 els.settingsYtDlpCookieFile.addEventListener("change", uploadYtDlpCookies);
 els.settingsYtDlpRemoveCookies.addEventListener("click", removeYtDlpCookies);
+els.settingsYtDlpAddSubscription.addEventListener("click", addYtDlpSubscription);
+els.settingsYtDlpSubscriptionUrl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addYtDlpSubscription();
+  }
+});
+els.settingsYtDlpSubscriptions.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-ytdlp-subscription]");
+  if (button) removeYtDlpSubscription(button.dataset.removeYtdlpSubscription);
+});
 els.installUpdateBanner.addEventListener("click", installAvailableUpdate);
 els.dismissUpdateBanner.addEventListener("click", dismissUpdateBanner);
 els.settingsIptvReload.addEventListener("click", forceReloadIptvSources);
@@ -772,6 +828,7 @@ els.proTv3dSelect.addEventListener("change", updateProTv3dStatus);
 els.playStream.addEventListener("click", playStream);
 els.pregenerateHls.addEventListener("click", pregenerateHls);
 els.copyUrl.addEventListener("click", copyStreamUrl);
+els.startWatchTogether.addEventListener("click", startWatchTogether);
 els.rematchMetadata.addEventListener("click", rematchMetadata);
 els.metadataSearchButton.addEventListener("click", searchMetadataCandidates);
 els.metadataApplyMatch.addEventListener("click", applyMetadataMatch);
@@ -792,6 +849,19 @@ els.seriesPosterOverlay.addEventListener("click", (event) => {
 els.markWatched.addEventListener("click", markSelectedWatched);
 els.removeOnDeck.addEventListener("click", removeSelectedOnDeck);
 els.closePlayer.addEventListener("click", closePlayer);
+els.toggleWatchTogetherPanel.addEventListener("click", () => {
+  setWatchTogetherPanelOpen(els.watchTogetherPanel.classList.contains("hidden"));
+});
+els.closeWatchTogetherPanel.addEventListener("click", () => setWatchTogetherPanelOpen(false));
+els.watchTogetherJoinForm.addEventListener("submit", submitWatchTogetherGuestName);
+els.watchTogetherChatForm.addEventListener("submit", sendWatchTogetherChat);
+els.watchTogetherEveryoneControls.addEventListener("change", changeWatchTogetherControls);
+els.copyWatchTogetherInvite.addEventListener("click", copyWatchTogetherInvite);
+els.closeWatchTogetherRoom.addEventListener("click", closeWatchTogetherRoom);
+els.watchTogetherParticipants.addEventListener("click", kickWatchTogetherParticipant);
+els.currentlyPlayingPlaybackTab.addEventListener("click", () => setCurrentlyPlayingAdminView("playback"));
+els.currentlyPlayingRoomsTab.addEventListener("click", () => setCurrentlyPlayingAdminView("rooms"));
+els.watchTogetherAdminList.addEventListener("click", closeAdminWatchTogetherRoom);
 els.minimizeVideoPlayer.addEventListener("click", minimizeVideoPlayback);
 els.restoreVideoPlayer.addEventListener("click", restoreVideoPlayback);
 els.closeVideoMiniPlayer.addEventListener("click", closePlayer);
@@ -803,11 +873,22 @@ els.webPlayer.addEventListener("pause", updateMusicPlayerControls);
 els.webPlayer.addEventListener("timeupdate", updateMusicPlayerControls);
 els.webPlayer.addEventListener("timeupdate", trackVideoPlaybackContinuity);
 els.webPlayer.addEventListener("timeupdate", () => reportWebPlaybackProgress());
+els.webPlayer.addEventListener("timeupdate", () => reportWatchTogetherProgress());
 els.webPlayer.addEventListener("loadedmetadata", updateMusicPlayerControls);
+els.webPlayer.addEventListener("loadedmetadata", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("progress", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("canplay", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("canplaythrough", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("waiting", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("stalled", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("seeking", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("seeked", notifyWatchTogetherReady);
 els.webPlayer.addEventListener("durationchange", updateMusicPlayerControls);
 els.webPlayer.addEventListener("volumechange", updateMusicPlayerControls);
 els.webPlayer.addEventListener("play", updateVideoPlayerControls);
 els.webPlayer.addEventListener("pause", updateVideoPlayerControls);
+els.webPlayer.addEventListener("play", () => sendWatchTogetherLocalState("play"));
+els.webPlayer.addEventListener("pause", () => sendWatchTogetherLocalState("pause"));
 els.webPlayer.addEventListener("timeupdate", updateVideoPlayerControls);
 els.webPlayer.addEventListener("loadedmetadata", updateVideoPlayerControls);
 els.webPlayer.addEventListener("durationchange", updateVideoPlayerControls);
@@ -820,16 +901,27 @@ els.videoPlayPause.addEventListener("click", toggleVideoPlayback);
 els.videoMute.addEventListener("click", toggleVideoMute);
 els.videoSeek.addEventListener("pointerdown", () => { videoSeeking = true; });
 els.videoSeek.addEventListener("input", seekVideoPlayback);
-els.videoSeek.addEventListener("change", () => { videoSeeking = false; updateVideoPlayerControls(); });
+els.videoSeek.addEventListener("change", finishVideoSeek);
 els.videoVolume.addEventListener("input", updateVideoVolume);
+els.videoShuffle.addEventListener("click", toggleVideoShuffle);
 els.videoPictureInPicture.addEventListener("click", toggleVideoPictureInPicture);
 els.videoFullscreen.addEventListener("click", toggleVideoFullscreen);
 els.videoSkipMarker.addEventListener("click", skipCurrentMarker);
 els.videoContinueMarker.addEventListener("click", dismissCurrentMarker);
-els.videoPlaybackSurface.addEventListener("pointermove", showVideoControls);
+const revealVideoControls = () => showVideoControls();
+els.videoPlaybackSurface.addEventListener("pointermove", revealVideoControls);
+els.videoPlaybackSurface.addEventListener("pointerdown", revealVideoControls);
+els.videoPlaybackSurface.addEventListener("mousemove", revealVideoControls);
+els.videoPlaybackSurface.addEventListener("touchstart", revealVideoControls, { passive: true });
 els.videoPlaybackSurface.addEventListener("pointerleave", scheduleVideoControlsHide);
-els.videoPlaybackSurface.addEventListener("focusin", showVideoControls);
+els.videoPlaybackSurface.addEventListener("focusin", revealVideoControls);
 els.videoPlaybackSurface.addEventListener("focusout", scheduleVideoControlsHide);
+document.addEventListener("pointermove", () => {
+  if (document.fullscreenElement === els.videoPlaybackSurface
+    || document.webkitFullscreenElement === els.videoPlaybackSurface) {
+    revealVideoControls();
+  }
+});
 document.addEventListener("fullscreenchange", updateVideoFullscreenControl);
 document.addEventListener("webkitfullscreenchange", updateVideoFullscreenControl);
 els.webPlayer.addEventListener("webkitbeginfullscreen", updateVideoFullscreenControl);
@@ -917,7 +1009,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 navigation.onChange((route) => {
-  if (!state.token && !state.shareToken) {
+  if (!state.token && !state.shareToken && route.name !== "watch") {
     return;
   }
   renderRoute(route).catch(() => {
@@ -929,6 +1021,7 @@ navigation.onChange((route) => {
 boot();
 
 async function boot() {
+  const initialRoute = navigation.readRoute();
   let status;
   try {
     status = await publicApi("/api/auth/status");
@@ -948,7 +1041,7 @@ async function boot() {
     return;
   }
 
-  if (!state.token && !state.shareToken) {
+  if (!state.token && !state.shareToken && initialRoute.name !== "watch") {
     els.loginOverlay.classList.remove("hidden");
     revealApp();
     return;
@@ -963,7 +1056,7 @@ async function boot() {
     }
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
-    await renderRoute(navigation.readRoute());
+    await renderRoute(initialRoute);
     refreshIptvAvailability();
     refreshSystemHealthInBackground();
     refreshUpdateStatusInBackground();
@@ -976,7 +1069,14 @@ async function boot() {
     setPlaybackPreferences(null);
     state.shareToken = "";
     updateAdminControls();
-    els.loginOverlay.classList.remove("hidden");
+    if (initialRoute.name === "watch") {
+      els.loginOverlay.classList.add("hidden");
+      await renderRoute(initialRoute).catch((routeError) => {
+        els.watchTogetherJoinStatus.textContent = routeError.message || "This Watch Together room is unavailable.";
+      });
+    } else {
+      els.loginOverlay.classList.remove("hidden");
+    }
   } finally {
     revealApp();
   }
@@ -998,6 +1098,13 @@ function applyFeatures(features) {
 async function renderRoute(route) {
   routeRenderDepth += 1;
   try {
+    if (route.name === "watch") {
+      await openWatchTogether(route.inviteToken);
+      return;
+    }
+    if (watchTogetherSession) {
+      closePlayer({ navigate: false });
+    }
     if (route.name === "history" && !state.shareToken) {
       await openHistoryView();
       return;
@@ -1447,7 +1554,7 @@ function card(item, options = {}) {
   return button;
 }
 
-async function openDetails(item) {
+async function openDetails(item, detailOptions = {}) {
   if (isShowCard(item)) {
     openShowView(item.mediaType, item.showId || item.id);
     return;
@@ -1466,6 +1573,9 @@ async function openDetails(item) {
   }
 
   state.selected = item;
+  state.selectedPlaybackShuffle = detailOptions.shuffle && isEpisodeItem(item)
+    ? createPlaybackShuffle(item, detailOptions.shuffleItems)
+    : null;
   state.options = null;
   els.copyStatus.textContent = "";
   hideManualCopyUrl();
@@ -1626,7 +1736,7 @@ function renderHierarchyNav(item) {
     els.hierarchyNav.classList.remove("hidden");
     els.hierarchyNav.append(
       hierarchyButton(item.albumName || "Album", () => openAlbumView(item.mediaType, item.artistId, item.albumId)),
-      hierarchyButton(item.artistName || "Artist", () => openArtistView(item.mediaType, item.artistId))
+      hierarchyButton(item.albumArtist || item.artistName || "Artist", () => openArtistView(item.mediaType, item.artistId))
     );
     return;
   }
@@ -1889,8 +1999,9 @@ function openRandomEpisode(mediaType, show) {
     return;
   }
 
-  const episode = episodes[Math.floor(Math.random() * episodes.length)];
-  openDetails(episodeItem(mediaType, show, episode));
+  const shuffleItems = episodes.map((episode) => episodeItem(mediaType, show, episode));
+  const episode = shuffleItems[Math.floor(Math.random() * shuffleItems.length)];
+  openDetails(episode, { shuffle: true, shuffleItems });
 }
 
 function showContentView({ title, subtitle, actions, content }) {
@@ -2564,7 +2675,9 @@ function taskRow(entry) {
   const element = document.createElement("section");
   element.className = `task-row state-${entry.state}`;
   const progress = entry.progress || {};
-  const percent = Number.isFinite(Number(progress.percent)) ? Math.round(Number(progress.percent) * 10) / 10 : null;
+  const percent = progress.percent != null && Number.isFinite(Number(progress.percent))
+    ? Math.round(Number(progress.percent) * 10) / 10
+    : null;
   const queueTotal = Number(entry.queue && entry.queue.total) || 0;
   const expanded = expandedTaskQueues.has(entry.id);
   const queue = taskQueuePages.get(entry.id);
@@ -3960,6 +4073,7 @@ function fillSettingsForm(settings, branding = null) {
   els.settingsYtDlpPath.value = ytdlp.downloadPath || "cache/yt-dlp";
   els.settingsYtDlpTitle.value = ytdlp.libraryTitle || "YT-DLP";
   els.settingsYtDlpPlaylists.checked = Boolean(ytdlp.allowPlaylists);
+  els.settingsYtDlpSubscriptionHours.value = Math.max(1, Math.round((ytdlp.subscriptionCheckIntervalSeconds ?? 86400) / 3600));
   els.settingsIptvEnabled.checked = Boolean(iptv.enabled);
   els.settingsIptvSourceType.value = iptv.sourceType === "hdhomerun" ? "hdhomerun" : "m3u";
   els.settingsIptvPlaylistUrl.value = iptv.playlistUrl || "";
@@ -4047,6 +4161,66 @@ function renderYtDlpAdminStatus(status) {
   els.settingsYtDlpStatus.textContent = details.join(" ");
   els.settingsYtDlpUpdate.disabled = !status.enabled || !status.available || Boolean(status.updating);
   els.settingsYtDlpRemoveCookies.disabled = !cookies.configured;
+  els.settingsYtDlpAddSubscription.disabled = !status.enabled || !status.available || Boolean(status.checkingSubscriptions);
+  renderYtDlpSubscriptions(status.subscriptions || []);
+}
+
+function renderYtDlpSubscriptions(subscriptions) {
+  if (subscriptions.length === 0) {
+    els.settingsYtDlpSubscriptions.innerHTML = '<p class="empty-state">No channel subscriptions.</p>';
+    return;
+  }
+  els.settingsYtDlpSubscriptions.innerHTML = subscriptions.map((subscription) => {
+    const activity = subscription.lastError
+      ? `<span class="ytdlp-subscription-error">Last check failed: ${escapeHtml(subscription.lastError)}</span>`
+      : subscription.lastDownloadedAt
+        ? `<span>Last new video: ${escapeHtml(formatDate(subscription.lastDownloadedAt))}</span>`
+        : subscription.lastCheckedAt
+          ? `<span>Last checked: ${escapeHtml(formatDate(subscription.lastCheckedAt))}</span>`
+          : "<span>Waiting for the first check.</span>";
+    return `
+      <div class="ytdlp-subscription-row">
+        <div class="ytdlp-subscription-details">
+          <strong>${escapeHtml(subscription.title)}</strong>
+          <span>${escapeHtml(subscription.folderName)}</span>
+          ${activity}
+        </div>
+        <button class="secondary-button" type="button" data-remove-ytdlp-subscription="${escapeHtml(subscription.id)}">Remove</button>
+      </div>`;
+  }).join("");
+}
+
+async function addYtDlpSubscription() {
+  const url = els.settingsYtDlpSubscriptionUrl.value.trim();
+  if (!url) return;
+  els.settingsYtDlpAddSubscription.disabled = true;
+  els.settingsYtDlpSubscriptionStatus.textContent = "Adding channel and starting its full download...";
+  try {
+    const result = await api("/api/admin/ytdlp/subscriptions", state.token, {
+      method: "POST",
+      body: JSON.stringify({ url })
+    });
+    els.settingsYtDlpSubscriptionUrl.value = "";
+    els.settingsYtDlpSubscriptionStatus.textContent = `${result.subscription.title} added. Existing videos are downloading.`;
+    renderYtDlpAdminStatus(result.status || {});
+  } catch (err) {
+    els.settingsYtDlpSubscriptionStatus.textContent = err.message || "Could not add the channel.";
+    els.settingsYtDlpAddSubscription.disabled = false;
+  }
+}
+
+async function removeYtDlpSubscription(id) {
+  const subscription = (state.ytdlpAdminStatus && state.ytdlpAdminStatus.subscriptions || [])
+    .find((entry) => entry.id === id);
+  if (!subscription || !window.confirm(`Stop downloading new videos from ${subscription.title}? Downloaded files will be kept.`)) return;
+  els.settingsYtDlpSubscriptionStatus.textContent = `Removing ${subscription.title}...`;
+  try {
+    const result = await api(`/api/admin/ytdlp/subscriptions/${encodeURIComponent(id)}`, state.token, { method: "DELETE" });
+    els.settingsYtDlpSubscriptionStatus.textContent = `${subscription.title} removed.`;
+    renderYtDlpAdminStatus(result.status || {});
+  } catch (err) {
+    els.settingsYtDlpSubscriptionStatus.textContent = err.message || "Could not remove the channel.";
+  }
 }
 
 async function forceYtDlpUpdate() {
@@ -4474,7 +4648,8 @@ function settingsFromForm() {
       enabled: els.settingsYtDlpEnabled.checked,
       downloadPath: els.settingsYtDlpPath.value.trim(),
       libraryTitle: els.settingsYtDlpTitle.value.trim() || "YT-DLP",
-      allowPlaylists: els.settingsYtDlpPlaylists.checked
+      allowPlaylists: els.settingsYtDlpPlaylists.checked,
+      subscriptionCheckIntervalSeconds: intInput(els.settingsYtDlpSubscriptionHours, 24, 1) * 3600
     },
     iptv: {
       enabled: els.settingsIptvEnabled.checked,
@@ -4698,7 +4873,7 @@ async function openDownloadPanel() {
   els.downloadOverlay.classList.remove("hidden");
   els.downloadOverlay.setAttribute("aria-hidden", "false");
   els.downloadStatus.textContent = "";
-  clearLiveDownloadChoice();
+  clearYtDlpDownloadChoice();
   await refreshYtDlpDownloads();
   startDownloadRefresh();
 }
@@ -4706,7 +4881,7 @@ async function openDownloadPanel() {
 function closeDownloadPanel() {
   els.downloadOverlay.classList.add("hidden");
   els.downloadOverlay.setAttribute("aria-hidden", "true");
-  clearLiveDownloadChoice();
+  clearYtDlpDownloadChoice();
   if (!hasActiveDownloads) {
     stopDownloadRefresh();
   }
@@ -4720,13 +4895,20 @@ async function startYtDlpDownload(event) {
   }
 
   els.startDownload.disabled = true;
-  clearLiveDownloadChoice();
+  clearYtDlpDownloadChoice();
   els.downloadStatus.textContent = "Checking URL...";
   try {
     const result = await api("/api/ytdlp/inspect", state.token, {
       method: "POST",
       body: JSON.stringify({ url })
     });
+    if (result.media && result.media.isChannel) {
+      pendingChannelDownload = result.media;
+      els.channelDownloadTitle.textContent = result.media.title || url;
+      els.channelDownloadChoice.classList.remove("hidden");
+      els.downloadStatus.textContent = "Choose whether to download once or subscribe.";
+      return;
+    }
     if (result.media && result.media.isLive) {
       pendingLiveDownload = result.media;
       els.liveDownloadTitle.textContent = result.media.title || url;
@@ -4742,13 +4924,41 @@ async function startYtDlpDownload(event) {
   }
 }
 
+async function downloadYtDlpChannel() {
+  if (!pendingChannelDownload) return;
+  setChannelChoiceDisabled(true);
+  els.downloadStatus.textContent = "Starting full channel download...";
+  try {
+    await queueYtDlpDownload(pendingChannelDownload.url, "channel-download");
+    clearYtDlpDownloadChoice();
+  } catch (err) {
+    els.downloadStatus.textContent = err.message || "Failed to start the channel download.";
+  } finally {
+    setChannelChoiceDisabled(false);
+  }
+}
+
+async function subscribeYtDlpChannel() {
+  if (!pendingChannelDownload) return;
+  setChannelChoiceDisabled(true);
+  els.downloadStatus.textContent = "Subscribing and starting full channel download...";
+  try {
+    await queueYtDlpDownload(pendingChannelDownload.url, "channel-subscribe");
+    clearYtDlpDownloadChoice();
+  } catch (err) {
+    els.downloadStatus.textContent = err.message || "Failed to subscribe to the channel.";
+  } finally {
+    setChannelChoiceDisabled(false);
+  }
+}
+
 async function recordYtDlpLiveStream() {
   if (!pendingLiveDownload) return;
   setLiveChoiceDisabled(true);
   els.downloadStatus.textContent = "Starting live recording...";
   try {
     await queueYtDlpDownload(pendingLiveDownload.url, "record");
-    clearLiveDownloadChoice();
+    clearYtDlpDownloadChoice();
   } catch (err) {
     els.downloadStatus.textContent = err.message || "Failed to start the live recording.";
   } finally {
@@ -4837,20 +5047,30 @@ async function queueYtDlpDownload(url, mode) {
     downloadStatuses.set(result.download.id, result.download.status);
   }
   els.downloadUrlInput.value = "";
-  els.downloadStatus.textContent = mode === "record" ? "Live recording started." : "Download started.";
+  els.downloadStatus.textContent = mode === "record"
+    ? "Live recording started."
+    : mode === "channel-subscribe"
+      ? "Channel subscribed. Downloading existing videos now."
+      : mode === "channel-download"
+        ? "Channel download started."
+        : "Download started.";
   await refreshYtDlpDownloads();
   startDownloadRefresh();
 }
 
-function clearLiveDownloadChoice() {
+function clearYtDlpDownloadChoice() {
+  pendingChannelDownload = null;
   pendingLiveDownload = null;
   pendingLiveRelay = null;
+  els.channelDownloadChoice.classList.add("hidden");
   els.liveDownloadChoice.classList.add("hidden");
   els.liveRelayReady.classList.add("hidden");
+  els.channelDownloadTitle.textContent = "";
   els.liveDownloadTitle.textContent = "";
   els.liveRelayTitle.textContent = "";
   hideRelayManualCopyUrl();
   setLiveChoiceDisabled(false);
+  setChannelChoiceDisabled(false);
 }
 
 function showRelayManualCopyUrl(value) {
@@ -4871,6 +5091,12 @@ function setLiveChoiceDisabled(disabled) {
   els.recordLiveStream.disabled = disabled;
   els.relayLiveStream.disabled = disabled;
   els.cancelLiveChoice.disabled = disabled;
+}
+
+function setChannelChoiceDisabled(disabled) {
+  els.downloadChannel.disabled = disabled;
+  els.subscribeChannel.disabled = disabled;
+  els.cancelChannelChoice.disabled = disabled;
 }
 
 function startDownloadRefresh() {
@@ -5177,6 +5403,10 @@ async function refreshLogs() {
 }
 
 async function refreshCurrentlyPlaying() {
+  if (currentlyPlayingAdminView === "rooms") {
+    await refreshWatchTogetherRooms();
+    return;
+  }
   try {
     const data = await api("/api/admin/currently-playing");
     const items = data.items || [];
@@ -5213,6 +5443,70 @@ async function refreshCurrentlyPlaying() {
     });
   } catch (err) {
     els.currentlyPlayingList.innerHTML = '<p class="status">Failed to load currently playing.</p>';
+  }
+}
+
+function setCurrentlyPlayingAdminView(view) {
+  currentlyPlayingAdminView = view === "rooms" ? "rooms" : "playback";
+  const rooms = currentlyPlayingAdminView === "rooms";
+  els.currentlyPlayingPlaybackTab.classList.toggle("active", !rooms);
+  els.currentlyPlayingRoomsTab.classList.toggle("active", rooms);
+  els.currentlyPlayingList.classList.toggle("hidden", rooms);
+  els.watchTogetherAdminList.classList.toggle("hidden", !rooms);
+  refreshCurrentlyPlaying();
+}
+
+async function refreshWatchTogetherRooms() {
+  try {
+    const data = await api("/api/admin/watch-together");
+    const rooms = data.rooms || [];
+    if (rooms.length === 0) {
+      els.watchTogetherAdminList.innerHTML = '<p class="status">No Watch Together rooms are active.</p>';
+      return;
+    }
+    els.watchTogetherAdminList.innerHTML = "";
+    rooms.forEach((room) => {
+      const card = document.createElement("section");
+      card.className = "library-manager-card currently-playing-card";
+      const roomState = room.state || {};
+      const position = Number(roomState.positionSeconds) || 0;
+      const duration = Number(room.durationSeconds) || 0;
+      const percent = duration > 0 ? Math.min(100, position / duration * 100) : 0;
+      const participantNames = (room.participants || []).map((participant) => participant.name).join(", ") || "No one connected";
+      card.innerHTML = `
+        <div class="currently-playing-heading">
+          <div>
+            <strong>${escapeHtml(room.mediaTitle || "Unknown media")}</strong>
+            <span>Hosted by ${escapeHtml(room.hostName || "Unknown")}</span>
+          </div>
+          ${isAdminMode() ? `<button class="secondary-button compact-button close-admin-watch-room" data-room-id="${escapeHtml(room.id)}" type="button">Close room</button>` : ""}
+        </div>
+        <div class="progress-track" aria-hidden="true"><span class="progress-fill" style="--progress: ${percent}%"></span></div>
+        <div class="currently-playing-meta">
+          <span>${escapeHtml(room.libraryTitle || room.mediaType || "")}</span>
+          <span>${escapeHtml(`${room.connected || 0} connected`)}</span>
+          <span>${escapeHtml(`${roomState.state === "playing" ? "Playing" : "Paused"} at ${formatDuration(position)}`)}</span>
+          <span>${escapeHtml(participantNames)}</span>
+        </div>
+      `;
+      els.watchTogetherAdminList.appendChild(card);
+    });
+  } catch (err) {
+    els.watchTogetherAdminList.innerHTML = '<p class="status">Failed to load Watch Together rooms.</p>';
+  }
+}
+
+async function closeAdminWatchTogetherRoom(event) {
+  const button = event.target.closest(".close-admin-watch-room");
+  if (!button || !isAdminMode()) return;
+  if (!window.confirm("Close this Watch Together room for everyone?")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/admin/watch-together/${encodeURIComponent(button.dataset.roomId)}`, state.token, { method: "DELETE" });
+    await refreshWatchTogetherRooms();
+  } catch (err) {
+    button.disabled = false;
+    window.alert(err.message || "Could not close the room.");
   }
 }
 
@@ -6317,7 +6611,7 @@ function openMetadataMatchModal(target) {
   els.metadataSearchTitle.value = "";
   els.metadataSearchYear.value = "";
   els.metadataProviderId.value = "";
-  els.metadataProviderId.placeholder = target && target.itemType === "track" ? "MusicBrainz release ID" : "TMDb ID";
+  els.metadataProviderId.placeholder = target && target.itemType === "track" ? "Deezer album ID" : "TMDb ID";
   els.metadataCandidateSelect.innerHTML = "";
   els.metadataCandidateOverview.textContent = "";
   els.metadataMatchStatus.textContent = "";
@@ -6792,6 +7086,7 @@ function updateDetailsAdminControls() {
   els.removeOnDeck.classList.toggle("hidden", image || !signedIn || !(state.selected && state.selected.progress && state.selected.progress.status === "in_progress" && Number(state.selected.progress.positionSeconds) > 0));
   els.playStream.classList.toggle("hidden", image);
   els.copyUrl.classList.toggle("hidden", !hasPermission("canCopyStreamUrls"));
+  els.startWatchTogether.classList.toggle("hidden", image || !hasPermission("canCopyStreamUrls"));
   els.copyUrl.textContent = image ? "Copy image URL" : "Copy URL";
   for (const select of [els.audioSelect, els.qualitySelect, els.subtitleSelect]) {
     select.closest("label").classList.toggle("hidden", image);
@@ -6800,7 +7095,7 @@ function updateDetailsAdminControls() {
 
 function updatePlaybackControls() {
   const disabled = !isPlaybackReady();
-  for (const button of [els.playStream, els.copyUrl, els.pregenerateHls]) {
+  for (const button of [els.playStream, els.copyUrl, els.pregenerateHls, els.startWatchTogether]) {
     button.disabled = disabled;
     button.title = disabled ? playbackDisabledMessage() : "";
   }
@@ -7317,6 +7612,422 @@ async function writeClipboard(value) {
   await navigator.clipboard.writeText(value);
 }
 
+async function startWatchTogether() {
+  if (!state.selected || !hasPermission("canCopyStreamUrls")) return;
+  els.startWatchTogether.disabled = true;
+  els.copyStatus.textContent = "Creating Watch Together room...";
+  try {
+    const result = await api("/api/watch-together/rooms", state.token, {
+      method: "POST",
+      body: JSON.stringify({
+        mediaType: state.selected.mediaType,
+        mediaId: state.selected.id,
+        audio: els.audioSelect.value,
+        subtitle: els.subtitleSelect.value,
+        audioChannels: selectedAudioChannels(),
+        quality: selectedQuality()
+      })
+    });
+    closeDetails();
+    navigation.navigate(navigation.watchPath(result.inviteToken));
+    await joinWatchTogether(result.inviteToken);
+  } catch (err) {
+    els.copyStatus.textContent = err.message || "Could not create the Watch Together room.";
+  } finally {
+    els.startWatchTogether.disabled = false;
+  }
+}
+
+async function openWatchTogether(inviteToken) {
+  if (watchTogetherSession && watchTogetherSession.inviteToken === inviteToken) return;
+  pendingWatchTogetherInvite = inviteToken;
+  els.loginOverlay.classList.add("hidden");
+  if (state.user) {
+    await joinWatchTogether(inviteToken);
+    return;
+  }
+  els.watchTogetherJoinStatus.textContent = "";
+  els.watchTogetherGuestName.value = sessionStorage.getItem("mediaBakerWatchTogetherName") || "";
+  els.watchTogetherJoinOverlay.classList.remove("hidden");
+  els.watchTogetherJoinOverlay.setAttribute("aria-hidden", "false");
+  window.setTimeout(() => els.watchTogetherGuestName.focus(), 0);
+}
+
+async function submitWatchTogetherGuestName(event) {
+  event.preventDefault();
+  const name = els.watchTogetherGuestName.value.trim();
+  if (!name || !pendingWatchTogetherInvite) return;
+  sessionStorage.setItem("mediaBakerWatchTogetherName", name);
+  els.watchTogetherJoinStatus.textContent = "Joining...";
+  try {
+    await joinWatchTogether(pendingWatchTogetherInvite, name);
+  } catch (err) {
+    els.watchTogetherJoinStatus.textContent = err.message || "Could not join this room.";
+  }
+}
+
+async function joinWatchTogether(inviteToken, name = "") {
+  const clientId = watchTogetherClientId();
+  const joined = await api("/api/watch-together/join", state.token, {
+    method: "POST",
+    body: JSON.stringify({ inviteToken, name, clientId })
+  });
+  els.watchTogetherJoinOverlay.classList.add("hidden");
+  els.watchTogetherJoinOverlay.setAttribute("aria-hidden", "true");
+  pendingWatchTogetherInvite = null;
+
+  await openWebPlayer(new URL(joined.streamUrl, window.location.origin), {
+    category: joined.room.libraryTitle,
+    title: joined.room.mediaTitle,
+    autoplay: false,
+    autoAdvance: false,
+    errorMessage: "The Watch Together stream could not be played.",
+    hlsOptions: { lowLatencyMode: false, backBufferLength: 90 }
+  });
+  activePlaybackMedia = null;
+  watchTogetherSession = {
+    inviteToken,
+    inviteUrl: `${window.location.origin}${navigation.watchPath(inviteToken)}`,
+    ...joined,
+    socket: null,
+    reconnectTimer: null,
+    closed: false,
+    lastProgressAt: 0,
+    participants: [],
+    bufferReady: null
+  };
+  els.playerOverlay.classList.add("watch-together-player");
+  els.toggleWatchTogetherPanel.classList.remove("hidden");
+  els.minimizeVideoPlayer.classList.add("hidden");
+  setWatchTogetherPanelOpen(true);
+  renderWatchTogetherRoom(joined.room);
+  connectWatchTogetherSocket();
+}
+
+function setWatchTogetherPanelOpen(open) {
+  const isOpen = Boolean(open && watchTogetherSession);
+  els.watchTogetherPanel.classList.toggle("hidden", !isOpen);
+  els.playerOverlay.classList.toggle("watch-together-panel-open", isOpen);
+  els.toggleWatchTogetherPanel.setAttribute("aria-expanded", String(isOpen));
+}
+
+function watchTogetherClientId() {
+  let value = sessionStorage.getItem("mediaBakerWatchTogetherClientId");
+  if (!value) {
+    const bytes = new Uint8Array(18);
+    crypto.getRandomValues(bytes);
+    value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    sessionStorage.setItem("mediaBakerWatchTogetherClientId", value);
+  }
+  return value;
+}
+
+function connectWatchTogetherSocket() {
+  const session = watchTogetherSession;
+  if (!session || session.closed) return;
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${window.location.host}/api/watch-together/socket?ticket=${encodeURIComponent(session.ticket)}`);
+  session.socket = socket;
+  socket.addEventListener("open", () => setPlayerStatus("Connected. Waiting for playback state..."));
+  socket.addEventListener("message", (event) => handleWatchTogetherMessage(event.data));
+  socket.addEventListener("close", (event) => {
+    if (!watchTogetherSession || watchTogetherSession !== session || session.closed) return;
+    if (event.code === 4003) return;
+    setPlayerStatus("Connection interrupted. Reconnecting...");
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = window.setTimeout(connectWatchTogetherSocket, 2000);
+  });
+}
+
+function handleWatchTogetherMessage(raw) {
+  let message;
+  try { message = JSON.parse(raw); } catch (err) { return; }
+  const session = watchTogetherSession;
+  if (!session) return;
+  if (message.type === "welcome") {
+    session.room = message.room;
+    session.participant = message.self;
+    session.participants = message.participants || [];
+    renderWatchTogetherRoom(message.room);
+    renderWatchTogetherParticipants(message.participants || []);
+    els.watchTogetherChat.innerHTML = "";
+    (message.chat || []).forEach(renderWatchTogetherMessage);
+    applyWatchTogetherState(message.state, true);
+    notifyWatchTogetherReady();
+    return;
+  }
+  if (message.type === "state") {
+    if (message.reason === "seek") session.bufferReady = null;
+    applyWatchTogetherState(message.state, message.reason !== "sync");
+    if (message.reason === "seek") window.setTimeout(notifyWatchTogetherReady, 0);
+    return;
+  }
+  if (message.type === "participants") {
+    session.participants = message.participants || [];
+    renderWatchTogetherParticipants(message.participants || []);
+    return;
+  }
+  if (message.type === "room") {
+    session.room = message.room;
+    renderWatchTogetherRoom(message.room);
+    return;
+  }
+  if (message.type === "chat") {
+    renderWatchTogetherMessage(message.message);
+    return;
+  }
+  if (message.type === "error") {
+    setTemporaryPlayerStatus(message.message || "The room action could not be completed.");
+    return;
+  }
+  if (message.type === "kicked") {
+    showWatchTogetherEndedPage();
+    return;
+  }
+  if (message.type === "room-closed") {
+    showWatchTogetherEndedPage();
+  }
+}
+
+function showWatchTogetherEndedPage() {
+  closePlayer({ navigate: false });
+  window.location.replace(navigation.watchEndedPath());
+}
+
+function renderWatchTogetherRoom(room) {
+  if (!watchTogetherSession) return;
+  watchTogetherSession.room = room;
+  const isHost = Boolean(watchTogetherSession.participant && watchTogetherSession.participant.isHost);
+  els.watchTogetherHostControls.classList.toggle("hidden", !isHost);
+  els.watchTogetherEveryoneControls.checked = Boolean(room.everyoneCanControl);
+  updateWatchTogetherRoomStatus();
+}
+
+function renderWatchTogetherParticipants(participants) {
+  els.watchTogetherParticipants.innerHTML = "";
+  const session = watchTogetherSession;
+  for (const participant of participants) {
+    const row = document.createElement("div");
+    row.className = "watch-together-participant";
+    const details = document.createElement("div");
+    const connectionState = participant.connected
+      ? participant.ready ? "Ready" : "Buffering"
+      : participant.blocksPlayback ? "Joining" : "Offline";
+    details.innerHTML = `<strong>${escapeHtml(participant.name)}</strong><div class="watch-together-participant-meta">${participant.isHost ? "Host" : participant.loggedIn ? "Signed in" : "Guest"} - ${connectionState}</div>`;
+    row.appendChild(details);
+    if (session && session.participant && session.participant.isHost && !participant.isHost) {
+      const kick = document.createElement("button");
+      kick.className = "secondary-button compact-button";
+      kick.type = "button";
+      kick.dataset.participantId = participant.id;
+      kick.textContent = "Kick";
+      row.appendChild(kick);
+    }
+    els.watchTogetherParticipants.appendChild(row);
+  }
+  updateWatchTogetherRoomStatus();
+  updateVideoPlayerControls();
+}
+
+function watchTogetherWaitingParticipants() {
+  const participants = watchTogetherSession && watchTogetherSession.participants || [];
+  return participants.filter((participant) => participant.blocksPlayback && !participant.ready);
+}
+
+function watchTogetherCanStart() {
+  const participants = watchTogetherSession && watchTogetherSession.participants || [];
+  const required = participants.filter((participant) => participant.blocksPlayback);
+  return required.length > 0 && required.every((participant) => participant.ready);
+}
+
+function updateWatchTogetherRoomStatus() {
+  const session = watchTogetherSession;
+  if (!session || !session.room) return;
+  if (session.state && session.state.state === "playing") {
+    els.watchTogetherRoomStatus.textContent = "Playing";
+    return;
+  }
+  const waiting = watchTogetherWaitingParticipants();
+  if (waiting.length > 0) {
+    els.watchTogetherRoomStatus.textContent = `Waiting for ${waiting.length} participant${waiting.length === 1 ? "" : "s"} to buffer`;
+    return;
+  }
+  els.watchTogetherRoomStatus.textContent = session.room.everyoneCanControl
+    ? "Everyone can control playback"
+    : `Hosted by ${session.room.hostName}`;
+}
+
+function renderWatchTogetherMessage(message) {
+  if (!message) return;
+  const row = document.createElement("div");
+  row.className = `watch-together-message${message.type === "system" ? " system" : ""}`;
+  if (message.type === "system") {
+    row.textContent = message.text;
+  } else {
+    row.innerHTML = `<strong>${escapeHtml(message.name || "Guest")}</strong>${escapeHtml(message.text || "")}`;
+  }
+  els.watchTogetherChat.appendChild(row);
+  els.watchTogetherChat.scrollTop = els.watchTogetherChat.scrollHeight;
+}
+
+function sendWatchTogetherChat(event) {
+  event.preventDefault();
+  const text = els.watchTogetherChatInput.value.trim();
+  if (!text || !sendWatchTogether({ type: "chat", text })) return;
+  els.watchTogetherChatInput.value = "";
+}
+
+function kickWatchTogetherParticipant(event) {
+  const button = event.target.closest("[data-participant-id]");
+  if (button) sendWatchTogether({ type: "kick", participantId: button.dataset.participantId });
+}
+
+function changeWatchTogetherControls() {
+  sendWatchTogether({ type: "permissions", everyoneCanControl: els.watchTogetherEveryoneControls.checked });
+}
+
+async function copyWatchTogetherInvite() {
+  const session = watchTogetherSession;
+  if (!session) return;
+  const inviteUrl = session.inviteUrl || `${window.location.origin}${navigation.watchPath(session.inviteToken)}`;
+  try {
+    await writeClipboard(inviteUrl);
+    els.watchTogetherInviteFallback.classList.add("hidden");
+    els.watchTogetherRoomStatus.textContent = "Invite link copied";
+  } catch (err) {
+    els.watchTogetherInviteFallback.value = inviteUrl;
+    els.watchTogetherInviteFallback.classList.remove("hidden");
+    els.watchTogetherInviteFallback.focus();
+    els.watchTogetherInviteFallback.select();
+    els.watchTogetherRoomStatus.textContent = "Select the invite link to copy it";
+  }
+}
+
+function closeWatchTogetherRoom() {
+  if (window.confirm("Close this Watch Together room for everyone?")) sendWatchTogether({ type: "close-room" });
+}
+
+function sendWatchTogether(message) {
+  const socket = watchTogetherSession && watchTogetherSession.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(message));
+  return true;
+}
+
+function watchTogetherCanControl() {
+  const session = watchTogetherSession;
+  return Boolean(session && session.participant && (session.participant.isHost || session.room.everyoneCanControl));
+}
+
+function sendWatchTogetherLocalState(action) {
+  if (!watchTogetherSession || Date.now() < watchTogetherSuppressControlsUntil) return;
+  if (!watchTogetherCanControl()) {
+    if (watchTogetherSession.state) {
+      window.setTimeout(() => applyWatchTogetherState(watchTogetherSession && watchTogetherSession.state, true), 0);
+    }
+    return;
+  }
+  if (action === "play" && !watchTogetherCanStart()) {
+    watchTogetherSuppressControlsUntil = Date.now() + 1000;
+    els.webPlayer.pause();
+    setTemporaryPlayerStatus("Waiting for everyone to buffer.");
+    return;
+  }
+  sendWatchTogether({ type: "control", action, positionSeconds: Number(els.webPlayer.currentTime) || 0 });
+}
+
+function applyWatchTogetherState(roomState, force = false) {
+  if (!watchTogetherSession || !roomState) return;
+  watchTogetherSession.state = roomState;
+  if (!Number.isFinite(Number(els.webPlayer.duration)) || Number(els.webPlayer.duration) <= 0) {
+    pendingWatchTogetherState = roomState;
+    return;
+  }
+  pendingWatchTogetherState = null;
+  const transportSeconds = roomState.state === "playing"
+    ? Math.max(0, Date.now() - Date.parse(roomState.serverTime || new Date())) / 1000
+    : 0;
+  const expected = Math.max(0, Number(roomState.positionSeconds) + transportSeconds);
+  const drift = expected - (Number(els.webPlayer.currentTime) || 0);
+  watchTogetherSuppressControlsUntil = Date.now() + 1000;
+  if (force || Math.abs(drift) > 1.5) {
+    els.webPlayer.currentTime = expected;
+    els.webPlayer.playbackRate = 1;
+  } else if (roomState.state === "playing" && Math.abs(drift) > 0.3) {
+    els.webPlayer.playbackRate = drift > 0 ? 1.03 : 0.97;
+  } else {
+    els.webPlayer.playbackRate = 1;
+  }
+  if (roomState.state === "playing") {
+    els.webPlayer.play().catch(() => setPlayerStatus("Press play to allow synchronized playback."));
+  } else {
+    els.webPlayer.pause();
+  }
+  updateWatchTogetherRoomStatus();
+  window.setTimeout(() => {
+    if (els.webPlayer.playbackRate !== 1 && Math.abs(expected - (Number(els.webPlayer.currentTime) || 0)) < 0.3) {
+      els.webPlayer.playbackRate = 1;
+    }
+  }, 3000);
+}
+
+function notifyWatchTogetherReady() {
+  if (!watchTogetherSession) return;
+  const durationSeconds = Number(els.webPlayer.duration) || 0;
+  const positionSeconds = Number(els.webPlayer.currentTime) || 0;
+  const remainingSeconds = Math.max(0, durationSeconds - positionSeconds);
+  const requiredSeconds = Math.min(18, remainingSeconds);
+  const bufferedSeconds = bufferedAheadSeconds(els.webPlayer, positionSeconds);
+  const ready = durationSeconds > 0
+    && requiredSeconds > 0
+    && bufferedSeconds >= Math.max(0.5, requiredSeconds - 0.25);
+  if (watchTogetherSession.bufferReady !== ready) {
+    watchTogetherSession.bufferReady = ready;
+    sendWatchTogether({ type: "ready", ready, durationSeconds, bufferedSeconds });
+  }
+  if (pendingWatchTogetherState) applyWatchTogetherState(pendingWatchTogetherState, true);
+}
+
+function bufferedAheadSeconds(video, positionSeconds) {
+  const ranges = video && video.buffered;
+  if (!ranges) return 0;
+  for (let index = 0; index < ranges.length; index += 1) {
+    const start = ranges.start(index);
+    const end = ranges.end(index);
+    if (positionSeconds >= start - 0.25 && positionSeconds <= end + 0.05) {
+      return Math.max(0, end - Math.max(positionSeconds, start));
+    }
+  }
+  return 0;
+}
+
+function reportWatchTogetherProgress(force = false) {
+  const session = watchTogetherSession;
+  if (!session || !state.user || !force && Date.now() - session.lastProgressAt < 5000) return;
+  const durationSeconds = Number(els.webPlayer.duration);
+  const positionSeconds = Number(els.webPlayer.currentTime);
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || !Number.isFinite(positionSeconds)) return;
+  session.lastProgressAt = Date.now();
+  sendWatchTogether({ type: "progress", positionSeconds, durationSeconds });
+}
+
+function leaveWatchTogether(options = {}) {
+  const session = watchTogetherSession;
+  if (!session) return;
+  session.closed = true;
+  clearTimeout(session.reconnectTimer);
+  session.socket?.close(1000, "Left room");
+  watchTogetherSession = null;
+  pendingWatchTogetherState = null;
+  els.playerOverlay.classList.remove("watch-together-player");
+  setWatchTogetherPanelOpen(false);
+  els.toggleWatchTogetherPanel.classList.add("hidden");
+  els.minimizeVideoPlayer.classList.remove("hidden");
+  els.watchTogetherInviteFallback.classList.add("hidden");
+  els.watchTogetherInviteFallback.value = "";
+  if (options.navigate !== false && navigation.readRoute().name === "watch") navigation.navigate("/");
+}
+
 function showManualCopyUrl(value) {
   els.manualCopyUrl.value = value;
   els.manualCopyBar.classList.remove("hidden");
@@ -7353,6 +8064,7 @@ async function playStream() {
   await openWebPlayer(url, {
     mediaType: state.selected.mediaType,
     mediaId: state.selected.id,
+    showId: state.selected.showId || null,
     category: state.selected.category || "",
     title: state.selected.title || "Playback",
     audioOnly: state.selected.itemType === "track",
@@ -7366,7 +8078,10 @@ async function playStream() {
     skipMarkers: state.options && state.options.skipMarkers || [],
     errorMessage: "Playback failed. Try pre-generating HLS or check the stream logs.",
     fallbackUrl: fallbackWebPlayerUrl(),
-    autoAdvance: Boolean(state.options && state.options.nextItem),
+    autoAdvance: Boolean(state.options && state.options.nextItem) || Boolean(state.selectedPlaybackShuffle),
+    hasSequentialNext: Boolean(state.options && state.options.nextItem),
+    nextItem: state.options && state.options.nextItem || null,
+    shuffle: state.selectedPlaybackShuffle,
     hlsOptions: {
       lowLatencyMode: false,
       backBufferLength: 90
@@ -7375,9 +8090,19 @@ async function playStream() {
 }
 
 async function openWebPlayer(url, options = {}) {
-  closePlayer();
+  closePlayer({ navigate: false });
   activePlaybackMedia = options.mediaType && options.mediaId
-    ? { mediaType: options.mediaType, mediaId: options.mediaId, audioOnly: Boolean(options.audioOnly) }
+    ? {
+      mediaType: options.mediaType,
+      mediaId: options.mediaId,
+      audioOnly: Boolean(options.audioOnly),
+      showId: options.showId || null,
+      hasSequentialNext: Boolean(options.hasSequentialNext),
+      nextItem: options.nextItem || null
+    }
+    : null;
+  activePlaybackShuffle = options.shuffle && activePlaybackMedia && activePlaybackMedia.showId
+    ? createPlaybackShuffle(activePlaybackMedia, options.shuffle.items)
     : null;
   webProgressLastReportedAt = 0;
   resetVideoEndTracking();
@@ -7401,10 +8126,12 @@ async function openWebPlayer(url, options = {}) {
 
   const video = els.webPlayer;
   video.controls = false;
-  video.autoplay = true;
+  const autoplay = options.autoplay !== false;
+  video.autoplay = autoplay;
   video.playsInline = true;
   video.dataset.autoAdvance = options.autoAdvance ? "true" : "false";
   els.videoPlaybackSurface.classList.toggle("audio-only", audioOnly);
+  updateVideoShuffleControl();
   updateVideoPlayerControls();
   updateVideoPictureInPictureControl();
 
@@ -7443,8 +8170,10 @@ async function openWebPlayer(url, options = {}) {
       video.addEventListener("error", nativePlayerErrorHandler);
       video.src = url.toString();
       await seekNativeVideo(video, resumeSeconds);
-      await video.play();
-      setPlayerStatus("");
+      if (autoplay) {
+        await video.play();
+      }
+      setPlayerStatus(autoplay ? "" : "Waiting for the host to start playback.");
       return;
     }
 
@@ -7500,6 +8229,7 @@ async function openWebPlayer(url, options = {}) {
         liveRecoveryAttempts = 0;
         if (!isFallback) {
           setPlayerStatus("");
+          notifyWatchTogetherReady();
         }
       });
       player.on(window.Hls.Events.MANIFEST_PARSED, async () => {
@@ -7507,9 +8237,11 @@ async function openWebPlayer(url, options = {}) {
           if (!isFallback && resumeSeconds > 0) {
             video.currentTime = resumeSeconds;
           }
-          await video.play();
+          if (autoplay) {
+            await video.play();
+          }
           if (!isFallback) {
-            setPlayerStatus("");
+            setPlayerStatus(autoplay ? "" : "Waiting for the host to start playback.");
           }
         } catch (err) {
           setPlayerStatus("Press play to start playback.");
@@ -7531,8 +8263,10 @@ async function openWebPlayer(url, options = {}) {
   }
 }
 
-function closePlayer() {
+function closePlayer(options = {}) {
   const finalProgressRequest = reportWebPlaybackProgress(true);
+  reportWatchTogetherProgress(true);
+  leaveWatchTogether({ navigate: options.navigate !== false });
   stopOnDeckPolling();
   exitVideoPictureInPicture();
   clearTimeout(videoControlsHideTimer);
@@ -7567,6 +8301,9 @@ function closePlayer() {
   els.videoMiniPlayer.classList.add("hidden");
   els.videoMiniPlayer.setAttribute("aria-hidden", "true");
   activePlaybackMedia = null;
+  activePlaybackShuffle = null;
+  state.selectedPlaybackShuffle = null;
+  updateVideoShuffleControl();
   webProgressLastReportedAt = 0;
   resetVideoEndTracking();
   setPlayerStatus("");
@@ -7614,6 +8351,28 @@ function toggleVideoPlayback() {
   if (els.videoPlaybackSurface.classList.contains("audio-only")) {
     return;
   }
+  if (watchTogetherSession) {
+    if (watchTogetherCanControl()) {
+      if (els.webPlayer.paused && !watchTogetherCanStart()) {
+        setTemporaryPlayerStatus("Waiting for everyone to buffer.");
+        return;
+      }
+      sendWatchTogether({
+        type: "control",
+        action: els.webPlayer.paused ? "play" : "pause",
+        positionSeconds: Number(els.webPlayer.currentTime) || 0
+      });
+      return;
+    }
+    if (watchTogetherSession.state && watchTogetherSession.state.state === "playing" && els.webPlayer.paused) {
+      watchTogetherSuppressControlsUntil = Date.now() + 1000;
+      els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be started in this browser."));
+    } else {
+      setTemporaryPlayerStatus("Only the host can control playback.");
+      applyWatchTogetherState(watchTogetherSession.state, true);
+    }
+    return;
+  }
   if (els.webPlayer.paused) {
     els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be resumed."));
   } else {
@@ -7630,8 +8389,29 @@ function seekVideoPlayback() {
   seekEndRecoveryAttempted = false;
   videoEndSkipRequested = false;
   videoNaturalEndSeconds = 0;
-  els.webPlayer.currentTime = targetSeconds;
-  els.videoCurrentTime.textContent = formatMediaTime(els.webPlayer.currentTime);
+  if (!watchTogetherSession) {
+    els.webPlayer.currentTime = targetSeconds;
+  }
+  els.videoCurrentTime.textContent = formatMediaTime(targetSeconds);
+}
+
+function finishVideoSeek() {
+  videoSeeking = false;
+  const duration = Number(els.webPlayer.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    updateVideoPlayerControls();
+    return;
+  }
+  if (watchTogetherSession) {
+    const targetSeconds = duration * (Number(els.videoSeek.value) || 0) / 1000;
+    if (watchTogetherCanControl()) {
+      sendWatchTogether({ type: "control", action: "seek", positionSeconds: targetSeconds });
+    } else {
+      setTemporaryPlayerStatus("Only the host can seek playback.");
+      applyWatchTogetherState(watchTogetherSession.state, true);
+    }
+  }
+  updateVideoPlayerControls();
 }
 
 function handleVideoSeeking() {
@@ -7713,6 +8493,15 @@ function updateVideoPlayerControls() {
   els.videoPlayPause.innerHTML = paused ? "&#9654;" : "&#10074;&#10074;";
   els.videoPlayPause.title = paused ? "Play" : "Pause";
   els.videoPlayPause.setAttribute("aria-label", paused ? "Play" : "Pause");
+  const waitingToStart = Boolean(watchTogetherSession
+    && paused
+    && watchTogetherCanControl()
+    && !watchTogetherCanStart());
+  els.videoPlayPause.disabled = waitingToStart;
+  if (waitingToStart) {
+    els.videoPlayPause.title = "Waiting for everyone to buffer";
+    els.videoPlayPause.setAttribute("aria-label", "Waiting for everyone to buffer");
+  }
   els.videoMute.innerHTML = muted ? "&#128263;" : "&#128266;";
   els.videoMute.title = muted ? "Unmute" : "Mute";
   els.videoMute.setAttribute("aria-label", muted ? "Unmute" : "Mute");
@@ -7730,6 +8519,75 @@ function updateVideoPlayerControls() {
   } else if (!videoControlsHideTimer && !els.videoPlaybackSurface.classList.contains("controls-hidden")) {
     scheduleVideoControlsHide();
   }
+}
+
+function createPlaybackShuffle(item, items = []) {
+  return {
+    enabled: true,
+    mediaType: item.mediaType,
+    showId: item.showId,
+    items: Array.isArray(items) ? items : []
+  };
+}
+
+function updateVideoShuffleControl() {
+  const available = Boolean(activePlaybackMedia
+    && activePlaybackMedia.showId
+    && !activePlaybackMedia.audioOnly
+    && !watchTogetherSession);
+  const enabled = available && Boolean(activePlaybackShuffle && activePlaybackShuffle.enabled);
+  els.videoShuffle.classList.toggle("hidden", !available);
+  els.videoShuffle.classList.toggle("active", enabled);
+  els.videoShuffle.setAttribute("aria-pressed", enabled ? "true" : "false");
+  els.videoShuffle.setAttribute("aria-label", enabled ? "Disable shuffle" : "Enable shuffle");
+  els.videoShuffle.title = enabled ? "Disable shuffle" : "Enable shuffle";
+  els.videoControls.classList.toggle("shuffle-available", available);
+}
+
+async function toggleVideoShuffle() {
+  if (!activePlaybackMedia || !activePlaybackMedia.showId || watchTogetherSession) {
+    return;
+  }
+
+  if (activePlaybackShuffle && activePlaybackShuffle.enabled) {
+    activePlaybackShuffle = null;
+    els.webPlayer.dataset.autoAdvance = activePlaybackMedia.hasSequentialNext ? "true" : "false";
+    updateVideoShuffleControl();
+    return;
+  }
+
+  els.videoShuffle.disabled = true;
+  els.videoShuffle.title = "Loading episodes...";
+  try {
+    const show = await api(`${tvBasePath(activePlaybackMedia.mediaType)}/${activePlaybackMedia.showId}`);
+    const items = (show.seasons || [])
+      .flatMap((season) => season.episodes || [])
+      .map((episode) => episodeItem(activePlaybackMedia.mediaType, show, episode));
+    if (items.length === 0) {
+      setPlayerStatus("No episodes are available to shuffle.");
+      return;
+    }
+    activePlaybackShuffle = createPlaybackShuffle(activePlaybackMedia, items);
+    els.webPlayer.dataset.autoAdvance = "true";
+  } catch (err) {
+    setPlayerStatus("The episode list could not be loaded for shuffle.");
+  } finally {
+    els.videoShuffle.disabled = false;
+    updateVideoShuffleControl();
+  }
+}
+
+function randomShuffleItem(currentId) {
+  if (!activePlaybackShuffle || !activePlaybackShuffle.enabled) {
+    return null;
+  }
+  const items = activePlaybackShuffle.items || [];
+  const candidates = items.length > 1
+    ? items.filter((item) => item.id !== currentId)
+    : items;
+  return candidates.length > 0
+    ? candidates[Math.floor(Math.random() * candidates.length)]
+    : null;
 }
 
 function normalizeSkipMarkers(markers) {
@@ -7902,12 +8760,13 @@ function toggleVideoFullscreen() {
       handleFullscreenResult(els.videoPlaybackSurface.requestFullscreen());
       return;
     }
-    if (typeof video.webkitEnterFullscreen === "function" && video.webkitSupportsFullscreen !== false) {
-      video.webkitEnterFullscreen();
-      return;
-    }
     if (typeof els.videoPlaybackSurface.webkitRequestFullscreen === "function") {
       handleFullscreenResult(els.videoPlaybackSurface.webkitRequestFullscreen());
+      return;
+    }
+    if (typeof video.webkitEnterFullscreen === "function" && video.webkitSupportsFullscreen !== false) {
+      video.controls = true;
+      video.webkitEnterFullscreen();
       return;
     }
   } catch (err) {
@@ -7924,9 +8783,11 @@ function handleFullscreenResult(result) {
 }
 
 function updateVideoFullscreenControl() {
-  const fullscreen = document.fullscreenElement === els.videoPlaybackSurface
-    || document.webkitFullscreenElement === els.videoPlaybackSurface
+  const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+  const nativeVideoFullscreen = fullscreenElement === els.webPlayer
     || Boolean(els.webPlayer.webkitDisplayingFullscreen);
+  const fullscreen = fullscreenElement === els.videoPlaybackSurface || nativeVideoFullscreen;
+  els.webPlayer.controls = nativeVideoFullscreen;
   els.videoFullscreen.title = fullscreen ? "Exit fullscreen" : "Fullscreen";
   els.videoFullscreen.setAttribute("aria-label", fullscreen ? "Exit fullscreen" : "Fullscreen");
   showVideoControls();
@@ -7934,9 +8795,22 @@ function updateVideoFullscreenControl() {
 
 function setPlayerStatus(message) {
   const text = String(message || "");
-  els.playerStatus.textContent = text;
-  els.musicPlayerStatus.textContent = text;
-  els.videoMiniStatus.textContent = text;
+  clearTimeout(playerStatusHideTimer);
+  playerStatusHideTimer = null;
+  for (const status of [els.playerStatus, els.musicPlayerStatus, els.videoMiniStatus]) {
+    status.textContent = text;
+    status.classList.toggle("hidden", !text);
+  }
+  els.playerOverlay.classList.toggle("player-status-visible", Boolean(text));
+}
+
+function setTemporaryPlayerStatus(message, durationMs = 3000) {
+  setPlayerStatus(message);
+  if (!message) return;
+  playerStatusHideTimer = window.setTimeout(() => {
+    playerStatusHideTimer = null;
+    setPlayerStatus("");
+  }, durationMs);
 }
 
 function showMusicPlayer(metadata, hasNext) {
@@ -8174,6 +9048,17 @@ function reportWebPlaybackProgress(force = false, positionOverride = null) {
 async function handleWebPlayerEnded() {
   stopOnDeckPolling();
   const duration = Number(els.webPlayer.duration);
+  if (watchTogetherSession) {
+    reportWatchTogetherProgress(true);
+    if (watchTogetherCanControl()) {
+      sendWatchTogether({
+        type: "control",
+        action: "pause",
+        positionSeconds: Number.isFinite(duration) ? duration : Number(els.webPlayer.currentTime) || 0
+      });
+    }
+    return;
+  }
   const videoEndConfirmed = videoEndSkipRequested || videoNaturalEndSeconds >= 5;
   if (activePlaybackMedia
     && !activePlaybackMedia.audioOnly
@@ -8200,7 +9085,12 @@ async function handleWebPlayerEnded() {
 
   await reportWebPlaybackProgress(true);
   await refreshSelectedProgress().catch(() => null);
-  const nextItem = els.webPlayer.dataset.autoAdvance === "true" && state.options && state.options.nextItem;
+  const shuffle = activePlaybackShuffle && activePlaybackShuffle.enabled
+    ? { ...activePlaybackShuffle, items: [...activePlaybackShuffle.items] }
+    : null;
+  const nextItem = els.webPlayer.dataset.autoAdvance === "true"
+    ? randomShuffleItem(activePlaybackMedia && activePlaybackMedia.mediaId) || activePlaybackMedia && activePlaybackMedia.nextItem
+    : null;
   if (!nextItem || autoAdvanceInFlight) {
     return;
   }
@@ -8215,7 +9105,7 @@ async function handleWebPlayerEnded() {
       ...nextItem,
       category: libraryTitle(nextItem.mediaType),
       posterUrl: nextItem.posterUrl || currentArtwork
-    });
+    }, { shuffle: Boolean(shuffle), shuffleItems: shuffle && shuffle.items });
     await playStream();
   } finally {
     autoAdvanceInFlight = false;

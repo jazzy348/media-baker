@@ -56,6 +56,7 @@ module.exports = {
   keyframeStorePath: appPath(fileConfig.keyframeStorePath, "cache/media-keyframes.json"),
   openMovieIdPath: appPath(fileConfig.openMovieIdPath, "cache/openmovie-ids.json"),
   skipMarkerStorePath: appPath(fileConfig.skipMarkerStorePath, "cache/skip-markers.json"),
+  watchTogetherStorePath: appPath(fileConfig.watchTogetherStorePath, "cache/watch-together.json"),
   logging: {
     level: normalizeLogLevel(fileConfig.logging && fileConfig.logging.level || fileConfig.logLevel),
     path: appPath(fileConfig.logging && fileConfig.logging.path, "cache/logs", "/logs"),
@@ -121,7 +122,9 @@ module.exports = {
     downloadPath: appPath(fileConfig.ytdlp && fileConfig.ytdlp.downloadPath, "cache/yt-dlp", "/downloads"),
     libraryTitle: fileConfig.ytdlp && fileConfig.ytdlp.libraryTitle || "YT-DLP",
     allowPlaylists: fileConfig.ytdlp && typeof fileConfig.ytdlp.allowPlaylists === "boolean" ? fileConfig.ytdlp.allowPlaylists : false,
-    trackProgress: !fileConfig.ytdlp || fileConfig.ytdlp.trackProgress !== false
+    trackProgress: !fileConfig.ytdlp || fileConfig.ytdlp.trackProgress !== false,
+    subscriptionCheckIntervalSeconds: intValue(fileConfig.ytdlp && fileConfig.ytdlp.subscriptionCheckIntervalSeconds, 24 * 60 * 60),
+    subscriptions: []
   },
   iptv: {
     enabled: fileConfig.iptv && typeof fileConfig.iptv.enabled === "boolean" ? fileConfig.iptv.enabled : false,

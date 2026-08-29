@@ -4,6 +4,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const logger = require("../utils/logger");
 const { cookieArgsForUrl } = require("../utils/ytdlpCookies");
+const { ytdlpRuntimeArgs } = require("../utils/ytdlpRuntime");
 
 const RELAY_IDLE_MS = 60 * 1000;
 const RELAY_START_TIMEOUT_MS = 30 * 1000;
@@ -300,6 +301,7 @@ async function waitForPlaylist(filePath, transcoder, timeoutMs, relay) {
 async function resolveRelaySources(binaryPath, url, authenticationArgs) {
   const stdout = await execOutput(binaryPath, [
     "--dump-single-json", "--skip-download", "--no-warnings", "--no-playlist",
+    ...ytdlpRuntimeArgs(),
     "-f", RELAY_FORMAT,
     ...authenticationArgs,
     url

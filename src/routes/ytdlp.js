@@ -31,7 +31,10 @@ module.exports = function createYtDlpRoutes({ ytdlp, ytdlpRelay, playbackTokens 
       const download = await ytdlp.startDownload(
         req.body && req.body.url,
         req.user && req.user.id || "global",
-        { live: req.body && req.body.mode === "record" }
+        {
+          live: req.body && req.body.mode === "record",
+          subscribeChannel: req.body && req.body.mode === "channel-subscribe"
+        }
       );
       res.status(202).json({ download });
     } catch (err) {

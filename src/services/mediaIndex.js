@@ -1,7 +1,10 @@
 const fs = require("fs/promises");
 const path = require("path");
 const { createId, isAudioFile, isImageFile, isVideoFile, parseEpisodeFile, parseMovieFolder, parseMusicFile } = require("../utils/mediaParsers");
+const { MusicTagReader, inferredAlbumDirectory } = require("./musicTagReader");
 const logger = require("../utils/logger");
+
+const MUSIC_SCAN_CONCURRENCY = 8;
 
 class MediaIndex {
   constructor(config, indexStore) {
@@ -12,9 +15,11 @@ class MediaIndex {
     this.reindexInFlight = null;
     this.libraryReindexInFlight = new Map();
     this.libraryReindexPending = new Set();
+    this.libraryScanProgress = new Map();
     this.fileStatsRefreshNeeded = false;
     this.updateListeners = new Set();
     this.pendingChangedVideoMedia = [];
+    this.musicTags = new MusicTagReader();
   }
 
   emptyIndex() {
@@ -111,11 +116,16 @@ class MediaIndex {
     const removedMedia = [];
     nextIndex.generatedAt = new Date().toISOString();
     for (const library of this.config.libraries) {
-      const previousCollection = await this.previousCollection(library);
-      const collection = await this.scanLibrary(library, previousCollection);
-      nextIndex[library.key] = collection;
-      changedMedia.push(...changedVideoMedia(collection, previousCollection, library));
-      removedMedia.push(...removedVideoMedia(collection, previousCollection, library));
+      this.startLibraryScan(library);
+      try {
+        const previousCollection = await this.previousCollection(library);
+        const collection = await this.scanLibrary(library, previousCollection);
+        nextIndex[library.key] = collection;
+        changedMedia.push(...changedVideoMedia(collection, previousCollection, library));
+        removedMedia.push(...removedVideoMedia(collection, previousCollection, library));
+      } finally {
+        this.finishLibraryScan(library.key);
+      }
     }
 
     await this.indexStore.save(nextIndex);
@@ -155,21 +165,27 @@ class MediaIndex {
       throw new Error(`Library not found: ${libraryKey}`);
     }
 
-    const previousCollection = await this.previousCollection(library);
-    const collection = await this.scanLibrary(library, previousCollection);
-    const changedMedia = changedVideoMedia(collection, previousCollection, library);
-    const removedMedia = removedVideoMedia(collection, previousCollection, library);
-    this.index.libraries = this.emptyIndex().libraries;
-    this.index.generatedAt = new Date().toISOString();
-    if (this.databaseBacked) {
-      await this.indexStore.saveLibrary(library, collection, this.index);
-    } else {
-      this.index[library.key] = collection;
-      await this.indexStore.save(this.index);
+    this.startLibraryScan(library);
+    try {
+      const previousCollection = await this.previousCollection(library);
+      const collection = await this.scanLibrary(library, previousCollection);
+      const changedMedia = changedVideoMedia(collection, previousCollection, library);
+      const removedMedia = removedVideoMedia(collection, previousCollection, library);
+      this.updateLibraryScan(library.key, { phase: "Saving library index", filePath: null, detail: null, etaSeconds: null });
+      this.index.libraries = this.emptyIndex().libraries;
+      this.index.generatedAt = new Date().toISOString();
+      if (this.databaseBacked) {
+        await this.indexStore.saveLibrary(library, collection, this.index);
+      } else {
+        this.index[library.key] = collection;
+        await this.indexStore.save(this.index);
+      }
+      this.pendingChangedVideoMedia = changedMedia;
+      await this.notifyUpdated(library.key, { changedMedia, removedMedia });
+      return this.index;
+    } finally {
+      this.finishLibraryScan(library.key);
     }
-    this.pendingChangedVideoMedia = changedMedia;
-    await this.notifyUpdated(library.key, { changedMedia, removedMedia });
-    return this.index;
   }
 
   addUpdateListener(listener) {
@@ -469,8 +485,38 @@ class MediaIndex {
     return {
       fullReindex: Boolean(this.reindexInFlight),
       libraryReindexes: [...this.libraryReindexInFlight.keys()],
-      pendingLibraries: [...this.libraryReindexPending]
+      pendingLibraries: [...this.libraryReindexPending],
+      libraryProgress: [...this.libraryScanProgress.values()].map((entry) => ({ ...entry }))
     };
+  }
+
+  startLibraryScan(library) {
+    const now = new Date().toISOString();
+    this.libraryScanProgress.set(library.key, {
+      libraryKey: library.key,
+      phase: "Discovering files",
+      current: null,
+      total: null,
+      etaSeconds: null,
+      detail: null,
+      filePath: library.path,
+      startedAt: now,
+      updatedAt: now
+    });
+  }
+
+  updateLibraryScan(libraryKey, changes) {
+    const current = this.libraryScanProgress.get(libraryKey);
+    if (!current) return;
+    this.libraryScanProgress.set(libraryKey, {
+      ...current,
+      ...changes,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  finishLibraryScan(libraryKey) {
+    this.libraryScanProgress.delete(libraryKey);
   }
 
   async previousCollection(library) {
@@ -487,7 +533,11 @@ class MediaIndex {
     if (library.type === "tv") {
       collection = await this.scanTvLibrary(library.path);
     } else if (library.type === "music") {
-      collection = await this.scanMusicLibrary(library.path);
+      collection = await this.scanMusicLibrary(
+        library.path,
+        previousCollection,
+        (progress) => this.updateLibraryScan(library.key, progress)
+      );
     } else if (library.type === "images") {
       collection = await this.scanImageLibrary(library.path);
     } else {
@@ -591,45 +641,164 @@ class MediaIndex {
     };
   }
 
-  async scanMusicLibrary(libraryPath) {
+  async scanMusicLibrary(libraryPath, previousCollection = null, reportProgress = () => {}) {
     const artistsById = new Map();
+    const albumsById = new Map();
     const tracksById = {};
-    const audioFiles = await this.findMediaFiles(libraryPath, isAudioFile);
+    const audioFiles = await this.findMediaFiles(libraryPath, isAudioFile, ({ directories, files }) => {
+      reportProgress({
+        phase: "Discovering music files",
+        current: null,
+        total: null,
+        etaSeconds: null,
+        detail: `${directories.toLocaleString()} folders scanned; ${files.toLocaleString()} files found`,
+        filePath: libraryPath
+      });
+    });
+    const previousByPath = new Map(collectionMediaItems(previousCollection || {}, "music")
+      .map((item) => [normalizedFilePath(item.filePath), item]));
+    const artworkByDirectory = new Map();
+    const startedAt = Date.now();
+    const activePaths = new Set();
+    let processed = 0;
+    reportProgress({
+      phase: "Inspecting music files",
+      current: 0,
+      total: audioFiles.length,
+      etaSeconds: null,
+      detail: `${MUSIC_SCAN_CONCURRENCY} files in parallel`,
+      filePath: null
+    });
 
-    for (const filePath of audioFiles) {
-      const parsed = parseMusicFile(libraryPath, filePath);
+    const scannedTracks = await mapWithConcurrency(audioFiles, MUSIC_SCAN_CONCURRENCY, async (filePath) => {
+      activePaths.add(filePath);
       const stats = await this.fileStats(filePath);
-      const artistId = createId(`artist:${parsed.artist}`);
-      const albumId = createId(`album:${parsed.artist}:${parsed.album}:${parsed.year || ""}`);
+      const previous = previousByPath.get(normalizedFilePath(filePath));
+      const unchanged = previous
+        && Number(previous.mtimeMs) === Number(stats.mtimeMs)
+        && Number(previous.sizeBytes) === Number(stats.sizeBytes)
+        && previous.musicTagsRead === true;
+      const fallback = parseMusicFile(libraryPath, filePath);
+      let tags = unchanged ? musicTagsFromTrack(previous) : null;
+      if (!tags) {
+        try {
+          tags = await this.musicTags.read(filePath);
+        } catch (err) {
+          logger.full(`[index] music tags unavailable file="${filePath}" message="${err.message}"`);
+          tags = {};
+        }
+      }
+      const parsed = musicIdentity(fallback, tags);
+      const albumPath = inferredAlbumDirectory(filePath);
+      const localArtworkPath = await findLocalAlbumArtwork(albumPath, artworkByDirectory);
+      const artistIdentity = parsed.artist;
+      const albumIdentity = tags.musicBrainzReleaseId
+        || `${parsed.artist}:${parsed.album}:${parsed.year || ""}:${normalizedFilePath(albumPath)}`;
+      const artistId = createId(`artist:${artistIdentity}`);
+      const albumId = createId(`album:${albumIdentity}`);
       const track = {
         id: createId(filePath),
         artistId,
-        artistName: parsed.artist,
+        artistName: parsed.artists[0] || parsed.artist,
         albumId,
         albumName: parsed.album,
         year: parsed.year,
         disc: parsed.disc,
         track: parsed.track,
         title: parsed.title,
+        artists: parsed.artists,
+        albumArtist: parsed.artist,
+        discTotal: tags.discTotal || null,
+        trackTotal: tags.trackTotal || null,
+        compilation: tags.compilation === true,
+        musicBrainzArtistIds: tags.musicBrainzArtistIds || [],
+        musicBrainzAlbumArtistId: tags.musicBrainzAlbumArtistId || null,
+        musicBrainzReleaseId: tags.musicBrainzReleaseId || null,
+        musicBrainzReleaseGroupId: tags.musicBrainzReleaseGroupId || null,
+        musicBrainzRecordingId: tags.musicBrainzRecordingId || null,
+        musicBrainzTrackId: tags.musicBrainzTrackId || null,
+        hasEmbeddedArtwork: tags.hasEmbeddedArtwork === true,
+        localArtworkPath,
+        musicTagsRead: true,
         filename: path.basename(filePath),
         filePath,
         addedAtMs: stats.addedAtMs,
         mtimeMs: stats.mtimeMs,
         sizeBytes: stats.sizeBytes
       };
-      tracksById[track.id] = track;
+
+      activePaths.delete(filePath);
+      processed += 1;
+      const elapsedMs = Date.now() - startedAt;
+      reportProgress({
+        phase: "Inspecting music files",
+        current: processed,
+        total: audioFiles.length,
+        etaSeconds: processed > 0
+          ? Math.max(0, Math.ceil(elapsedMs / processed * (audioFiles.length - processed) / 1000))
+          : null,
+        detail: `${Math.min(activePaths.size, MUSIC_SCAN_CONCURRENCY)} files active`,
+        filePath: activePaths.values().next().value || filePath
+      });
+
+      return { albumId, albumPath, artistId, filePath, localArtworkPath, parsed, tags, track };
+    });
+
+    reportProgress({
+      phase: "Building music catalogue",
+      current: audioFiles.length,
+      total: audioFiles.length,
+      etaSeconds: null,
+      detail: null,
+      filePath: null
+    });
+
+    for (const scanned of scannedTracks) {
+      const { albumId, albumPath, artistId, filePath, localArtworkPath, parsed, tags, track } = scanned;
+      const existingAlbumEntry = albumsById.get(albumId);
+      if (existingAlbumEntry) {
+        const { album, artist } = existingAlbumEntry;
+        if (artist.id !== artistId) {
+          logger.full(`[index] consolidated music album id=${albumId} album="${parsed.album}" owner="${artist.name}" conflictingArtist="${parsed.artist}"`);
+        }
+
+        track.artistId = artist.id;
+        album.localArtworkPath = album.localArtworkPath || localArtworkPath;
+        album.hasEmbeddedArtwork = album.hasEmbeddedArtwork || tags.hasEmbeddedArtwork === true;
+        album.musicBrainzReleaseId = album.musicBrainzReleaseId || tags.musicBrainzReleaseId || null;
+        album.musicBrainzReleaseGroupId = album.musicBrainzReleaseGroupId || tags.musicBrainzReleaseGroupId || null;
+        album.tracks.push(track);
+        tracksById[track.id] = track;
+        continue;
+      }
 
       let artist = artistsById.get(artistId);
       if (!artist) {
-        artist = { id: artistId, name: parsed.artist, path: artistPath(libraryPath, filePath), albums: [] };
+        artist = {
+          id: artistId,
+          name: parsed.artist,
+          path: artistPathForName(libraryPath, filePath, parsed.artist),
+          musicBrainzArtistId: tags.musicBrainzAlbumArtistId || null,
+          albums: []
+        };
         artistsById.set(artistId, artist);
       }
-      let album = artist.albums.find((entry) => entry.id === albumId);
-      if (!album) {
-        album = { id: albumId, name: parsed.album, year: parsed.year, path: path.dirname(filePath), tracks: [] };
-        artist.albums.push(album);
-      }
+      artist.musicBrainzArtistId = artist.musicBrainzArtistId || tags.musicBrainzAlbumArtistId || null;
+      const album = {
+        id: albumId,
+        name: parsed.album,
+        year: parsed.year,
+        path: albumPath,
+        localArtworkPath,
+        hasEmbeddedArtwork: tags.hasEmbeddedArtwork === true,
+        musicBrainzReleaseId: tags.musicBrainzReleaseId || null,
+        musicBrainzReleaseGroupId: tags.musicBrainzReleaseGroupId || null,
+        tracks: []
+      };
+      artist.albums.push(album);
+      albumsById.set(albumId, { album, artist });
       album.tracks.push(track);
+      tracksById[track.id] = track;
     }
 
     const artists = [...artistsById.values()]
@@ -674,28 +843,46 @@ class MediaIndex {
     return this.findMediaFiles(dirPath, isVideoFile);
   }
 
-  async findMediaFiles(dirPath, predicate) {
+  async findMediaFiles(dirPath, predicate, reportProgress = null) {
     const result = [];
-    for (const entry of await this.safeReadDir(dirPath)) {
-      const entryPath = path.join(dirPath, entry.name);
-      if (entry.isDirectory()) {
-        result.push(...await this.findMediaFiles(entryPath, predicate));
-        continue;
-      }
+    let directories = 0;
+    const visit = async (currentPath) => {
+      directories += 1;
+      for (const entry of await this.safeReadDir(currentPath, currentPath === dirPath)) {
+        const entryPath = path.join(currentPath, entry.name);
+        if (entry.isDirectory()) {
+          await visit(entryPath);
+          continue;
+        }
 
-      if (entry.isFile() && predicate(entryPath)) {
-        result.push(entryPath);
+        if (entry.isFile() && predicate(entryPath)) {
+          result.push(entryPath);
+        }
       }
-    }
+      if (reportProgress && (directories % 25 === 0 || currentPath === dirPath)) {
+        reportProgress({ directories, files: result.length });
+      }
+    };
+
+    await visit(dirPath);
+    if (reportProgress) reportProgress({ directories, files: result.length });
 
     return result.sort((a, b) => a.localeCompare(b));
   }
 
-  async safeReadDir(dirPath) {
+  async safeReadDir(dirPath, isLibraryRoot = false) {
     try {
       return await fs.readdir(dirPath, { withFileTypes: true });
     } catch (err) {
       if (err.code === "ENOENT") {
+        if (!isLibraryRoot) {
+          logger.info(`[index] warning skipped unreadable directory path="${dirPath}" code=${err.code} message="${err.message}"`);
+        }
+        return [];
+      }
+
+      if (!isLibraryRoot) {
+        logger.info(`[index] warning skipped unreadable directory path="${dirPath}" code=${err.code || "unknown"} message="${err.message}"`);
         return [];
       }
 
@@ -1159,10 +1346,113 @@ function artistPath(libraryPath, filePath) {
   return relativeParts.length >= 3 ? path.join(libraryPath, relativeParts[0]) : libraryPath;
 }
 
+function artistPathForName(libraryPath, filePath, artistName) {
+  const directories = path.relative(libraryPath, path.dirname(filePath)).split(path.sep).filter(Boolean);
+  const normalizedArtist = normalizeMusicText(artistName);
+  const matchingIndex = directories.findIndex((part) => {
+    const normalizedPart = normalizeMusicText(part);
+    return normalizedPart === normalizedArtist || normalizedPart.startsWith(`${normalizedArtist} `);
+  });
+  return matchingIndex >= 0
+    ? path.join(libraryPath, ...directories.slice(0, matchingIndex + 1))
+    : artistPath(libraryPath, filePath);
+}
+
+function musicIdentity(fallback, tags) {
+  const folderArtist = fallback.artist && !/^unknown artist$/i.test(fallback.artist)
+    ? fallback.artist
+    : null;
+  const artists = tags.artists && tags.artists.length
+    ? tags.artists
+    : [tags.artist || tags.albumArtist || fallback.artist].filter(Boolean);
+  const taggedAlbum = tags.album && tags.album !== "Unknown Album" ? tags.album : null;
+  return {
+    artist: folderArtist
+      || tags.albumArtist
+      || (tags.compilation ? "Various Artists" : tags.artist)
+      || "Unknown Artist",
+    artists,
+    album: taggedAlbum || fallback.album || "Unknown Album",
+    year: tags.year || fallback.year || null,
+    disc: tags.disc || fallback.disc || 1,
+    track: tags.track || fallback.track || null,
+    title: tags.title || fallback.title
+  };
+}
+
+function musicTagsFromTrack(track) {
+  return {
+    title: track.title,
+    artist: track.artists && track.artists[0] || track.artistName,
+    artists: track.artists || [],
+    albumArtist: track.albumArtist || track.artistName,
+    album: track.albumName,
+    year: track.year,
+    disc: track.disc,
+    discTotal: track.discTotal,
+    track: track.track,
+    trackTotal: track.trackTotal,
+    compilation: track.compilation,
+    musicBrainzArtistIds: track.musicBrainzArtistIds || [],
+    musicBrainzAlbumArtistId: track.musicBrainzAlbumArtistId,
+    musicBrainzReleaseId: track.musicBrainzReleaseId,
+    musicBrainzReleaseGroupId: track.musicBrainzReleaseGroupId,
+    musicBrainzRecordingId: track.musicBrainzRecordingId,
+    musicBrainzTrackId: track.musicBrainzTrackId,
+    hasEmbeddedArtwork: track.hasEmbeddedArtwork
+  };
+}
+
+async function findLocalAlbumArtwork(directory, cache) {
+  if (cache.has(directory)) return cache.get(directory);
+  let entries = [];
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (err) {
+    if (err.code !== "ENOENT") logger.full(`[index] album artwork scan failed directory="${directory}" message="${err.message}"`);
+  }
+  const preferred = ["cover", "folder", "front", "album", "albumart"];
+  const images = entries.filter((entry) => entry.isFile() && isImageFile(entry.name));
+  const selected = images.sort((a, b) => {
+    const left = preferred.indexOf(path.basename(a.name, path.extname(a.name)).toLowerCase());
+    const right = preferred.indexOf(path.basename(b.name, path.extname(b.name)).toLowerCase());
+    return (left < 0 ? preferred.length : left) - (right < 0 ? preferred.length : right) || a.name.localeCompare(b.name);
+  })[0];
+  const result = selected ? path.join(directory, selected.name) : null;
+  cache.set(directory, result);
+  return result;
+}
+
+function normalizeMusicText(value) {
+  return String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
 function sortTracks(a, b) {
   return (a.disc || 1) - (b.disc || 1)
     || (a.track || Number.MAX_SAFE_INTEGER) - (b.track || Number.MAX_SAFE_INTEGER)
     || a.filename.localeCompare(b.filename);
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  const workerCount = Math.max(1, Math.min(Number(concurrency) || 1, items.length || 1));
+  let nextIndex = 0;
+  let firstError = null;
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (!firstError) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (err) {
+        firstError = err;
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (firstError) throw firstError;
+  return results;
 }
 
 module.exports = { MediaIndex };

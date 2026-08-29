@@ -85,6 +85,27 @@ function createStreamAuthMiddleware(playbackTokens) {
   };
 }
 
+function createWatchTogetherStreamMiddleware(watchTogether) {
+  return (req, res, next) => {
+    if (!watchTogether.authorizePlayback(req.playbackTokenPayload)) {
+      next(unauthorizedError());
+      return;
+    }
+    next();
+  };
+}
+
+function createOptionalAuthMiddleware(accountService, libraryService = null) {
+  const authenticate = createAuthMiddleware(accountService, libraryService);
+  return (req, res, next) => authenticate(req, res, (err) => {
+    if (err && err.status === 401) {
+      next();
+      return;
+    }
+    next(err);
+  });
+}
+
 function createApiKeyAuthMiddleware(accountService) {
   return async (req, res, next) => {
     const apiKey = extractApiKey(req);
@@ -229,8 +250,10 @@ function unauthorizedError() {
 
 module.exports = {
   createAuthMiddleware,
+  createOptionalAuthMiddleware,
   createApiKeyAuthMiddleware,
   createStreamAuthMiddleware,
+  createWatchTogetherStreamMiddleware,
   establishWebStreamAuthCookie,
   clearWebStreamAuthCookies
 };

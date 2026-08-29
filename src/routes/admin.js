@@ -7,7 +7,7 @@ const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 const { shareProgressUserId } = require("../utils/progressIdentity");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, playbackSync, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks, watchTogether }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -30,6 +30,35 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
           iptv: Boolean(config.iptv && config.iptv.enabled)
         }
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/playback-sync/accounts", requireAdmin, async (req, res, next) => {
+    try {
+      res.json({ accounts: await playbackSync.accounts() });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/playback-sync/catalog", requireAdmin, async (req, res, next) => {
+    try {
+      res.json(await playbackSync.catalog(req.query.offset, req.query.limit));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/playback-sync/import", requireAdmin, async (req, res, next) => {
+    try {
+      const records = Array.isArray(req.body && req.body.records) ? req.body.records : [];
+      if (records.length === 0 || records.length > 500) {
+        next(httpError(400, "Import requires between 1 and 500 playback records"));
+        return;
+      }
+      res.json(await playbackSync.import(req.body && req.body.userId, records));
     } catch (err) {
       next(err);
     }
@@ -243,6 +272,27 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
   router.delete("/ytdlp/cookies", requirePermission("canManageSettings"), async (req, res, next) => {
     try {
       res.json({ cookies: await ytdlp.removeCookies() });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/ytdlp/subscriptions", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      const subscription = await ytdlp.addSubscription(
+        req.body && req.body.url,
+        req.user && req.user.id || "system"
+      );
+      res.status(201).json({ subscription, status: await ytdlpAdminStatus(ytdlp) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/ytdlp/subscriptions/:id", requirePermission("canManageSettings"), async (req, res, next) => {
+    try {
+      const subscription = await ytdlp.removeSubscription(req.params.id);
+      res.json({ subscription, status: await ytdlpAdminStatus(ytdlp) });
     } catch (err) {
       next(err);
     }
@@ -489,6 +539,19 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
           };
         })
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/watch-together", requirePermission("canViewUserHistory"), (req, res) => {
+    res.json({ rooms: watchTogether.activeRooms() });
+  });
+
+  router.delete("/watch-together/:roomId", requireAdmin, async (req, res, next) => {
+    try {
+      await watchTogether.adminClose(req.params.roomId, req.user && req.user.username);
+      res.json({ closed: true });
     } catch (err) {
       next(err);
     }
