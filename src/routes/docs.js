@@ -523,9 +523,18 @@ function openApiSpec() {
         post: operation("Admin", "Re-index all libraries", "Starts a background rebuild.")
       },
       "/api/catalog/home": {
-        get: operation("Catalog", "Home rows", "Returns recent or random media rows.", true, {
-          parameters: [queryParam("mode", "string", ["recent", "random"])]
+        get: operation("Catalog", "Home rows", "Returns paged recent or stable-random media rows.", true, {
+          parameters: [
+            queryParam("mode", "string", ["recent", "random"]),
+            queryParam("library"),
+            queryParam("offset", "integer"),
+            queryParam("limit", "integer"),
+            queryParam("seed")
+          ]
         })
+      },
+      "/api/catalog/libraries": {
+        get: operation("Catalog", "Library navigation", "Lists the libraries available to the authenticated account.", true)
       },
       "/api/catalog/search": {
         get: operation("Catalog", "Search catalog", "Searches metadata names and episode numbers.", true, {

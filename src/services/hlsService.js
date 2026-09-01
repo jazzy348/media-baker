@@ -8,7 +8,7 @@ const logger = require("../utils/logger");
 const SEEK_AHEAD_THRESHOLD_SECONDS = 30;
 const SEEK_PRE_ROLL_SECONDS = 24;
 const SEEK_REASSERT_INTERVAL_MS = 1500;
-const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-keyframe-timeline-v25";
+const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-multitrack-v28";
 const HLS_CACHE_FORMAT_MARKER = ".hls-cache-format";
 const KEYFRAME_CACHE_FORMAT_VERSION = 2;
 const MAXIMUM_COPIED_SEGMENT_SECONDS = 60;
@@ -29,6 +29,7 @@ class HlsService {
     this.keyframeWarmCurrent = null;
     this.keyframeWarmTotal = 0;
     this.keyframeWarmProcessed = 0;
+    this.subtitleSetups = new Map();
     this.cacheFormatPromise = null;
     this.cacheAccess = new Map();
     this.cacheReaders = new Map();
@@ -152,7 +153,8 @@ class HlsService {
       audio: normalizeAudioPreference(options.audio, this.config.streaming.preferredAudioLanguage),
       subtitle: normalizeSubtitlePreference(options.subtitle),
       audioChannels: normalizeAudioChannelPreference(options.audioChannels || options.audioMode || options.channelMode),
-      quality: normalizeQualityPreference(options.quality)
+      quality: normalizeQualityPreference(options.quality),
+      rendition: normalizeRendition(options.rendition)
     };
     logger.info(`[hls] prepare file="${indexedMediaFile.filePath}" requestedAudio=${options.audio || "default"} selectedAudio=${normalizedOptions.audio} subtitle=${normalizedOptions.subtitle} audioChannels=${normalizedOptions.audioChannels} quality=${normalizedOptions.quality}`);
     const cacheKey = await this.buildCacheKey(indexedMediaFile.filePath, normalizedOptions);
@@ -202,6 +204,103 @@ class HlsService {
 
     await this.activeSetups.get(cacheKey);
     return this.result(cacheKey, cacheDir, playlistPath);
+  }
+
+  prepareAudioRendition(mediaFile, options = {}) {
+    return this.prepare(mediaFile, { ...options, subtitle: "none", rendition: "audio" });
+  }
+
+  async prepareSubtitleRendition(mediaFile, subtitleId) {
+    await this.ensureCacheFormat();
+    const selectedSubtitle = normalizeSubtitlePreference(subtitleId);
+    if (["none", "auto"].includes(selectedSubtitle)) {
+      throw new Error("A text subtitle track is required");
+    }
+
+    const cacheKey = await this.buildCacheKey(mediaFile.filePath, {
+      rendition: "subtitle",
+      subtitle: selectedSubtitle
+    });
+    const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
+    const subtitlePath = path.join(cacheDir, "subtitle.vtt");
+    const metadataPath = path.join(cacheDir, "subtitle.json");
+    this.touchCache(cacheKey);
+
+    if (await fileExists(subtitlePath)) {
+      const metadata = await readJsonFile(metadataPath);
+      if (Number.isFinite(Number(metadata && metadata.duration))) {
+        return { cacheKey, subtitlePath, duration: Number(metadata.duration) };
+      }
+      const probe = await this.ffmpeg.probe(mediaFile.filePath, { useDefaultProbeLimits: true });
+      const duration = mediaDurationSeconds(probe);
+      await fs.writeFile(metadataPath, JSON.stringify({ duration }), "utf8");
+      return { cacheKey, subtitlePath, duration };
+    }
+    if (this.subtitleSetups.has(cacheKey)) {
+      return this.subtitleSetups.get(cacheKey);
+    }
+
+    const setup = this.createSubtitleRendition(mediaFile, selectedSubtitle, cacheKey, cacheDir, subtitlePath, metadataPath)
+      .finally(() => this.subtitleSetups.delete(cacheKey));
+    this.subtitleSetups.set(cacheKey, setup);
+    return setup;
+  }
+
+  async createSubtitleRendition(mediaFile, subtitleId, cacheKey, cacheDir, subtitlePath, metadataPath) {
+    const probe = await this.ffmpeg.probe(mediaFile.filePath, { useDefaultProbeLimits: true });
+    const source = await this.subtitleRenditionSource(mediaFile.filePath, probe, subtitleId);
+    await fs.rm(cacheDir, { recursive: true, force: true });
+    await fs.mkdir(cacheDir, { recursive: true });
+    const temporarySubtitlePath = path.join(cacheDir, "subtitle.tmp.vtt");
+    const args = [
+      "-hide_banner", "-y",
+      "-copyts",
+      "-i", source.path,
+      "-map", source.map,
+      "-c:s", "webvtt",
+      temporarySubtitlePath
+    ];
+    logger.full(`[ffmpeg] subtitle rendition ${quoteCommand(this.ffmpeg.ffmpegPath, args)}`);
+    try {
+      await waitForFfmpeg(this.ffmpeg.spawn(args), "subtitle rendition");
+      await addWebVttTimestampMap(temporarySubtitlePath);
+      await fs.rename(temporarySubtitlePath, subtitlePath);
+    } catch (err) {
+      await fs.rm(temporarySubtitlePath, { force: true }).catch(() => {});
+      throw err;
+    }
+    const duration = mediaDurationSeconds(probe);
+    await fs.writeFile(metadataPath, JSON.stringify({ duration }), "utf8");
+    this.touchCache(cacheKey);
+    return { cacheKey, subtitlePath, duration };
+  }
+
+  async subtitleRenditionSource(inputPath, probe, subtitleId) {
+    const externalName = externalSubtitleName(subtitleId);
+    if (externalName) {
+      const externalPath = await findExternalSubtitleByName(inputPath, externalName);
+      if (!externalPath) throw new Error(`Requested sidecar subtitle was not found: ${externalName}`);
+      return { path: externalPath, map: "0:0" };
+    }
+
+    const cachedName = cachedSubtitleName(subtitleId);
+    if (cachedName) {
+      const cachedPath = this.cachedSubtitlePath(cachedName);
+      if (!cachedPath || !await fileExists(cachedPath)) {
+        throw new Error(`Requested cached subtitle was not found: ${cachedName}`);
+      }
+      return { path: cachedPath, map: "0:0" };
+    }
+
+    const requestedIndex = streamIndex(subtitleId);
+    const stream = (probe.streams || []).find((candidate) => (
+      candidate.codec_type === "subtitle" && candidate.index === requestedIndex
+    ));
+    if (!stream) throw new Error(`Requested subtitle stream was not found: ${subtitleId}`);
+    if (!isTextSubtitleCodec(String(stream.codec_name || "").toLowerCase())) {
+      throw new Error(`Subtitle stream ${requestedIndex} cannot be converted to switchable WebVTT`);
+    }
+    return { path: inputPath, map: `0:${requestedIndex}` };
   }
 
   getCachedFilePath(cacheKey, filename) {
@@ -1091,6 +1190,28 @@ class HlsService {
         }
       }
       cleanupActiveTranscode();
+      if (hlsBuild && hlsBuild.hardwareDecodeEnabled && !resume.disableHardwareDecode) {
+        logger.info(
+          `[hls] hardware decode failed before playback input="${inputPath}" `
+          + `error="${summarizeFfmpegOutput(err.message)}"; retrying with software decode`
+        );
+        await fs.rm(cacheDir, { recursive: true, force: true });
+        const fallbackResult = await this.startHls(mediaFile, options, cacheDir, playlistPath, cacheKey, {
+          ...resume,
+          resumeFromSegment,
+          resumeFromSeconds,
+          preserveCache: false,
+          segmentTimeline: reusableSegmentTimeline,
+          sourceSignature: verifiedSourceSignature,
+          disableHardwareDecode: true
+        });
+        this.ffmpeg.markHardwareDecodeFailed(
+          hlsBuild.hardwareProfile,
+          selectVideoStream(probe),
+          err.message
+        );
+        return fallbackResult;
+      }
       logger.error(`[hls] ffmpeg failed before playback input="${inputPath}" error="${summarizeFfmpegOutput(err.message)}"; removing cacheDir="${cacheDir}"`);
       await fs.rm(cacheDir, { recursive: true, force: true });
       throw err;
@@ -1174,9 +1295,12 @@ class HlsService {
     const videoStream = isAudioFile(inputPath) ? null : selectVideoStream(probe);
     const audioStream = selectAudioStream(probe, options.audio);
     const audioMode = selectAudioMode(audioStream, options.audioChannels);
-    if (!videoStream) {
-      return this.buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume);
+    if (!videoStream || options.rendition === "audio") {
+      return this.buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume, {
+        alternateRendition: options.rendition === "audio"
+      });
     }
+    const videoOnly = options.rendition === "video";
     const subtitle = await this.selectSubtitle(inputPath, probe, options, audioStream);
     const qualityProfile = qualityProfileForProbe(probe, options.quality);
     const scaleFilter = transcodeScaleFilter(videoStream, qualityProfile.targetHeight);
@@ -1186,7 +1310,7 @@ class HlsService {
       && !scaleFilter;
     const needsTranscode = {
       video: !compatibleH264 || Boolean(scaleFilter) || forceCompatibleTranscode || qualityProfile.forceTranscode,
-      audio: true
+      audio: !videoOnly
     };
     const hardwareProfile = await this.ffmpeg.detectHardwareProfile();
     const hardwareEncoder = hardwareProfile.encoder;
@@ -1214,10 +1338,18 @@ class HlsService {
     // MPEG-TS segments must carry independently usable AAC configuration. Some
     // container AAC tracks only provide that configuration in their first frame.
     const audioCodec = "aac";
-    const useHardwareFrames = hardwareProfile.hardwareFrames === "cuda" && videoCodec === hardwareProfile.encoder && Boolean(scaleFilter || subtitle);
-    const hardwareDownloadFilter = useHardwareFrames ? hardwareFrameDownloadFilter(hardwareProfile.hardwareFrames, videoStream) : null;
-    const hardwareUploadFilter = videoCodec === hardwareProfile.encoder ? hardwareProfile.uploadFilter : null;
-    logger.full(`[hls] selected video=${streamLog(videoStream)} compatibleH264=${compatibleH264} audio=${streamLog(audioStream)} audioMode=${audioMode.id} subtitle=${subtitleLog(subtitle)} quality=${qualityProfile.id} targetHeight=${qualityProfile.targetHeight || "original"} targetBitrate=${qualityProfile.targetBitrate || "auto"} scale=${scaleFilter || "none"} needsTranscode=${JSON.stringify(needsTranscode)} forceCompatibleTranscode=${Boolean(forceCompatibleTranscode)} hardwareVendor=${hardwareProfile.vendor || "none"} hardwareEncoder=${hardwareEncoder || "none"} hardwareDecoder=${hardwareProfile.decoder || "software"} videoCodec=${videoCodec} audioCodec=${audioCodec} hardwareFrames=${hardwareProfile.hardwareFrames || "none"} hardwareDownloadFilter=${hardwareDownloadFilter || "none"} hardwareUploadFilter=${hardwareUploadFilter || "none"} variableSegments=${Boolean(segmentTimeline)}`);
+    const hardwareDecodeEnabled = !resume.disableHardwareDecode
+      && videoCodec === hardwareProfile.encoder
+      && await this.ffmpeg.canHardwareDecode(hardwareProfile, inputPath, videoStream);
+    const requiresSoftwareFrames = Boolean(scaleFilter || subtitle || isTenBitVideo(videoStream));
+    const hardwareDownloadFilter = hardwareDecodeEnabled && requiresSoftwareFrames
+      ? hardwareFrameDownloadFilter(hardwareProfile.hardwareFrames, videoStream)
+      : null;
+    const hardwareUploadFilter = videoCodec === hardwareProfile.encoder
+      && (!hardwareDecodeEnabled || requiresSoftwareFrames)
+      ? hardwareProfile.uploadFilter
+      : null;
+    logger.full(`[hls] selected video=${streamLog(videoStream)} compatibleH264=${compatibleH264} audio=${streamLog(audioStream)} audioMode=${audioMode.id} subtitle=${subtitleLog(subtitle)} quality=${qualityProfile.id} targetHeight=${qualityProfile.targetHeight || "original"} targetBitrate=${qualityProfile.targetBitrate || "auto"} scale=${scaleFilter || "none"} needsTranscode=${JSON.stringify(needsTranscode)} forceCompatibleTranscode=${Boolean(forceCompatibleTranscode)} hardwareVendor=${hardwareProfile.vendor || "none"} hardwareEncoder=${hardwareEncoder || "none"} hardwareDecoder=${hardwareDecodeEnabled ? hardwareProfile.decoder : "software"} videoCodec=${videoCodec} audioCodec=${audioCodec} hardwareFrames=${hardwareDecodeEnabled ? hardwareProfile.hardwareFrames || "none" : "none"} hardwareDownloadFilter=${hardwareDownloadFilter || "none"} hardwareUploadFilter=${hardwareUploadFilter || "none"} variableSegments=${Boolean(segmentTimeline)}`);
     const args = [
       "-hide_banner",
       "-y",
@@ -1229,6 +1361,11 @@ class HlsService {
       "100M"
     ];
 
+    const preserveSourceTimestamps = videoOnly && !(resume.resumeFromSeconds > 0);
+    if (preserveSourceTimestamps) {
+      args.push("-copyts");
+    }
+
     if (subtitle && subtitle.needsSubtitleDurationFix) {
       args.push("-fix_sub_duration");
     }
@@ -1237,7 +1374,7 @@ class HlsService {
       args.push(...hardwareProfile.inputArgs);
     }
 
-    if (useHardwareFrames && hardwareProfile.hwaccelArgs.length > 0) {
+    if (hardwareDecodeEnabled) {
       args.push(...hardwareProfile.hwaccelArgs);
     }
 
@@ -1265,23 +1402,27 @@ class HlsService {
       );
     }
 
-    args.push(
-      "-map",
-      `0:${audioStream.index}`,
-      "-sn",
-      "-c:v",
-      videoCodec,
-      "-c:a",
-      audioCodec
-    );
+    if (videoOnly) {
+      args.push("-an", "-sn", "-c:v", videoCodec);
+    } else {
+      args.push(
+        "-map",
+        `0:${audioStream.index}`,
+        "-sn",
+        "-c:v",
+        videoCodec,
+        "-c:a",
+        audioCodec
+      );
+    }
 
     const subtitleSeekSeconds = subtitle && subtitle.videoFilter && resume.resumeFromSeconds > 0
       ? Number(resume.resumeFromSeconds)
       : 0;
     const videoFilter = bitmapSubtitleFilter ? null : composeFilters([
-      useHardwareFrames && (scaleFilter || subtitle && subtitle.videoFilter) ? hardwareDownloadFilter : null,
+      hardwareDecodeEnabled && requiresSoftwareFrames ? hardwareDownloadFilter : null,
       scaleFilter,
-      useHardwareFrames && (scaleFilter || subtitle && subtitle.videoFilter) ? "format=yuv420p" : null,
+      hardwareDecodeEnabled && requiresSoftwareFrames ? "format=yuv420p" : null,
       subtitleSeekSeconds > 0 ? `setpts=PTS+${formatFfmpegSeconds(subtitleSeekSeconds)}/TB` : null,
       subtitle && subtitle.videoFilter,
       subtitleSeekSeconds > 0 ? `setpts=PTS-${formatFfmpegSeconds(subtitleSeekSeconds)}/TB` : null,
@@ -1295,10 +1436,10 @@ class HlsService {
       throw new Error(`English subtitle stream ${subtitle.index} uses unsupported codec ${subtitle.codecName}`);
     }
 
-    if (audioCodec === "aac") {
+    if (!videoOnly && audioCodec === "aac") {
       args.push("-af", composeFilters([
         audioMode.filter,
-        "aresample=async=1000:first_pts=0"
+        audioTimelineResampleFilter(audioStream, preserveSourceTimestamps)
       ]));
       if (audioMode.channels) {
         args.push("-ac", String(audioMode.channels));
@@ -1326,7 +1467,7 @@ class HlsService {
 
     if (videoCodec !== "copy") {
       const gopSize = outputGopSize(videoStream, this.config.hls.segmentSeconds);
-      if (videoCodec !== "h264_vaapi") {
+      if (videoCodec !== "h264_vaapi" && !(hardwareDecodeEnabled && !requiresSoftwareFrames)) {
         args.push("-pix_fmt", "yuv420p");
       }
       args.push(
@@ -1347,6 +1488,8 @@ class HlsService {
 
     if (resume.resumeFromSeconds > 0) {
       args.push("-output_ts_offset", formatFfmpegSeconds(resume.resumeFromSeconds));
+    } else if (videoOnly) {
+      args.push("-avoid_negative_ts", "disabled");
     } else {
       args.push("-avoid_negative_ts", "make_zero");
     }
@@ -1354,6 +1497,7 @@ class HlsService {
     args.push(
       "-max_interleave_delta",
       "0",
+      ...(videoOnly ? ["-muxpreload", "0", "-muxdelay", "0"] : []),
       "-f",
       "hls",
       "-hls_time",
@@ -1371,20 +1515,32 @@ class HlsService {
 
     return {
       args,
+      hardwareProfile,
+      hardwareDecodeEnabled,
       independentSegments: hlsFlags.includes("independent_segments"),
       splitByTime: hlsFlags.includes("split_by_time"),
       segmentTimeline
     };
   }
 
-  buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume = {}) {
-    const audioCodec = audioStream.codec_name === "aac" && !audioMode.forceTranscode ? "copy" : "aac";
-    const segmentSeconds = Math.min(2, this.config.hls.segmentSeconds);
+  buildAudioOnlyFfmpegArgs(inputPath, audioStream, audioMode, playlistPath, resume = {}, options = {}) {
+    const alternateRendition = Boolean(options.alternateRendition);
+    const audioCodec = !alternateRendition && audioStream.codec_name === "aac" && !audioMode.forceTranscode
+      ? "copy"
+      : "aac";
+    const segmentSeconds = alternateRendition
+      ? this.config.hls.segmentSeconds
+      : Math.min(2, this.config.hls.segmentSeconds);
     const args = [
       "-hide_banner", "-y",
+      "-fflags", "+genpts",
       "-analyzeduration", "1M",
       "-probesize", "1M"
     ];
+    const preserveSourceTimestamps = alternateRendition && !(resume.resumeFromSeconds > 0);
+    if (preserveSourceTimestamps) {
+      args.push("-copyts");
+    }
     if (resume.resumeFromSeconds > 0) {
       args.push("-ss", formatFfmpegSeconds(resume.resumeFromSeconds));
     }
@@ -1395,19 +1551,24 @@ class HlsService {
       "-c:a", audioCodec
     );
     if (audioCodec === "aac") {
-      if (audioMode.filter) {
-        args.push("-af", audioMode.filter);
-      }
+      args.push("-af", composeFilters([
+        audioMode.filter,
+        audioTimelineResampleFilter(audioStream, preserveSourceTimestamps)
+      ]));
       if (audioMode.channels) {
         args.push("-ac", String(audioMode.channels));
       }
-      const channels = audioMode.channels || Number.parseInt(audioStream.channels, 10) || 2;
-      args.push("-b:a", channels > 2 ? "512k" : "320k");
+      args.push("-b:a", audioBitrate(audioMode));
     }
     if (resume.resumeFromSeconds > 0) {
       args.push("-output_ts_offset", formatFfmpegSeconds(resume.resumeFromSeconds));
+    } else if (alternateRendition) {
+      args.push("-avoid_negative_ts", "disabled");
+    } else {
+      args.push("-avoid_negative_ts", "make_zero");
     }
     args.push(
+      "-muxpreload", "0",
       "-muxdelay", "0",
       "-f", "hls",
       "-hls_time", String(segmentSeconds),
@@ -1417,7 +1578,7 @@ class HlsService {
       "-hls_segment_filename", path.join(path.dirname(playlistPath), "segment_%05d.ts"),
       playlistPath
     );
-    logger.full(`[hls] selected audio-only audio=${streamLog(audioStream)} audioMode=${audioMode.id} audioCodec=${audioCodec} segmentSeconds=${segmentSeconds}`);
+    logger.full(`[hls] selected audio-only audio=${streamLog(audioStream)} audioMode=${audioMode.id} audioCodec=${audioCodec} segmentSeconds=${segmentSeconds} alternateRendition=${alternateRendition}`);
     return { args, independentSegments: false, splitByTime: true, segmentSeconds, audioOnly: true };
   }
 
@@ -1686,6 +1847,10 @@ function normalizeSubtitlePreference(value) {
   return selected;
 }
 
+function normalizeRendition(value) {
+  return ["video", "audio"].includes(value) ? value : "muxed";
+}
+
 function normalizeAudioChannelPreference(value) {
   const selected = String(value || "preserve").toLowerCase();
   if (["stereo", "mixdown", "stereo-mixdown", "stereomixdown"].includes(selected)) {
@@ -1739,6 +1904,18 @@ function selectAudioMode(audioStream, preference) {
 
 function audioBitrate(audioMode) {
   return audioMode.id === "stereo" ? "160k" : "384k";
+}
+
+function audioTimelineResampleFilter(audioStream, preserveSourceTimestamps) {
+  let firstPts = 0;
+  if (preserveSourceTimestamps) {
+    const startSeconds = Number(audioStream && audioStream.start_time);
+    const sampleRate = Number(audioStream && audioStream.sample_rate);
+    if (Number.isFinite(startSeconds) && Number.isFinite(sampleRate) && sampleRate > 0) {
+      firstPts = Math.round(startSeconds * sampleRate);
+    }
+  }
+  return `aresample=async=1000:first_pts=${firstPts}`;
 }
 
 function streamIndex(value) {
@@ -1894,15 +2071,11 @@ function composeFilters(filters) {
 }
 
 function hardwareFrameDownloadFilter(frameType, videoStream) {
-  if (frameType === "cuda") {
-    return cudaFrameDownloadFilter(videoStream);
-  }
-
-  return null;
+  return frameType ? `hwdownload,format=${hardwareDownloadPixelFormat(videoStream)}` : null;
 }
 
-function cudaFrameDownloadFilter(videoStream) {
-  return isTenBitVideo(videoStream) ? "hwdownload,format=p010le" : "hwdownload,format=nv12";
+function hardwareDownloadPixelFormat(videoStream) {
+  return isTenBitVideo(videoStream) ? "p010le" : "nv12";
 }
 
 function isTenBitVideo(stream) {
@@ -2295,6 +2468,34 @@ function canResumePartialTranscode(options) {
   return options && options.subtitle === "none";
 }
 
+async function waitForFfmpeg(child, description) {
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+    if (stderr.length > 20000) stderr = stderr.slice(-20000);
+  });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`FFmpeg ${description} failed with code ${code}: ${summarizeFfmpegOutput(stderr)}`));
+    });
+  });
+}
+
+async function addWebVttTimestampMap(filePath) {
+  const content = await fs.readFile(filePath, "utf8");
+  if (!content.startsWith("WEBVTT") || content.includes("X-TIMESTAMP-MAP=")) return;
+  const updated = content.replace(
+    /^WEBVTT(?:\r?\n)?/,
+    "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n\n"
+  );
+  await fs.writeFile(filePath, updated);
+}
+
 function monitorTranscodeExit(exitPromise, active, cleanup, cacheKey, inputPath, cacheDir) {
   exitPromise
     .then(() => {
@@ -2345,6 +2546,15 @@ async function waitForInitialHlsSegment(filePath, exitPromise, timeoutMs) {
   }
 
   throw new Error("Timed out waiting for the first HLS segment");
+}
+
+async function readJsonFile(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT" || err instanceof SyntaxError) return null;
+    throw err;
+  }
 }
 
 async function fileExists(filePath) {

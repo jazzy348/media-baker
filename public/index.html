@@ -19,10 +19,15 @@
     <div class="backdrop" aria-hidden="true"></div>
 
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Go to home">
-        <img class="brand-mark" src="/app-icon/512.png" alt="" draggable="false">
-        <span>Media Baker</span>
-      </a>
+      <div class="topbar-brand-shell">
+        <button id="libraryMobileToggle" class="icon-button library-mobile-toggle hidden" type="button" title="Open libraries" aria-label="Open libraries" aria-controls="librarySidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <a class="brand" href="/" aria-label="Go to home">
+          <img class="brand-mark" src="/app-icon/512.png" alt="" draggable="false">
+          <span>Media Baker</span>
+        </a>
+      </div>
       <label class="search-shell">
         <span>Search</span>
         <input id="searchInput" type="search" placeholder="Movies, shows, episodes">
@@ -65,45 +70,58 @@
       </div>
     </section>
 
-    <main class="shell">
-      <section id="homeToolbar" class="home-toolbar" aria-label="Home row mode">
-        <div>
-          <p class="eyebrow">Home</p>
-          <h2 id="homeModeTitle">Recently Added</h2>
+    <div id="appLayout" class="app-layout sidebar-hidden">
+      <aside id="librarySidebar" class="library-sidebar hidden" aria-label="Media libraries">
+        <div class="library-sidebar-heading">
+          <span class="library-sidebar-title">Libraries</span>
+          <button id="librarySidebarToggle" class="library-sidebar-toggle" type="button" title="Collapse libraries" aria-label="Collapse libraries" aria-expanded="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4M14 9l-3 3 3 3M21 3v18"/></svg>
+          </button>
         </div>
-        <div class="segmented-control">
-          <button id="recentMode" class="active" type="button">Recently Added</button>
-          <button id="randomMode" type="button">Random</button>
-        </div>
-      </section>
-      <section id="homeRows" class="rows"></section>
-      <section id="searchResults" class="search-results hidden">
-        <div class="section-heading">
-          <h2>Search Results</h2>
-          <span id="searchCount"></span>
-        </div>
-        <div id="searchGrid" class="grid"></div>
-      </section>
-      <section id="liveTvView" class="live-tv-view hidden">
-        <div class="live-tv-heading">
+        <nav id="librarySidebarNav" class="library-sidebar-nav"></nav>
+      </aside>
+      <button id="librarySidebarScrim" class="library-sidebar-scrim hidden" type="button" aria-label="Close libraries"></button>
+
+      <main class="shell">
+        <section id="homeToolbar" class="home-toolbar" aria-label="Home row mode">
           <div>
-            <p class="eyebrow">Television</p>
-            <h2>Live TV</h2>
-            <p id="liveTvStatus" class="status"></p>
+            <p class="eyebrow">Home</p>
+            <h2 id="homeModeTitle">Recently Added</h2>
           </div>
-          <div class="live-tv-actions">
-            <button id="liveTvEarlier" class="secondary-button compact-button guide-arrow-button" type="button" title="Previous hour" aria-label="Previous hour">&#8592;</button>
-            <button id="liveTvNow" class="primary-button compact-button" type="button">Now</button>
-            <button id="liveTvLater" class="secondary-button compact-button guide-arrow-button" type="button" title="Next hour" aria-label="Next hour">&#8594;</button>
+          <div class="segmented-control">
+            <button id="recentMode" class="active" type="button">Recently Added</button>
+            <button id="randomMode" type="button">Random</button>
           </div>
-        </div>
-        <label class="live-tv-filter">
-          Filter channels
-          <input id="liveTvFilter" type="search" placeholder="Channel name, number, or group" autocomplete="off">
-        </label>
-        <div id="liveTvGuide" class="live-tv-guide" aria-live="polite"></div>
-      </section>
-    </main>
+        </section>
+        <section id="homeRows" class="rows"></section>
+        <section id="searchResults" class="search-results hidden">
+          <div class="section-heading">
+            <h2>Search Results</h2>
+            <span id="searchCount"></span>
+          </div>
+          <div id="searchGrid" class="grid"></div>
+        </section>
+        <section id="liveTvView" class="live-tv-view hidden">
+          <div class="live-tv-heading">
+            <div>
+              <p class="eyebrow">Television</p>
+              <h2>Live TV</h2>
+              <p id="liveTvStatus" class="status"></p>
+            </div>
+            <div class="live-tv-actions">
+              <button id="liveTvEarlier" class="secondary-button compact-button guide-arrow-button" type="button" title="Previous hour" aria-label="Previous hour">&#8592;</button>
+              <button id="liveTvNow" class="primary-button compact-button" type="button">Now</button>
+              <button id="liveTvLater" class="secondary-button compact-button guide-arrow-button" type="button" title="Next hour" aria-label="Next hour">&#8594;</button>
+            </div>
+          </div>
+          <label class="live-tv-filter">
+            Filter channels
+            <input id="liveTvFilter" type="search" placeholder="Channel name, number, or group" autocomplete="off">
+          </label>
+          <div id="liveTvGuide" class="live-tv-guide" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
 
     <div id="imageViewer" class="image-viewer hidden" aria-hidden="true">
       <button id="closeImageViewer" class="close-button image-viewer-close" type="button" title="Close image" aria-label="Close image">x</button>
@@ -300,6 +318,16 @@
               <button id="videoSkipMarker" class="video-skip-marker" type="button">Skip</button>
               <button id="videoContinueMarker" class="video-skip-dismiss" type="button">Keep watching</button>
             </div>
+            <div id="videoTrackControls" class="video-track-controls hidden" role="dialog" aria-label="Playback settings">
+              <label id="videoAudioTrackLabel" class="video-track-select hidden">
+                <span>Audio</span>
+                <select id="videoAudioTrack" aria-label="Audio track"></select>
+              </label>
+              <label id="videoSubtitleTrackLabel" class="video-track-select hidden">
+                <span>Subtitles</span>
+                <select id="videoSubtitleTrack" aria-label="Subtitle track"></select>
+              </label>
+            </div>
             <div id="videoControls" class="video-controls">
               <button id="videoPlayPause" class="video-control-button" type="button" title="Pause" aria-label="Pause">&#10074;&#10074;</button>
               <span id="videoCurrentTime" class="video-time">0:00</span>
@@ -308,6 +336,7 @@
               <button id="videoMute" class="video-control-button" type="button" title="Mute" aria-label="Mute">&#128266;</button>
               <input id="videoVolume" class="video-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
               <button id="videoShuffle" class="video-control-button hidden" type="button" title="Enable shuffle" aria-label="Enable shuffle" aria-pressed="false">&#8644;</button>
+              <button id="videoTrackSettings" class="video-control-button hidden" type="button" title="Audio and subtitles" aria-label="Audio and subtitle settings" aria-controls="videoTrackControls" aria-expanded="false" aria-haspopup="dialog">&#9881;</button>
               <button id="videoPictureInPicture" class="video-control-button" type="button" title="Picture in Picture" aria-label="Picture in Picture">&#9635;</button>
               <button id="videoFullscreen" class="video-control-button" type="button" title="Fullscreen" aria-label="Fullscreen">&#9974;</button>
             </div>

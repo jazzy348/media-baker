@@ -2,6 +2,8 @@ const initialShareToken = new URLSearchParams(window.location.search).get("share
 const navigation = window.MediaBakerNavigation;
 const apiClient = window.MediaBakerApi;
 const PLAYBACK_PREFERENCES_KEY = "mediaBakerPlaybackPreferences";
+const LIBRARY_SIDEBAR_PREFERENCE_KEY = "mediaBakerLibrarySidebarExpanded";
+const HOME_ROW_PAGE_SIZE = 18;
 const DEFAULT_PLAYBACK_PREFERENCES = {
   audioLanguage: "",
   subtitleLanguage: "",
@@ -33,8 +35,15 @@ const state = {
   metadataMatchTarget: null,
   seriesPosterTarget: null,
   homeData: null,
+  homeCache: new Map(),
+  homeRequestId: 0,
+  homeRows: new Map(),
+  homeSeed: "",
   currentView: "home",
   homeMode: "recent",
+  libraries: [],
+  librarySidebarExpanded: readLibrarySidebarPreference(),
+  librarySidebarMobileOpen: false,
   libraryView: null,
   iptvEnabled: false,
   iptvGuideStart: null,
@@ -63,6 +72,12 @@ const LIVE_TV_PERMISSION_KEY = "@live-tv";
 
 const els = {
   brandLink: document.querySelector(".brand"),
+  appLayout: document.getElementById("appLayout"),
+  librarySidebar: document.getElementById("librarySidebar"),
+  librarySidebarNav: document.getElementById("librarySidebarNav"),
+  librarySidebarToggle: document.getElementById("librarySidebarToggle"),
+  librarySidebarScrim: document.getElementById("librarySidebarScrim"),
+  libraryMobileToggle: document.getElementById("libraryMobileToggle"),
   loginOverlay: document.getElementById("loginOverlay"),
   loginForm: document.getElementById("loginForm"),
   loginTitle: document.getElementById("loginTitle"),
@@ -188,6 +203,12 @@ const els = {
   videoDuration: document.getElementById("videoDuration"),
   videoMute: document.getElementById("videoMute"),
   videoVolume: document.getElementById("videoVolume"),
+  videoTrackControls: document.getElementById("videoTrackControls"),
+  videoAudioTrackLabel: document.getElementById("videoAudioTrackLabel"),
+  videoAudioTrack: document.getElementById("videoAudioTrack"),
+  videoSubtitleTrackLabel: document.getElementById("videoSubtitleTrackLabel"),
+  videoSubtitleTrack: document.getElementById("videoSubtitleTrack"),
+  videoTrackSettings: document.getElementById("videoTrackSettings"),
   videoShuffle: document.getElementById("videoShuffle"),
   videoPictureInPicture: document.getElementById("videoPictureInPicture"),
   videoFullscreen: document.getElementById("videoFullscreen"),
@@ -550,15 +571,26 @@ const els = {
 };
 
 let hlsPlayer = null;
+let pendingHlsAudioSwitch = null;
 let nativePlayerErrorHandler = null;
 let autoAdvanceInFlight = false;
 let musicSeeking = false;
 let videoSeeking = false;
 let videoControlsHideTimer = null;
+let videoSubtitlePositionFrame = null;
+let videoSubtitleResizeObserver = null;
+const boundVideoSubtitleTracks = new WeakSet();
+const positionedVideoSubtitleCues = new WeakSet();
+const AUDIO_SWITCH_PREFETCH_SECONDS = 18;
+const AUDIO_SWITCH_PREFETCH_ATTEMPTS = 4;
 let playerStatusHideTimer = null;
 let activeSkipMarkers = [];
 let dismissedSkipMarkers = new Set();
 let activePlaybackMedia = null;
+let activeWebPlaybackRequest = null;
+let webPlaybackRestartPromise = null;
+let webPlaybackNeedsRenewal = false;
+let webPlaybackSessionId = 0;
 let activePlaybackShuffle = null;
 let webProgressLastReportedAt = 0;
 let webProgressRequest = null;
@@ -604,6 +636,7 @@ let pendingWatchTogetherState = null;
 let watchTogetherSuppressControlsUntil = 0;
 let currentlyPlayingAdminView = "playback";
 const downloadStatuses = new Map();
+let librarySidebarGesture = null;
 
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -618,6 +651,9 @@ els.loginForm.addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({ username, password })
     });
+    state.homeRequestId += 1;
+    state.homeCache.clear();
+    state.homeData = null;
     state.token = result.token;
     state.user = result.user;
     setPlaybackPreferences(result.user && result.user.preferences);
@@ -627,6 +663,7 @@ els.loginForm.addEventListener("submit", async (event) => {
     localStorage.setItem("streamToken", state.token);
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
+    await loadLibrarySidebar(true);
     await renderRoute(navigation.readRoute());
     refreshIptvAvailability();
     refreshSystemHealthInBackground();
@@ -646,6 +683,21 @@ els.brandLink.addEventListener("click", (event) => {
   loadHome();
 });
 
+els.librarySidebarToggle.addEventListener("click", toggleLibrarySidebar);
+els.libraryMobileToggle.addEventListener("click", () => setLibrarySidebarMobileOpen(true));
+els.librarySidebarScrim.addEventListener("click", () => setLibrarySidebarMobileOpen(false));
+window.addEventListener("resize", handleLibrarySidebarResize);
+document.addEventListener("touchstart", beginLibrarySidebarGesture, { passive: true });
+document.addEventListener("touchend", finishLibrarySidebarGesture, { passive: true });
+document.addEventListener("touchcancel", () => {
+  librarySidebarGesture = null;
+}, { passive: true });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.librarySidebarMobileOpen) {
+    setLibrarySidebarMobileOpen(false);
+  }
+});
+
 els.lockButton.addEventListener("click", () => {
   publicApi("/api/auth/logout", { method: "POST" }).catch(() => {});
   hideLiveTvView();
@@ -656,6 +708,11 @@ els.lockButton.addEventListener("click", () => {
   state.user = null;
   setPlaybackPreferences(null);
   state.shareToken = "";
+  state.libraries = [];
+  state.homeRequestId += 1;
+  state.homeCache.clear();
+  state.homeData = null;
+  renderLibrarySidebar();
   libraryViewCache.clear();
   els.usernameInput.value = "";
   els.secretInput.value = "";
@@ -868,6 +925,7 @@ els.closeVideoMiniPlayer.addEventListener("click", closePlayer);
 els.webPlayer.addEventListener("playing", startOnDeckPolling);
 els.webPlayer.addEventListener("pause", stopOnDeckPolling);
 els.webPlayer.addEventListener("ended", handleWebPlayerEnded);
+els.webPlayer.addEventListener("play", handleWebPlayerReplay);
 els.webPlayer.addEventListener("play", updateMusicPlayerControls);
 els.webPlayer.addEventListener("pause", updateMusicPlayerControls);
 els.webPlayer.addEventListener("timeupdate", updateMusicPlayerControls);
@@ -891,6 +949,20 @@ els.webPlayer.addEventListener("play", () => sendWatchTogetherLocalState("play")
 els.webPlayer.addEventListener("pause", () => sendWatchTogetherLocalState("pause"));
 els.webPlayer.addEventListener("timeupdate", updateVideoPlayerControls);
 els.webPlayer.addEventListener("loadedmetadata", updateVideoPlayerControls);
+els.webPlayer.addEventListener("loadedmetadata", updateNativeTrackControls);
+if (els.webPlayer.textTracks && typeof els.webPlayer.textTracks.addEventListener === "function") {
+  els.webPlayer.textTracks.addEventListener("addtrack", (event) => {
+    bindVideoSubtitleTrack(event.track);
+    scheduleVideoSubtitlePositionUpdate();
+  });
+}
+bindVideoSubtitleTracks();
+if (typeof window.ResizeObserver === "function") {
+  videoSubtitleResizeObserver = new window.ResizeObserver(scheduleVideoSubtitlePositionUpdate);
+  videoSubtitleResizeObserver.observe(els.videoPlaybackSurface);
+} else {
+  window.addEventListener("resize", scheduleVideoSubtitlePositionUpdate);
+}
 els.webPlayer.addEventListener("durationchange", updateVideoPlayerControls);
 els.webPlayer.addEventListener("volumechange", updateVideoPlayerControls);
 els.webPlayer.addEventListener("seeking", handleVideoSeeking);
@@ -903,6 +975,9 @@ els.videoSeek.addEventListener("pointerdown", () => { videoSeeking = true; });
 els.videoSeek.addEventListener("input", seekVideoPlayback);
 els.videoSeek.addEventListener("change", finishVideoSeek);
 els.videoVolume.addEventListener("input", updateVideoVolume);
+els.videoAudioTrack.addEventListener("change", changeVideoAudioTrack);
+els.videoSubtitleTrack.addEventListener("change", changeVideoSubtitleTrack);
+els.videoTrackSettings.addEventListener("click", toggleVideoTrackSettings);
 els.videoShuffle.addEventListener("click", toggleVideoShuffle);
 els.videoPictureInPicture.addEventListener("click", toggleVideoPictureInPicture);
 els.videoFullscreen.addEventListener("click", toggleVideoFullscreen);
@@ -960,6 +1035,13 @@ els.imageViewer.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("pointerdown", (event) => {
+  if (!els.videoTrackControls.classList.contains("hidden")
+    && !els.videoTrackControls.contains(event.target)
+    && !els.videoTrackSettings.contains(event.target)) {
+    closeVideoTrackSettings();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
   if (!els.detailsPanel.classList.contains("open")) {
     return;
   }
@@ -973,6 +1055,11 @@ document.addEventListener("pointerdown", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") {
+    return;
+  }
+  if (!els.videoTrackControls.classList.contains("hidden")) {
+    closeVideoTrackSettings();
+    els.videoTrackSettings.focus({ preventScroll: true });
     return;
   }
   if (!els.iptvMatchOverlay.classList.contains("hidden")) {
@@ -1056,6 +1143,9 @@ async function boot() {
     }
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
+    if (initialRoute.name !== "watch" || state.token || state.shareToken) {
+      await loadLibrarySidebar(true);
+    }
     await renderRoute(initialRoute);
     refreshIptvAvailability();
     refreshSystemHealthInBackground();
@@ -1097,6 +1187,8 @@ function applyFeatures(features) {
 
 async function renderRoute(route) {
   routeRenderDepth += 1;
+  updateLibrarySidebarSelection(route);
+  setLibrarySidebarMobileOpen(false);
   try {
     if (route.name === "watch") {
       await openWatchTogether(route.inviteToken);
@@ -1157,9 +1249,200 @@ function readableRouteName(value) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+async function loadLibrarySidebar(force = false) {
+  if ((!state.token && !state.shareToken) || state.libraries.length > 0 && !force) {
+    renderLibrarySidebar();
+    return;
+  }
+
+  try {
+    const data = await api("/api/catalog/libraries");
+    state.libraries = Array.isArray(data.libraries) ? data.libraries : [];
+  } catch (err) {
+    state.libraries = [];
+  }
+  renderLibrarySidebar();
+}
+
+function renderLibrarySidebar() {
+  const available = state.libraries.length > 0;
+  els.librarySidebarNav.replaceChildren();
+  els.librarySidebar.classList.toggle("hidden", !available);
+  els.libraryMobileToggle.classList.toggle("hidden", !available);
+  els.appLayout.classList.toggle("sidebar-hidden", !available);
+  if (!available) {
+    setLibrarySidebarMobileOpen(false);
+    return;
+  }
+
+  const homeButton = document.createElement("button");
+  homeButton.className = "library-nav-item";
+  homeButton.type = "button";
+  homeButton.dataset.navigationTarget = "home";
+  homeButton.title = "Home";
+  homeButton.setAttribute("aria-label", "Home");
+  homeButton.innerHTML = `
+    <span class="library-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"/><path d="M5 10v11h14V10"/><path d="M9 21v-7h6v7"/></svg></span>
+    <span class="library-nav-label">Home</span>
+  `;
+  homeButton.addEventListener("click", () => {
+    setLibrarySidebarMobileOpen(false);
+    loadHome();
+  });
+  els.librarySidebarNav.appendChild(homeButton);
+
+  for (const library of state.libraries) {
+    const button = document.createElement("button");
+    button.className = "library-nav-item";
+    button.type = "button";
+    button.dataset.libraryKey = library.key;
+    button.title = library.title;
+    button.setAttribute("aria-label", library.title);
+    button.innerHTML = `
+      <span class="library-nav-icon" aria-hidden="true">${libraryTypeIcon(library.type)}</span>
+      <span class="library-nav-label">${escapeHtml(library.title)}</span>
+    `;
+    button.addEventListener("click", () => {
+      setLibrarySidebarMobileOpen(false);
+      openLibraryView(library.key, library.title, "", { restore: true });
+    });
+    els.librarySidebarNav.appendChild(button);
+  }
+  applyLibrarySidebarState();
+  updateLibrarySidebarSelection(navigation.readRoute());
+}
+
+function toggleLibrarySidebar() {
+  if (isLibrarySidebarMobile()) {
+    setLibrarySidebarMobileOpen(false);
+    return;
+  }
+  state.librarySidebarExpanded = !state.librarySidebarExpanded;
+  try {
+    localStorage.setItem(LIBRARY_SIDEBAR_PREFERENCE_KEY, state.librarySidebarExpanded ? "true" : "false");
+  } catch (err) {
+    // The current page can still retain the preference when storage is unavailable.
+  }
+  applyLibrarySidebarState();
+}
+
+function applyLibrarySidebarState() {
+  const mobile = isLibrarySidebarMobile();
+  els.appLayout.classList.toggle("sidebar-collapsed", !state.librarySidebarExpanded);
+  els.librarySidebarToggle.setAttribute("aria-expanded", mobile
+    ? String(state.librarySidebarMobileOpen)
+    : String(state.librarySidebarExpanded));
+  els.librarySidebarToggle.setAttribute("aria-label", mobile
+    ? "Close libraries"
+    : state.librarySidebarExpanded ? "Collapse libraries" : "Expand libraries");
+  els.librarySidebarToggle.title = mobile
+    ? "Close libraries"
+    : state.librarySidebarExpanded ? "Collapse libraries" : "Expand libraries";
+  els.librarySidebarToggle.innerHTML = mobile
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4M14 9l-3 3 3 3M21 3v18"/></svg>';
+}
+
+function setLibrarySidebarMobileOpen(open) {
+  const nextOpen = Boolean(open && isLibrarySidebarMobile() && state.libraries.length > 0);
+  state.librarySidebarMobileOpen = nextOpen;
+  els.appLayout.classList.toggle("sidebar-mobile-open", nextOpen);
+  els.librarySidebarScrim.classList.toggle("hidden", !nextOpen);
+  els.libraryMobileToggle.setAttribute("aria-expanded", String(nextOpen));
+  els.libraryMobileToggle.setAttribute("aria-label", nextOpen ? "Close libraries" : "Open libraries");
+  els.libraryMobileToggle.title = nextOpen ? "Close libraries" : "Open libraries";
+  document.body.classList.toggle("library-sidebar-open", nextOpen);
+  applyLibrarySidebarState();
+}
+
+function handleLibrarySidebarResize() {
+  if (!isLibrarySidebarMobile() && state.librarySidebarMobileOpen) {
+    setLibrarySidebarMobileOpen(false);
+  } else {
+    applyLibrarySidebarState();
+  }
+}
+
+function beginLibrarySidebarGesture(event) {
+  if (!isLibrarySidebarMobile() || event.touches.length !== 1 || state.libraries.length === 0) {
+    return;
+  }
+  const touch = event.touches[0];
+  const canOpen = !state.librarySidebarMobileOpen && touch.clientX <= 28;
+  const canClose = state.librarySidebarMobileOpen && els.librarySidebar.contains(event.target);
+  if (!canOpen && !canClose) return;
+  librarySidebarGesture = {
+    x: touch.clientX,
+    y: touch.clientY,
+    opening: canOpen
+  };
+}
+
+function finishLibrarySidebarGesture(event) {
+  if (!librarySidebarGesture || event.changedTouches.length === 0) {
+    librarySidebarGesture = null;
+    return;
+  }
+  const touch = event.changedTouches[0];
+  const deltaX = touch.clientX - librarySidebarGesture.x;
+  const deltaY = touch.clientY - librarySidebarGesture.y;
+  const horizontalSwipe = Math.abs(deltaX) >= 56 && Math.abs(deltaX) > Math.abs(deltaY) * 1.25;
+  if (horizontalSwipe) {
+    if (librarySidebarGesture.opening && deltaX > 0) {
+      setLibrarySidebarMobileOpen(true);
+    } else if (!librarySidebarGesture.opening && deltaX < 0) {
+      setLibrarySidebarMobileOpen(false);
+    }
+  }
+  librarySidebarGesture = null;
+}
+
+function updateLibrarySidebarSelection(route) {
+  const libraryKey = route && ["library", "show", "season", "artist", "album"].includes(route.name)
+    ? route.libraryKey
+    : "";
+  els.librarySidebarNav.querySelectorAll(".library-nav-item").forEach((button) => {
+    const active = button.dataset.navigationTarget === "home"
+      ? route && route.name === "home"
+      : Boolean(libraryKey) && button.dataset.libraryKey === libraryKey;
+    button.classList.toggle("active", active);
+    if (active) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
+  });
+}
+
+function readLibrarySidebarPreference() {
+  try {
+    return localStorage.getItem(LIBRARY_SIDEBAR_PREFERENCE_KEY) !== "false";
+  } catch (err) {
+    return true;
+  }
+}
+
+function isLibrarySidebarMobile() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+function libraryTypeIcon(type) {
+  if (type === "tv") {
+    return '<svg viewBox="0 0 24 24"><path d="m17 2-5 5-5-5"/><rect width="20" height="15" x="2" y="7" rx="2"/></svg>';
+  }
+  if (type === "music") {
+    return '<svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  }
+  if (type === "images") {
+    return '<svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>';
+  }
+  return '<svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/></svg>';
+}
+
 function recordRoute(path, options = {}) {
   if (routeRenderDepth === 0) {
     navigation.navigate(path, options);
+    updateLibrarySidebarSelection(navigation.readRoute());
   }
 }
 
@@ -1173,23 +1456,172 @@ function updateLoginMode() {
 
 async function loadHome(mode = state.homeMode) {
   stopLibraryLoading();
+  stopHomeRowLoading();
   hideLiveTvView();
   state.homeMode = mode === "random" ? "random" : "recent";
+  const requestId = ++state.homeRequestId;
   recordRoute(navigation.homePath(state.homeMode));
   updateHomeModeControls();
-  const data = await api(`/api/catalog/home?mode=${encodeURIComponent(state.homeMode)}`);
-  state.homeData = data;
+  prepareHomeView();
+
+  const cached = state.homeCache.get(state.homeMode);
+  if (cached) {
+    renderHomeSnapshot(cached.data, cached.onDeckItems);
+  } else {
+    const status = document.createElement("p");
+    status.className = "status";
+    status.textContent = "Loading home...";
+    els.homeRows.replaceChildren(status);
+  }
+
+  const params = new URLSearchParams({
+    mode: state.homeMode,
+    limit: String(HOME_ROW_PAGE_SIZE)
+  });
+  const homeRequest = api(`/api/catalog/home?${params.toString()}`);
+  const onDeckRequest = api("/api/progress/on-deck").catch(() => null);
+
+  let data;
+  let onDeck;
+  try {
+    [data, onDeck] = await Promise.all([homeRequest, onDeckRequest]);
+  } catch (err) {
+    if (cached) {
+      return;
+    }
+    throw err;
+  }
+
+  if (state.homeRequestId !== requestId || state.currentView !== "home" || data.mode !== state.homeMode) {
+    return;
+  }
+
+  const onDeckItems = onDeck
+    ? onDeck.items || []
+    : cached ? cached.onDeckItems : [];
+  state.homeCache.set(state.homeMode, { data, onDeckItems });
+  renderHomeSnapshot(data, onDeckItems);
+}
+
+function prepareHomeView() {
   state.currentView = "home";
   els.searchInput.value = "";
   els.searchResults.classList.add("hidden");
   els.homeToolbar.classList.remove("hidden");
   els.homeRows.classList.remove("hidden");
+}
+
+function renderHomeSnapshot(data, onDeckItems) {
+  stopHomeRowLoading();
+  state.homeData = data;
+  state.homeSeed = data.seed || "";
   els.homeRows.innerHTML = "";
-  const onDeck = await api("/api/progress/on-deck");
-  renderOnDeckRow(onDeck.items || []);
+  renderOnDeckRow(onDeckItems || []);
   for (const row of data.rows) {
-    els.homeRows.appendChild(rowSection(row.title, row.total || row.items.length, row.items, row.key));
+    els.homeRows.appendChild(homeLibraryRowSection(row));
   }
+}
+
+function homeLibraryRowSection(row) {
+  const section = rowSection(row.title, row.total || row.items.length, row.items, row.key);
+  const rail = section.querySelector(".rail");
+  const rowState = {
+    key: row.key,
+    title: row.title,
+    rail,
+    offset: Number.isFinite(Number(row.nextOffset)) ? Number(row.nextOffset) : row.items.length,
+    hasMore: Boolean(row.hasMore),
+    loading: false,
+    requestId: 0,
+    itemKeys: new Set(row.items.map(homeRowItemKey))
+  };
+  rail.addEventListener("scroll", () => {
+    rowState.failed = false;
+    scheduleHomeRowLoad(rowState);
+  }, { passive: true });
+  state.homeRows.set(row.key, rowState);
+  requestAnimationFrame(() => scheduleHomeRowLoad(rowState));
+  return section;
+}
+
+function scheduleHomeRowLoad(rowState) {
+  if (state.currentView !== "home" || state.homeRows.get(rowState.key) !== rowState || rowState.scrollFrame) {
+    return;
+  }
+  rowState.scrollFrame = requestAnimationFrame(() => {
+    rowState.scrollFrame = null;
+    if (homeRailNearEnd(rowState.rail)) {
+      loadNextHomeRowPage(rowState);
+    }
+  });
+}
+
+function homeRailNearEnd(rail) {
+  return rail.scrollWidth - rail.scrollLeft - rail.clientWidth < 720;
+}
+
+async function loadNextHomeRowPage(rowState) {
+  if (rowState.loading || !rowState.hasMore || state.homeRows.get(rowState.key) !== rowState) {
+    return;
+  }
+
+  rowState.loading = true;
+  const requestId = ++rowState.requestId;
+  const loader = document.createElement("div");
+  loader.className = "rail-load-indicator";
+  loader.setAttribute("aria-label", `Loading more ${rowState.title}`);
+  rowState.rail.appendChild(loader);
+
+  try {
+    const params = new URLSearchParams({
+      mode: state.homeMode,
+      library: rowState.key,
+      offset: String(rowState.offset),
+      limit: String(HOME_ROW_PAGE_SIZE),
+      seed: state.homeSeed
+    });
+    const data = await api(`/api/catalog/home?${params.toString()}`);
+    const row = data.rows && data.rows[0];
+    if (!row || state.homeRows.get(rowState.key) !== rowState || rowState.requestId !== requestId) {
+      return;
+    }
+
+    loader.remove();
+    for (const item of row.items || []) {
+      const key = homeRowItemKey(item);
+      if (rowState.itemKeys.has(key)) continue;
+      rowState.itemKeys.add(key);
+      rowState.rail.appendChild(card(item));
+    }
+    rowState.offset = Number.isFinite(Number(row.nextOffset))
+      ? Number(row.nextOffset)
+      : rowState.offset + (row.items || []).length;
+    rowState.hasMore = Boolean(row.hasMore) && (row.items || []).length > 0;
+  } catch (err) {
+    rowState.failed = true;
+  } finally {
+    loader.remove();
+    if (state.homeRows.get(rowState.key) === rowState && rowState.requestId === requestId) {
+      rowState.loading = false;
+      if (rowState.hasMore && !rowState.failed) {
+        requestAnimationFrame(() => scheduleHomeRowLoad(rowState));
+      }
+    }
+  }
+}
+
+function homeRowItemKey(item) {
+  return `${item.mediaType || ""}:${item.itemType || item.kind || "item"}:${item.id || item.filePath || item.title || ""}`;
+}
+
+function stopHomeRowLoading() {
+  for (const rowState of state.homeRows.values()) {
+    rowState.requestId += 1;
+    if (rowState.scrollFrame) {
+      cancelAnimationFrame(rowState.scrollFrame);
+    }
+  }
+  state.homeRows.clear();
 }
 
 function renderOnDeckRow(items) {
@@ -1225,7 +1657,12 @@ async function refreshOnDeckRow({ force = false } = {}) {
   onDeckRefreshPromise = api("/api/progress/on-deck")
     .then((onDeck) => {
       if (state.currentView === "home") {
-        renderOnDeckRow(onDeck.items || []);
+        const items = onDeck.items || [];
+        renderOnDeckRow(items);
+        const cached = state.homeCache.get(state.homeMode);
+        if (cached) {
+          cached.onDeckItems = items;
+        }
       }
     })
     .finally(() => {
@@ -1411,6 +1848,10 @@ async function search() {
     searchAbortController = null;
   }
   if (!query) {
+    if (state.currentView === "search") {
+      await loadHome(state.homeMode);
+      return;
+    }
     recordRoute(navigation.homePath(state.homeMode), { replace: state.currentView === "search" });
     els.searchResults.classList.add("hidden");
     els.homeToolbar.classList.remove("hidden");
@@ -1421,6 +1862,7 @@ async function search() {
     return;
   }
 
+  stopHomeRowLoading();
   recordRoute(navigation.searchPath(query), { replace: state.currentView === "search" });
   els.homeRows.classList.add("hidden");
   els.homeToolbar.classList.add("hidden");
@@ -1697,20 +2139,18 @@ async function openDetails(item, detailOptions = {}) {
 function rowSection(title, count, items, libraryKey, options = {}) {
   const section = document.createElement("section");
   section.className = "row";
+  if (libraryKey) {
+    section.dataset.libraryKey = libraryKey;
+  }
   section.innerHTML = `
     <div class="section-heading">
       <h2>${escapeHtml(title)}</h2>
       <div class="section-actions">
         <span>${count}</span>
-        ${libraryKey ? '<button class="text-button" type="button">View all</button>' : ""}
       </div>
     </div>
     <div class="rail"></div>
   `;
-  const viewAll = section.querySelector(".text-button");
-  if (viewAll) {
-    viewAll.addEventListener("click", () => openLibraryView(libraryKey, title));
-  }
   const rail = section.querySelector(".rail");
   items.forEach((item) => rail.appendChild(card(item, options)));
   return section;
@@ -1812,8 +2252,7 @@ async function openSeasonView(mediaType, showId, seasonNumber, options = {}) {
       ...(hasPermission("canManageMetadata") ? [{ label: "Edit poster", onClick: () => openSeriesPosterEditor(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Refresh season posters", onClick: (event) => refreshSeasonArtwork(mediaType, show, event.currentTarget, seasonNumber) }] : []),
       ...(state.user && !state.shareToken ? [{ label: seasonWatchedActionLabel(season), onClick: (event) => markSeasonWatched(mediaType, show, season, event.currentTarget) }] : []),
-      { label: "Show", onClick: () => openShowView(mediaType, showId) },
-      { label: "Home", onClick: () => loadHome() }
+      { label: "Show", onClick: () => openShowView(mediaType, showId) }
     ],
     content
   });
@@ -1840,8 +2279,7 @@ async function openShowView(mediaType, showId, options = {}) {
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Edit poster", onClick: () => openSeriesPosterEditor(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Refresh season posters", onClick: (event) => refreshSeasonArtwork(mediaType, show, event.currentTarget) }] : []),
-      { label: "Random episode", onClick: () => openRandomEpisode(mediaType, show) },
-      { label: "Home", onClick: () => loadHome() }
+      { label: "Random episode", onClick: () => openRandomEpisode(mediaType, show) }
     ],
     content: fragment
   });
@@ -1963,8 +2401,7 @@ async function openAlbumView(mediaType, artistId, albumId) {
     title: `${artist.name} - ${album.name}`,
     subtitle: `${album.tracks.length} tracks${album.year ? ` - ${album.year}` : ""}`,
     actions: [
-      { label: "Artist", onClick: () => openArtistView(mediaType, artistId) },
-      { label: "Home", onClick: () => loadHome() }
+      { label: "Artist", onClick: () => openArtistView(mediaType, artistId) }
     ],
     content: section
   });
@@ -1988,7 +2425,7 @@ async function openArtistView(mediaType, artistId) {
   showContentView({
     title: artist.name,
     subtitle: `${artist.albums.length} albums`,
-    actions: [{ label: "Home", onClick: () => loadHome() }],
+    actions: [],
     content: fragment
   });
 }
@@ -2005,6 +2442,7 @@ function openRandomEpisode(mediaType, show) {
 }
 
 function showContentView({ title, subtitle, actions, content }) {
+  stopHomeRowLoading();
   hideLiveTvView();
   els.searchInput.value = "";
   els.searchResults.classList.add("hidden");
@@ -2032,6 +2470,7 @@ function showContentView({ title, subtitle, actions, content }) {
 
 async function openLibraryView(libraryKey, title, folder = "", options = {}) {
   stopLibraryLoading();
+  stopHomeRowLoading();
   closeDetails();
   recordRoute(navigation.libraryPath(libraryKey, folder), { state: { title } });
 
@@ -2059,8 +2498,7 @@ async function openLibraryView(libraryKey, title, folder = "", options = {}) {
     title: folder ? catalogFolderName(folder) : title,
     subtitle: "Loading...",
     actions: [
-      ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder), { restore: true }) }] : []),
-      { label: "Home", onClick: () => loadHome() }
+      ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder), { restore: true }) }] : [])
     ],
     content: section
   });
@@ -2177,7 +2615,7 @@ async function openHistoryView() {
   showContentView({
     title: "History",
     subtitle: `${data.items ? data.items.length : 0} items`,
-    actions: [{ label: "Home", onClick: () => loadHome() }],
+    actions: [],
     content: section
   });
 }
@@ -2206,6 +2644,7 @@ async function openLiveTv(start = new Date(), pinnedToNow = true) {
   }
 
   stopLibraryLoading();
+  stopHomeRowLoading();
   closeDetails();
   state.iptvGuideStart = roundedGuideStart(new Date(start));
   state.iptvGuidePinnedToNow = pinnedToNow;
@@ -5261,7 +5700,8 @@ async function refreshHardware() {
     if (data.gpu.available) {
       els.gpuMeter.style.setProperty("--meter", `${data.gpu.percent || 0}%`);
       const temperature = data.gpu.temperatureC === null ? "" : ` - ${data.gpu.temperatureC}C`;
-      els.gpuText.textContent = `${data.gpu.percent || 0}%${temperature}`;
+      const gpuName = data.gpu.name ? `${data.gpu.name} - ` : "";
+      els.gpuText.textContent = `${gpuName}${data.gpu.percent || 0}%${temperature}`;
     } else {
       els.gpuMeter.style.setProperty("--meter", "0%");
       els.gpuText.textContent = data.gpu.reason;
@@ -5878,6 +6318,7 @@ async function saveLibraryOrder() {
       body: JSON.stringify({ keys })
     });
     els.libraryManagerStatus.textContent = "Library order saved.";
+    await loadLibrarySidebar(true);
     await loadHome();
   } catch (err) {
     els.libraryManagerStatus.textContent = "Failed to save library order.";
@@ -5940,6 +6381,7 @@ async function addLibrary(event) {
     els.libraryForm.reset();
     els.libraryTrackProgress.checked = true;
     await loadLibraryManager();
+    await loadLibrarySidebar(true);
     await loadHome();
     els.libraryManagerStatus.textContent = "Library added. Re-index running in the background.";
   } catch (err) {
@@ -6096,6 +6538,7 @@ async function deleteLibrary(key, title) {
   try {
     await api(`/api/libraries/${encodeURIComponent(key)}`, state.token, { method: "DELETE" });
     await loadLibraryManager();
+    await loadLibrarySidebar(true);
     await loadHome();
     els.libraryManagerStatus.textContent = "Library removed. Re-index running in the background.";
   } catch (err) {
@@ -7950,6 +8393,12 @@ function applyWatchTogetherState(roomState, force = false) {
   const expected = Math.max(0, Number(roomState.positionSeconds) + transportSeconds);
   const drift = expected - (Number(els.webPlayer.currentTime) || 0);
   watchTogetherSuppressControlsUntil = Date.now() + 1000;
+  if (watchTogetherSession.trackSwitching) {
+    els.webPlayer.playbackRate = 1;
+    if (roomState.state !== "playing") els.webPlayer.pause();
+    updateWatchTogetherRoomStatus();
+    return;
+  }
   if (force || Math.abs(drift) > 1.5) {
     els.webPlayer.currentTime = expected;
     els.webPlayer.playbackRate = 1;
@@ -8091,6 +8540,15 @@ async function playStream() {
 
 async function openWebPlayer(url, options = {}) {
   closePlayer({ navigate: false });
+  webPlaybackNeedsRenewal = false;
+  activeWebPlaybackRequest = options.mediaType && options.mediaId && !options.live
+    ? {
+      sessionId: webPlaybackSessionId,
+      url: url.toString(),
+      options: { ...options },
+      fallbackStarted: false
+    }
+    : null;
   activePlaybackMedia = options.mediaType && options.mediaId
     ? {
       mediaType: options.mediaType,
@@ -8134,12 +8592,16 @@ async function openWebPlayer(url, options = {}) {
   updateVideoShuffleControl();
   updateVideoPlayerControls();
   updateVideoPictureInPictureControl();
+  resetVideoTrackControls();
 
   const startFallback = () => {
     if (!fallbackUrl || fallbackStarted) {
       return false;
     }
     fallbackStarted = true;
+    if (activeWebPlaybackRequest) {
+      activeWebPlaybackRequest.fallbackStarted = true;
+    }
     video.dataset.autoAdvance = "false";
     els.musicNext.disabled = true;
     setPlayerStatus("The requested stream failed. Playing the fallback stream.");
@@ -8170,6 +8632,7 @@ async function openWebPlayer(url, options = {}) {
       video.addEventListener("error", nativePlayerErrorHandler);
       video.src = url.toString();
       await seekNativeVideo(video, resumeSeconds);
+      updateNativeTrackControls();
       if (autoplay) {
         await video.play();
       }
@@ -8214,6 +8677,7 @@ async function openWebPlayer(url, options = {}) {
           }
         }
         if (!isFallback && startFallback()) {
+          cancelPendingHlsAudioSwitch();
           player.destroy();
           if (hlsPlayer === player) {
             hlsPlayer = null;
@@ -8225,14 +8689,28 @@ async function openWebPlayer(url, options = {}) {
           ? "The fallback stream could not be played."
           : options.errorMessage || "Playback failed.");
       });
-      player.on(window.Hls.Events.FRAG_BUFFERED, () => {
+      player.on(window.Hls.Events.FRAG_BUFFERED, (event, data) => {
         liveRecoveryAttempts = 0;
         if (!isFallback) {
-          setPlayerStatus("");
+          if (!pendingHlsAudioSwitch || pendingHlsAudioSwitch.player !== player) {
+            setPlayerStatus("");
+          }
+          completePendingHlsAudioSwitch(player, data);
           notifyWatchTogetherReady();
         }
       });
+      player.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, () => updateHlsTrackControls(player));
+      player.on(window.Hls.Events.AUDIO_TRACK_SWITCHED, (event, data) => {
+        markPendingHlsAudioTrackSwitched(player, data);
+        updateHlsTrackControls(player);
+      });
+      player.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, () => updateHlsTrackControls(player));
+      player.on(window.Hls.Events.SUBTITLE_TRACK_SWITCH, () => updateHlsTrackControls(player));
+      if (window.Hls.Events.CUES_PARSED) {
+        player.on(window.Hls.Events.CUES_PARSED, scheduleVideoSubtitlePositionUpdate);
+      }
       player.on(window.Hls.Events.MANIFEST_PARSED, async () => {
+        updateHlsTrackControls(player);
         try {
           if (!isFallback && resumeSeconds > 0) {
             video.currentTime = resumeSeconds;
@@ -8264,7 +8742,11 @@ async function openWebPlayer(url, options = {}) {
 }
 
 function closePlayer(options = {}) {
-  const finalProgressRequest = reportWebPlaybackProgress(true);
+  webPlaybackSessionId += 1;
+  webPlaybackRestartPromise = null;
+  const finalProgressRequest = activeWebPlaybackRequest && activeWebPlaybackRequest.fallbackStarted
+    ? null
+    : reportWebPlaybackProgress(true);
   reportWatchTogetherProgress(true);
   leaveWatchTogether({ navigate: options.navigate !== false });
   stopOnDeckPolling();
@@ -8275,6 +8757,7 @@ function closePlayer(options = {}) {
   dismissedSkipMarkers = new Set();
   updateSkipMarkerControl();
   if (hlsPlayer) {
+    cancelPendingHlsAudioSwitch();
     hlsPlayer.destroy();
     hlsPlayer = null;
   }
@@ -8301,11 +8784,14 @@ function closePlayer(options = {}) {
   els.videoMiniPlayer.classList.add("hidden");
   els.videoMiniPlayer.setAttribute("aria-hidden", "true");
   activePlaybackMedia = null;
+  activeWebPlaybackRequest = null;
+  webPlaybackNeedsRenewal = false;
   activePlaybackShuffle = null;
   state.selectedPlaybackShuffle = null;
   updateVideoShuffleControl();
   webProgressLastReportedAt = 0;
   resetVideoEndTracking();
+  resetVideoTrackControls();
   setPlayerStatus("");
   if (finalProgressRequest) {
     finalProgressRequest.finally(() => {
@@ -8318,6 +8804,7 @@ function minimizeVideoPlayback() {
   if (els.playerOverlay.classList.contains("hidden") || els.videoPlaybackSurface.parentElement !== els.videoPlayerSlot) {
     return;
   }
+  closeVideoTrackSettings(false);
   els.videoMiniCategory.textContent = els.playerCategory.textContent;
   els.videoMiniTitle.textContent = els.playerTitle.textContent;
   els.videoMiniPlayer.classList.remove("hidden");
@@ -8347,8 +8834,85 @@ function moveActiveWebPlayer(target) {
   }
 }
 
+function handleWebPlayerReplay() {
+  if (!webPlaybackNeedsRenewal || watchTogetherSession || !activeWebPlaybackRequest || webPlaybackRestartPromise) {
+    return;
+  }
+  els.webPlayer.pause();
+  restartWebPlayback().catch(() => {});
+}
+
+function shouldRenewWebPlayback() {
+  return Boolean(activeWebPlaybackRequest && (
+    webPlaybackNeedsRenewal
+    || activeWebPlaybackRequest.fallbackStarted
+    || els.webPlayer.ended
+  ));
+}
+
+function restartWebPlayback() {
+  if (webPlaybackRestartPromise) {
+    return webPlaybackRestartPromise;
+  }
+  const request = activeWebPlaybackRequest;
+  if (!request || watchTogetherSession) {
+    return Promise.resolve(false);
+  }
+
+  const sessionId = request.sessionId;
+  webPlaybackNeedsRenewal = false;
+  els.webPlayer.pause();
+  setPlayerStatus("Preparing a fresh stream session...");
+
+  const restart = (async () => {
+    const freshOptions = await api(`/api/catalog/${encodeURIComponent(request.options.mediaType)}/${encodeURIComponent(request.options.mediaId)}/options`);
+    if (activeWebPlaybackRequest !== request || webPlaybackSessionId !== sessionId) {
+      return false;
+    }
+
+    const freshUrl = new URL(request.url, window.location.origin);
+    freshUrl.searchParams.set("playbackToken", freshOptions.webPlaybackToken);
+    if (state.selected
+      && state.selected.mediaType === request.options.mediaType
+      && state.selected.id === request.options.mediaId) {
+      state.options = {
+        ...(state.options || {}),
+        webPlaybackToken: freshOptions.webPlaybackToken
+      };
+    }
+
+    await openWebPlayer(freshUrl, {
+      ...request.options,
+      resumeSeconds: 0,
+      autoplay: true,
+      skipMarkers: freshOptions.skipMarkers || request.options.skipMarkers,
+      autoAdvance: Boolean(freshOptions.nextItem) || Boolean(request.options.shuffle),
+      nextItem: freshOptions.nextItem || null,
+      hasSequentialNext: Boolean(freshOptions.nextItem)
+    });
+    return true;
+  })().catch((err) => {
+    if (activeWebPlaybackRequest === request) {
+      webPlaybackNeedsRenewal = true;
+      setPlayerStatus("The stream could not be reconnected. Press play to try again.");
+    }
+    throw err;
+  }).finally(() => {
+    if (webPlaybackRestartPromise === restart) {
+      webPlaybackRestartPromise = null;
+    }
+  });
+
+  webPlaybackRestartPromise = restart;
+  return restart;
+}
+
 function toggleVideoPlayback() {
   if (els.videoPlaybackSurface.classList.contains("audio-only")) {
+    return;
+  }
+  if (!watchTogetherSession && shouldRenewWebPlayback()) {
+    restartWebPlayback().catch(() => {});
     return;
   }
   if (watchTogetherSession) {
@@ -8479,6 +9043,442 @@ function resetVideoEndTracking() {
 function updateVideoVolume() {
   els.webPlayer.muted = false;
   els.webPlayer.volume = Math.max(0, Math.min(1, Number(els.videoVolume.value) || 0));
+}
+
+function resetVideoTrackControls() {
+  cancelPendingHlsAudioSwitch();
+  els.videoAudioTrack.innerHTML = "";
+  els.videoSubtitleTrack.innerHTML = "";
+  els.videoAudioTrackLabel.classList.add("hidden");
+  els.videoSubtitleTrackLabel.classList.add("hidden");
+  setVideoTrackSettingsAvailable(false);
+}
+
+function updateHlsTrackControls(player) {
+  if (!player || player !== hlsPlayer) return;
+  const audioTracks = Array.isArray(player.audioTracks) ? player.audioTracks : [];
+  const subtitleTracks = Array.isArray(player.subtitleTracks) ? player.subtitleTracks : [];
+
+  els.videoAudioTrack.innerHTML = audioTracks.map((track, index) => (
+    `<option value="${index}">${escapeHtml(track.name || track.lang || `Audio ${index + 1}`)}</option>`
+  )).join("");
+  if (audioTracks.length > 0) {
+    const pendingTrack = pendingHlsAudioSwitch && pendingHlsAudioSwitch.player === player
+      ? pendingHlsAudioSwitch.trackIndex
+      : null;
+    els.videoAudioTrack.value = String(pendingTrack === null ? Math.max(0, player.audioTrack) : pendingTrack);
+  }
+  els.videoAudioTrackLabel.classList.toggle("hidden", audioTracks.length < 2);
+
+  els.videoSubtitleTrack.innerHTML = [
+    '<option value="-1">Off</option>',
+    ...subtitleTracks.map((track, index) => (
+      `<option value="${index}">${escapeHtml(track.name || track.lang || `Subtitles ${index + 1}`)}</option>`
+    ))
+  ].join("");
+  els.videoSubtitleTrack.value = String(Number.isInteger(player.subtitleTrack) ? player.subtitleTrack : -1);
+  els.videoSubtitleTrackLabel.classList.toggle("hidden", subtitleTracks.length === 0);
+  setVideoTrackSettingsAvailable(audioTracks.length >= 2 || subtitleTracks.length > 0);
+  bindVideoSubtitleTracks();
+  scheduleVideoSubtitlePositionUpdate();
+}
+
+async function stageHlsAudioTrackSwitch(player, trackIndex) {
+  const tracks = Array.isArray(player && player.audioTracks) ? player.audioTracks : [];
+  const track = tracks[trackIndex];
+  if (!track || player !== hlsPlayer) return;
+
+  cancelPendingHlsAudioSwitch();
+  if (trackIndex === player.audioTrack) {
+    updateHlsTrackControls(player);
+    return;
+  }
+
+  const operation = {
+    player,
+    trackIndex,
+    trackId: Number.isInteger(track.id) ? track.id : trackIndex,
+    previousTrackIndex: player.audioTrack,
+    controller: new AbortController(),
+    committed: false,
+    switched: false,
+    completionTimer: null
+  };
+  pendingHlsAudioSwitch = operation;
+  updateHlsTrackControls(player);
+  setPlayerStatus(`Preparing ${audioTrackDisplayName(track, trackIndex)}...`);
+
+  try {
+    await prefetchHlsAudioWindow(track.url, player, operation.controller.signal);
+    if (pendingHlsAudioSwitch !== operation || player !== hlsPlayer) return;
+
+    operation.committed = true;
+    if (watchTogetherSession) watchTogetherSession.trackSwitching = true;
+    markWatchTogetherTrackBuffering();
+    setPlayerStatus(`Switching to ${audioTrackDisplayName(track, trackIndex)}...`);
+    player.audioTrack = trackIndex;
+    operation.completionTimer = window.setTimeout(() => {
+      if (pendingHlsAudioSwitch === operation) finishHlsAudioTrackSwitch(operation);
+    }, 15000);
+  } catch (err) {
+    if (pendingHlsAudioSwitch !== operation) return;
+    pendingHlsAudioSwitch = null;
+    if (watchTogetherSession && operation.committed) {
+      watchTogetherSession.trackSwitching = false;
+      if (watchTogetherSession.state) applyWatchTogetherState(watchTogetherSession.state, true);
+      window.setTimeout(notifyWatchTogetherReady, 0);
+    }
+    if (err && err.name === "AbortError") return;
+    setTemporaryPlayerStatus(`Could not prepare ${audioTrackDisplayName(track, trackIndex)}.`);
+    updateHlsTrackControls(player);
+  }
+}
+
+async function prefetchHlsAudioWindow(playlistUrl, player, signal) {
+  if (!playlistUrl) throw new Error("Audio rendition does not have a playlist");
+  const resolvedPlaylistUrl = new URL(playlistUrl, window.location.href).toString();
+  const playlist = await fetchHlsPrefetchResource(resolvedPlaylistUrl, signal, true);
+  const segments = parseHlsMediaSegments(playlist, resolvedPlaylistUrl);
+  if (segments.length === 0) throw new Error("Audio rendition playlist has no segments");
+
+  const fetched = new Set();
+  for (let attempt = 0; attempt < AUDIO_SWITCH_PREFETCH_ATTEMPTS; attempt += 1) {
+    const position = Math.max(0, Number(player.media && player.media.currentTime) || 0);
+    const duration = Math.max(position, Number(player.media && player.media.duration) || segments[segments.length - 1].end);
+    const requiredSeconds = Math.min(AUDIO_SWITCH_PREFETCH_SECONDS, Math.max(0.5, duration - position));
+    const windowEnd = position + requiredSeconds;
+    const urls = segments
+      .filter((segment) => segment.end > position - 0.25 && segment.start < windowEnd + 0.25)
+      .map((segment) => segment.url)
+      .filter((url) => !fetched.has(url));
+
+    await prefetchHlsSegmentUrls(urls, signal);
+    urls.forEach((url) => fetched.add(url));
+
+    const latestPosition = Math.max(0, Number(player.media && player.media.currentTime) || 0);
+    if (prefetchedHlsSecondsAhead(segments, fetched, latestPosition) >= Math.min(requiredSeconds, AUDIO_SWITCH_PREFETCH_SECONDS) - 0.25) {
+      return;
+    }
+  }
+  throw new Error("Audio rendition could not stay ahead of playback");
+}
+
+async function prefetchHlsSegmentUrls(urls, signal) {
+  const pending = [...urls];
+  const workers = Array.from({ length: Math.min(3, pending.length) }, async () => {
+    while (pending.length > 0) {
+      const url = pending.shift();
+      await fetchHlsPrefetchResource(url, signal, false);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function fetchHlsPrefetchResource(url, signal, textResponse) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      cache: textResponse ? "no-store" : "default",
+      signal
+    });
+    if (response.ok) return textResponse ? response.text() : response.arrayBuffer();
+    if (response.status !== 503 || attempt === 19) {
+      throw new Error(`Audio prefetch failed with HTTP ${response.status}`);
+    }
+    await waitForHlsPrefetchRetry(response, signal);
+  }
+  throw new Error("Audio prefetch failed");
+}
+
+function waitForHlsPrefetchRetry(response, signal) {
+  const retrySeconds = Math.max(0.25, Math.min(2, Number(response.headers.get("Retry-After")) || 1));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Audio prefetch cancelled", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, retrySeconds * 1000);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function parseHlsMediaSegments(playlist, playlistUrl) {
+  const segments = [];
+  let elapsed = 0;
+  let duration = null;
+  for (const rawLine of String(playlist || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.startsWith("#EXTINF:")) {
+      duration = Number.parseFloat(line.slice(8));
+      continue;
+    }
+    if (!line || line.startsWith("#") || !Number.isFinite(duration) || duration <= 0) continue;
+    segments.push({
+      url: new URL(line, playlistUrl).toString(),
+      start: elapsed,
+      end: elapsed + duration
+    });
+    elapsed += duration;
+    duration = null;
+  }
+  return segments;
+}
+
+function prefetchedHlsSecondsAhead(segments, fetched, position) {
+  const firstIndex = segments.findIndex((segment) => segment.end > position - 0.25);
+  if (firstIndex < 0 || !fetched.has(segments[firstIndex].url)) return 0;
+  let end = segments[firstIndex].end;
+  for (let index = firstIndex + 1; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.start > end + 0.25 || !fetched.has(segment.url)) break;
+    end = Math.max(end, segment.end);
+  }
+  return Math.max(0, end - position);
+}
+
+function audioTrackDisplayName(track, trackIndex) {
+  return track.name || track.lang || `audio track ${trackIndex + 1}`;
+}
+
+function markPendingHlsAudioTrackSwitched(player, data) {
+  const operation = pendingHlsAudioSwitch;
+  if (!operation || operation.player !== player || !operation.committed) return;
+  const switchedId = Number(data && data.id);
+  if (Number.isFinite(switchedId) && switchedId !== operation.trackId) return;
+  operation.switched = true;
+}
+
+function completePendingHlsAudioSwitch(player, data) {
+  const operation = pendingHlsAudioSwitch;
+  if (!operation || operation.player !== player || !operation.committed || !operation.switched) return;
+  const fragment = data && data.frag;
+  if (!fragment || fragment.type !== "audio") return;
+  const fragmentTrack = Number(fragment.level);
+  if (Number.isFinite(fragmentTrack) && fragmentTrack !== operation.trackId) return;
+  finishHlsAudioTrackSwitch(operation);
+}
+
+function finishHlsAudioTrackSwitch(operation) {
+  if (!operation || pendingHlsAudioSwitch !== operation) return;
+  window.clearTimeout(operation.completionTimer);
+  pendingHlsAudioSwitch = null;
+  setPlayerStatus("");
+  if (watchTogetherSession) {
+    watchTogetherSession.trackSwitching = false;
+    if (watchTogetherSession.state) applyWatchTogetherState(watchTogetherSession.state, true);
+    window.setTimeout(notifyWatchTogetherReady, 0);
+  }
+  updateHlsTrackControls(operation.player);
+}
+
+function cancelPendingHlsAudioSwitch() {
+  const operation = pendingHlsAudioSwitch;
+  if (!operation) return;
+  pendingHlsAudioSwitch = null;
+  operation.controller.abort();
+  window.clearTimeout(operation.completionTimer);
+  if (watchTogetherSession) {
+    watchTogetherSession.trackSwitching = false;
+    if (operation.committed && watchTogetherSession.state) {
+      applyWatchTogetherState(watchTogetherSession.state, true);
+      window.setTimeout(notifyWatchTogetherReady, 0);
+    }
+  }
+}
+
+async function changeVideoAudioTrack() {
+  const selectedIndex = Number.parseInt(els.videoAudioTrack.value, 10);
+  if (hlsPlayer) {
+    await stageHlsAudioTrackSwitch(hlsPlayer, selectedIndex);
+    return;
+  }
+  const audioTracks = mediaTrackList(els.webPlayer.audioTracks);
+  if (audioTracks.length < 2) return;
+  markWatchTogetherTrackBuffering();
+  audioTracks.forEach(({ track, index }) => {
+    track.enabled = index === selectedIndex;
+  });
+  updateNativeTrackControls();
+}
+
+function changeVideoSubtitleTrack() {
+  const selectedIndex = Number.parseInt(els.videoSubtitleTrack.value, 10);
+  if (hlsPlayer) {
+    hlsPlayer.subtitleTrack = selectedIndex;
+    scheduleVideoSubtitlePositionUpdate();
+    return;
+  }
+  mediaTrackList(els.webPlayer.textTracks)
+    .filter(({ track }) => ["subtitles", "captions"].includes(track.kind))
+    .forEach(({ track, index }) => {
+      track.mode = index === selectedIndex ? "showing" : "disabled";
+    });
+  updateNativeTrackControls();
+  scheduleVideoSubtitlePositionUpdate();
+}
+
+function updateNativeTrackControls() {
+  if (hlsPlayer) return;
+  const audioTracks = mediaTrackList(els.webPlayer.audioTracks);
+  const subtitleTracks = mediaTrackList(els.webPlayer.textTracks)
+    .filter(({ track }) => ["subtitles", "captions"].includes(track.kind));
+
+  els.videoAudioTrack.innerHTML = audioTracks.map(({ track, index }, position) => (
+    `<option value="${index}">${escapeHtml(track.label || track.language || `Audio ${position + 1}`)}</option>`
+  )).join("");
+  const selectedAudio = audioTracks.find(({ track }) => track.enabled);
+  if (selectedAudio) els.videoAudioTrack.value = String(selectedAudio.index);
+  els.videoAudioTrackLabel.classList.toggle("hidden", audioTracks.length < 2);
+
+  els.videoSubtitleTrack.innerHTML = [
+    '<option value="-1">Off</option>',
+    ...subtitleTracks.map(({ track, index }, position) => (
+      `<option value="${index}">${escapeHtml(track.label || track.language || `Subtitles ${position + 1}`)}</option>`
+    ))
+  ].join("");
+  const selectedSubtitle = subtitleTracks.find(({ track }) => track.mode === "showing");
+  els.videoSubtitleTrack.value = String(selectedSubtitle ? selectedSubtitle.index : -1);
+  els.videoSubtitleTrackLabel.classList.toggle("hidden", subtitleTracks.length === 0);
+  setVideoTrackSettingsAvailable(audioTracks.length >= 2 || subtitleTracks.length > 0);
+  bindVideoSubtitleTracks();
+  scheduleVideoSubtitlePositionUpdate();
+}
+
+function setVideoTrackSettingsAvailable(available) {
+  els.videoTrackSettings.classList.toggle("hidden", !available);
+  els.videoControls.classList.toggle("track-settings-available", available);
+  if (!available) {
+    closeVideoTrackSettings(false);
+  }
+}
+
+function toggleVideoTrackSettings() {
+  if (els.videoTrackSettings.classList.contains("hidden")) return;
+  const opening = els.videoTrackControls.classList.contains("hidden");
+  if (opening) {
+    showVideoControls(false);
+    els.videoTrackControls.classList.remove("hidden");
+    els.videoTrackSettings.classList.add("active");
+    els.videoTrackSettings.setAttribute("aria-expanded", "true");
+    scheduleVideoSubtitlePositionUpdate();
+    const firstSelect = els.videoTrackControls.querySelector("label:not(.hidden) select");
+    firstSelect?.focus({ preventScroll: true });
+    return;
+  }
+  closeVideoTrackSettings();
+}
+
+function closeVideoTrackSettings(scheduleHide = true) {
+  els.videoTrackControls.classList.add("hidden");
+  els.videoTrackSettings.classList.remove("active");
+  els.videoTrackSettings.setAttribute("aria-expanded", "false");
+  scheduleVideoSubtitlePositionUpdate();
+  if (scheduleHide && !els.webPlayer.paused) {
+    scheduleVideoControlsHide();
+  }
+}
+
+function mediaTrackList(trackList) {
+  const tracks = [];
+  const length = Number(trackList && trackList.length) || 0;
+  for (let index = 0; index < length; index += 1) {
+    tracks.push({ track: trackList[index], index });
+  }
+  return tracks;
+}
+
+function bindVideoSubtitleTracks() {
+  mediaTrackList(els.webPlayer.textTracks)
+    .filter(({ track }) => ["subtitles", "captions"].includes(track.kind))
+    .forEach(({ track }) => bindVideoSubtitleTrack(track));
+}
+
+function bindVideoSubtitleTrack(track) {
+  if (!track || !["subtitles", "captions"].includes(track.kind) || boundVideoSubtitleTracks.has(track)) return;
+  boundVideoSubtitleTracks.add(track);
+  track.addEventListener("cuechange", scheduleVideoSubtitlePositionUpdate);
+}
+
+function scheduleVideoSubtitlePositionUpdate() {
+  if (videoSubtitlePositionFrame !== null) return;
+  videoSubtitlePositionFrame = window.requestAnimationFrame(() => {
+    videoSubtitlePositionFrame = null;
+    updateVideoSubtitlePositions();
+  });
+}
+
+function updateVideoSubtitlePositions() {
+  const surfaceRect = els.videoPlaybackSurface.getBoundingClientRect();
+  if (!(surfaceRect.height > 0)) return;
+
+  const controlsHidden = els.videoPlaybackSurface.classList.contains("controls-hidden");
+  const gap = Math.max(8, Math.min(18, surfaceRect.height * 0.025));
+  let obstructionTop = surfaceRect.bottom - Math.max(16, Math.min(28, surfaceRect.height * 0.04));
+  if (!controlsHidden) {
+    const controlsRect = els.videoControls.getBoundingClientRect();
+    if (controlsRect.height > 0) {
+      obstructionTop = controlsRect.top;
+    }
+    if (!els.videoTrackControls.classList.contains("hidden")) {
+      const trackControlsRect = els.videoTrackControls.getBoundingClientRect();
+      if (trackControlsRect.height > 0) {
+        obstructionTop = Math.min(obstructionTop, trackControlsRect.top);
+      }
+    }
+  }
+
+  const line = Math.max(45, Math.min(96, ((obstructionTop - surfaceRect.top - gap) / surfaceRect.height) * 100));
+  mediaTrackList(els.webPlayer.textTracks)
+    .filter(({ track }) => ["subtitles", "captions"].includes(track.kind))
+    .forEach(({ track }) => {
+      bindVideoSubtitleTrack(track);
+      let cues = null;
+      try {
+        cues = track.cues;
+      } catch (err) {
+        return;
+      }
+      const cueCount = Number(cues && cues.length) || 0;
+      let placementChanged = false;
+      for (let index = 0; index < cueCount; index += 1) {
+        placementChanged = positionVideoSubtitleCue(cues[index], line) || placementChanged;
+      }
+      if (placementChanged && track.mode === "showing" && track.activeCues && track.activeCues.length > 0) {
+        // Chromium needs a track repaint before an active native cue adopts its new line.
+        track.mode = "hidden";
+        track.mode = "showing";
+      }
+    });
+}
+
+function positionVideoSubtitleCue(cue, line) {
+  if (!cue || !("line" in cue) || cue.vertical) return false;
+  if (!positionedVideoSubtitleCues.has(cue) && cue.line !== "auto") return false;
+  positionedVideoSubtitleCues.add(cue);
+  const nextLine = Number(line.toFixed(2));
+  const changed = cue.snapToLines !== false
+    || cue.line !== nextLine
+    || ("lineAlign" in cue && cue.lineAlign !== "end");
+  try {
+    cue.snapToLines = false;
+    cue.line = nextLine;
+    if ("lineAlign" in cue) {
+      cue.lineAlign = "end";
+    }
+    return changed;
+  } catch (err) {
+    // Some native playback engines expose read-only cue placement.
+    return false;
+  }
+}
+
+function markWatchTogetherTrackBuffering() {
+  if (!watchTogetherSession || watchTogetherSession.bufferReady === false) return;
+  watchTogetherSession.bufferReady = false;
+  sendWatchTogether({ type: "ready", ready: false, durationSeconds: Number(els.webPlayer.duration) || 0, bufferedSeconds: 0 });
 }
 
 function toggleVideoMute() {
@@ -8719,7 +9719,11 @@ function updateVideoPictureInPictureControl() {
 function showVideoControls(scheduleHide = true) {
   clearTimeout(videoControlsHideTimer);
   videoControlsHideTimer = null;
+  const controlsWereHidden = els.videoPlaybackSurface.classList.contains("controls-hidden");
   els.videoPlaybackSurface.classList.remove("controls-hidden");
+  if (controlsWereHidden) {
+    scheduleVideoSubtitlePositionUpdate();
+  }
   if (scheduleHide && !els.webPlayer.paused) {
     scheduleVideoControlsHide();
   }
@@ -8727,7 +9731,7 @@ function showVideoControls(scheduleHide = true) {
 
 function scheduleVideoControlsHide() {
   clearTimeout(videoControlsHideTimer);
-  if (els.webPlayer.paused || videoSeeking) {
+  if (els.webPlayer.paused || videoSeeking || !els.videoTrackControls.classList.contains("hidden")) {
     return;
   }
   videoControlsHideTimer = window.setTimeout(() => {
@@ -8737,6 +9741,7 @@ function scheduleVideoControlsHide() {
       return;
     }
     els.videoPlaybackSurface.classList.add("controls-hidden");
+    scheduleVideoSubtitlePositionUpdate();
   }, 3000);
 }
 
@@ -8830,6 +9835,10 @@ function showMusicPlayer(metadata, hasNext) {
 }
 
 function toggleMusicPlayback() {
+  if (shouldRenewWebPlayback()) {
+    restartWebPlayback().catch(() => {});
+    return;
+  }
   if (els.webPlayer.paused) {
     els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be resumed."));
   } else {
@@ -9059,6 +10068,12 @@ async function handleWebPlayerEnded() {
     }
     return;
   }
+  if (activeWebPlaybackRequest && activeWebPlaybackRequest.fallbackStarted) {
+    webPlaybackNeedsRenewal = true;
+    setPlayerStatus("The stream session expired. Press play to reconnect.");
+    return;
+  }
+  const endedSessionId = webPlaybackSessionId;
   const videoEndConfirmed = videoEndSkipRequested || videoNaturalEndSeconds >= 5;
   if (activePlaybackMedia
     && !activePlaybackMedia.audioOnly
@@ -9083,8 +10098,12 @@ async function handleWebPlayerEnded() {
     return;
   }
 
+  webPlaybackNeedsRenewal = Boolean(activeWebPlaybackRequest);
   await reportWebPlaybackProgress(true);
   await refreshSelectedProgress().catch(() => null);
+  if (webPlaybackSessionId !== endedSessionId) {
+    return;
+  }
   const shuffle = activePlaybackShuffle && activePlaybackShuffle.enabled
     ? { ...activePlaybackShuffle, items: [...activePlaybackShuffle.items] }
     : null;

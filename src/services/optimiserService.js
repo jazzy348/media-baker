@@ -389,25 +389,70 @@ class OptimiserService {
       const hardwareProfile = await this.ffmpeg.detectHardwareProfile(
         streamPlan.preserveHdr ? "hevc" : "h264"
       );
+      const hardwareDecodeEnabled = await this.ffmpeg.canHardwareDecode(
+        hardwareProfile,
+        item.filePath,
+        streamPlan.video.stream
+      );
       const currentJob = createCurrentJob(library, item, outputPath, optimiserStageCount(streamPlan));
       this.currentJobs.set(currentJob.id, currentJob);
       let stageIndex = 0;
       logFull(`[optimiser] starting library=${library.key} mode=${settings.mode} input="${item.filePath}" output="${outputPath}"`);
       logFull(`[optimiser] retained streams ${describeStreamPlan(streamPlan)}`);
       try {
-        const videoArgs = this.videoFfmpegArgs(item.filePath, videoTempPath, streamPlan, hardwareProfile);
+        let videoArgs = this.videoFfmpegArgs(
+          item.filePath,
+          videoTempPath,
+          streamPlan,
+          hardwareProfile,
+          hardwareDecodeEnabled
+        );
+        logFull(
+          `[optimiser] video pipeline encoder=${hardwareProfile.encoder || (streamPlan.preserveHdr ? "libx265" : "libx264")} `
+          + `decoder=${hardwareDecodeEnabled ? hardwareProfile.decoder : "software"}`
+        );
         logFull(`[optimiser] ffmpeg video ${videoArgs.map(quoteArg).join(" ")}`);
         beginOptimiserStage(currentJob, "video", "Encoding video", ++stageIndex);
-        const videoResult = await this.runFfmpeg(
-          library,
-          item,
-          outputPath,
-          videoTempPath,
-          videoArgs,
-          lock,
-          streamPlan.video.durationSeconds,
-          currentJob
-        );
+        let videoResult;
+        try {
+          videoResult = await this.runFfmpeg(
+            library,
+            item,
+            outputPath,
+            videoTempPath,
+            videoArgs,
+            lock,
+            streamPlan.video.durationSeconds,
+            currentJob
+          );
+        } catch (err) {
+          if (!hardwareDecodeEnabled || this.stopRequested) throw err;
+          logFull(
+            `[optimiser] hardware decode failed file="${item.filePath}" message="${err.message}"; `
+            + "retrying video encode with software decode"
+          );
+          videoArgs = this.videoFfmpegArgs(
+            item.filePath,
+            videoTempPath,
+            streamPlan,
+            hardwareProfile,
+            false
+          );
+          logFull(`[optimiser] ffmpeg video software-decode retry ${videoArgs.map(quoteArg).join(" ")}`);
+          videoResult = await this.runFfmpeg(
+            library,
+            item,
+            outputPath,
+            videoTempPath,
+            videoArgs,
+            lock,
+            streamPlan.video.durationSeconds,
+            currentJob
+          );
+          if (videoResult === "complete") {
+            this.ffmpeg.markHardwareDecodeFailed(hardwareProfile, streamPlan.video.stream, err.message);
+          }
+        }
         if (videoResult === "stopped") {
           return "stopped";
         }
@@ -799,7 +844,7 @@ class OptimiserService {
     this.config.optimizer = nextOptimizer;
   }
 
-  videoFfmpegArgs(inputPath, outputPath, streamPlan, hardwareProfile) {
+  videoFfmpegArgs(inputPath, outputPath, streamPlan, hardwareProfile, hardwareDecodeEnabled = false) {
     const videoEncoder = hardwareProfile.encoder || (streamPlan.preserveHdr ? "libx265" : "libx264");
     return [
       "-hide_banner",
@@ -810,6 +855,7 @@ class OptimiserService {
       "-progress",
       "pipe:2",
       ...hardwareProfile.inputArgs,
+      ...(hardwareDecodeEnabled ? hardwareProfile.hwaccelArgs : []),
       "-i",
       inputPath,
       "-map",
@@ -823,7 +869,7 @@ class OptimiserService {
       "-1",
       "-c:v",
       videoEncoder,
-      ...videoEncodingArgs(videoEncoder, hardwareProfile, streamPlan),
+      ...videoEncodingArgs(videoEncoder, hardwareProfile, streamPlan, hardwareDecodeEnabled),
       ...timestampOutputArgs(),
       outputPath
     ];
@@ -1692,15 +1738,28 @@ function optimiserSubtitleLanguage(config) {
   return config && config.subtitles && config.subtitles.defaultLanguage || "english";
 }
 
-function videoEncodingArgs(encoder, hardwareProfile, streamPlan) {
+function videoEncodingArgs(encoder, hardwareProfile, streamPlan, hardwareDecodeEnabled = false) {
   const preserveHdr = Boolean(streamPlan && streamPlan.preserveHdr);
   const pixelFormat = preserveHdr ? "p010le" : "yuv420p";
   const softwareFilterArgs = ["-vf", "setpts=PTS-STARTPTS", "-pix_fmt", pixelFormat];
+  const hardwareFilterArgs = ["-vf", "setpts=PTS-STARTPTS"];
+  const hardwareConversionRequired = hardwareDecodeEnabled
+    && !preserveHdr
+    && isTenBitVideo(streamPlan.video.stream);
+  const convertedHardwareFilterArgs = [
+    "-vf",
+    "setpts=PTS-STARTPTS,hwdownload,format=p010le,format=yuv420p",
+    "-pix_fmt",
+    pixelFormat
+  ];
+  const frameFilterArgs = hardwareDecodeEnabled
+    ? hardwareConversionRequired ? convertedHardwareFilterArgs : hardwareFilterArgs
+    : softwareFilterArgs;
   const hdrArgs = preserveHdr ? hdrColourArgs(streamPlan.video.stream) : [];
 
   if (encoder === "h264_nvenc" || encoder === "hevc_nvenc") {
     return [
-      ...softwareFilterArgs,
+      ...frameFilterArgs,
       ...(preserveHdr ? ["-profile:v", "main10"] : []),
       "-preset",
       "p5",
@@ -1714,7 +1773,7 @@ function videoEncodingArgs(encoder, hardwareProfile, streamPlan) {
 
   if (encoder === "h264_qsv" || encoder === "hevc_qsv") {
     return [
-      ...softwareFilterArgs,
+      ...frameFilterArgs,
       ...(preserveHdr ? ["-profile:v", "main10"] : []),
       "-preset",
       "slow",
@@ -1726,8 +1785,17 @@ function videoEncodingArgs(encoder, hardwareProfile, streamPlan) {
 
   if (encoder === "h264_vaapi" || encoder === "hevc_vaapi") {
     return [
-      "-vf",
-      `setpts=PTS-STARTPTS,${hardwareProfile.uploadFilter || `format=${preserveHdr ? "p010le" : "nv12"},hwupload`}`,
+      ...(hardwareDecodeEnabled
+        ? hardwareConversionRequired
+          ? [
+            "-vf",
+            `setpts=PTS-STARTPTS,hwdownload,format=p010le,${hardwareProfile.uploadFilter || "format=nv12,hwupload"}`
+          ]
+          : hardwareFilterArgs
+        : [
+          "-vf",
+          `setpts=PTS-STARTPTS,${hardwareProfile.uploadFilter || `format=${preserveHdr ? "p010le" : "nv12"},hwupload`}`
+        ]),
       ...(preserveHdr ? ["-profile:v", "main10"] : []),
       "-qp",
       OPTIMISER_VIDEO_QP,
@@ -1737,7 +1805,7 @@ function videoEncodingArgs(encoder, hardwareProfile, streamPlan) {
 
   if (encoder === "h264_amf" || encoder === "hevc_amf") {
     return [
-      ...softwareFilterArgs,
+      ...frameFilterArgs,
       ...(preserveHdr ? ["-profile:v", "main10"] : []),
       "-usage",
       "transcoding",
@@ -1757,7 +1825,7 @@ function videoEncodingArgs(encoder, hardwareProfile, streamPlan) {
 
   if (encoder === "h264_videotoolbox" || encoder === "hevc_videotoolbox") {
     return [
-      ...softwareFilterArgs,
+      ...frameFilterArgs,
       ...(preserveHdr ? ["-profile:v", "main10"] : []),
       "-q:v",
       "72",

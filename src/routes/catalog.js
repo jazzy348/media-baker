@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const path = require("path");
 const { getMediaPlaybackOptions } = require("../services/mediaOptions");
 const { resolveMediaFile } = require("../services/mediaResolver");
@@ -15,29 +16,48 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
     try {
       const categories = categoriesForRequest(config, req);
       const mode = homeMode(req.query.mode);
-      const rows = await Promise.all(categories.map(async (category) => {
-        const collection = await mediaIndex.loadCollection(category.collection);
-        const allItems = category.folderBrowser
-          ? rootMediaFolderItems(category, collection.items, authContext(req))
-          : await itemsForCategory(mediaIndex, category, collection);
-        const candidates = homeCandidateItems(allItems, mode, 18);
-        const items = homeDisplayItems(await withCatalogState(candidates, metadata, progress, mediaIndex, req), mode, 18);
-        return {
-          key: category.key,
-          title: category.title,
-          total: category.kind === "episode" ? (await libraryItemsForCategory(mediaIndex, category, collection)).length : allItems.length,
-          items
-        };
-      }));
+      const offset = offsetValue(req.query.offset);
+      const limit = homeLimitValue(req.query.limit);
+      const seed = homeSeed(req.query.seed);
+      const requestedLibrary = String(req.query.library || "").trim();
+      const selectedCategories = requestedLibrary
+        ? categories.filter((category) => category.key === requestedLibrary)
+        : categories;
+      if (requestedLibrary && selectedCategories.length === 0) {
+        next(httpError(404, "Library not found"));
+        return;
+      }
+      const rows = await Promise.all(selectedCategories.map((category) => homeRowForCategory({
+        category,
+        mediaIndex,
+        metadata,
+        progress,
+        req,
+        mode,
+        offset,
+        limit,
+        seed
+      })));
 
       res.json({
         generatedAt: mediaIndex.index.generatedAt,
         mode,
+        seed,
         rows
       });
     } catch (err) {
       next(err);
     }
+  });
+
+  router.get("/libraries", (req, res) => {
+    res.json({
+      libraries: categoriesForRequest(config, req).map((category) => ({
+        key: category.key,
+        title: category.title,
+        type: category.type
+      }))
+    });
   });
 
   router.get("/search", async (req, res, next) => {
@@ -864,20 +884,100 @@ function randomItems(items, limit) {
     .map(({ item }) => item);
 }
 
-function homeCandidateItems(items, mode, limit) {
-  if (mode === "random") {
-    return randomItems(items, limit);
-  }
+async function homeRowForCategory({ category, mediaIndex, metadata, progress, req, mode, offset, limit, seed }) {
+  const collection = await mediaIndex.loadCollection(category.collection);
+  const allItems = category.folderBrowser
+    ? rootMediaFolderItems(category, collection.items, authContext(req))
+    : await itemsForCategory(mediaIndex, category, collection);
+  const total = category.kind === "episode"
+    ? (await libraryItemsForCategory(mediaIndex, category, collection)).length
+    : allItems.length;
+  const page = await homePageItems({
+    allItems,
+    category,
+    mediaIndex,
+    metadata,
+    progress,
+    req,
+    mode,
+    offset,
+    limit,
+    seed
+  });
 
-  return recentlyAddedItems(items, Math.min(items.length, Math.max(limit * 20, 72)));
+  return {
+    key: category.key,
+    title: category.title,
+    type: category.type,
+    total,
+    offset,
+    nextOffset: offset + page.items.length,
+    hasMore: page.hasMore,
+    items: page.items
+  };
 }
 
-function homeDisplayItems(items, mode, limit) {
+async function homePageItems({ allItems, category, mediaIndex, metadata, progress, req, mode, offset, limit, seed }) {
   if (mode === "random") {
-    return items.slice(0, limit);
+    const candidates = seededRandomItems(allItems, seed).slice(offset, offset + limit + 1);
+    const enriched = await withCatalogState(candidates, metadata, progress, mediaIndex, req);
+    const items = enriched.slice(0, limit);
+    return {
+      items,
+      hasMore: items.length > 0 && (enriched.length > limit || offset + candidates.length < allItems.length)
+    };
   }
 
-  return bundleRecentEpisodes(items).slice(0, limit);
+  const ordered = recentlyAddedItems(allItems, allItems.length);
+  if (category.kind !== "episode") {
+    const candidates = ordered.slice(offset, offset + limit + 1);
+    const enriched = await withCatalogState(candidates, metadata, progress, mediaIndex, req);
+    const items = enriched.slice(0, limit);
+    return {
+      items,
+      hasMore: items.length > 0 && (enriched.length > limit || offset + candidates.length < ordered.length)
+    };
+  }
+
+  const requiredDisplayItems = offset + limit + 1;
+  let candidateLimit = Math.min(ordered.length, Math.max(requiredDisplayItems * 20, 72));
+  while (candidateLimit < ordered.length
+    && bundleRecentEpisodes(ordered.slice(0, candidateLimit)).length < requiredDisplayItems) {
+    candidateLimit = Math.min(ordered.length, candidateLimit * 2);
+  }
+  const enriched = await withCatalogState(
+    ordered.slice(0, candidateLimit),
+    metadata,
+    progress,
+    mediaIndex,
+    req
+  );
+  const displayItems = bundleRecentEpisodes(enriched);
+  const items = displayItems.slice(offset, offset + limit);
+  return {
+    items,
+    hasMore: items.length > 0 && (displayItems.length > offset + limit || candidateLimit < ordered.length)
+  };
+}
+
+function seededRandomItems(items, seed) {
+  return [...items]
+    .map((item) => ({
+      item,
+      sort: deterministicHomeScore(seed, `${item.mediaType || ""}:${item.id || item.filePath || item.title || ""}`)
+    }))
+    .sort((a, b) => a.sort - b.sort || String(a.item.title || "").localeCompare(String(b.item.title || "")))
+    .map(({ item }) => item);
+}
+
+function deterministicHomeScore(seed, value) {
+  const text = `${seed}\0${value}`;
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 function recentlyAddedItems(items, limit) {
@@ -1030,6 +1130,18 @@ function limitValue(value) {
   }
 
   return Math.max(1, Math.min(parsed, 120));
+}
+
+function homeLimitValue(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 72)) : 18;
+}
+
+function homeSeed(value) {
+  const seed = String(value || "").trim();
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(seed)
+    ? seed
+    : crypto.randomBytes(12).toString("base64url");
 }
 
 function fuzzySearch(items, query) {
@@ -1370,6 +1482,7 @@ function categoriesForRequest(config, req) {
       key: library.key,
       mediaType: library.key,
       title: library.title,
+      type: library.type,
       collection: library.key,
       kind: library.type === "tv" ? "episode" : library.type === "music" ? "track" : library.type === "images" ? "image" : "movie",
       localThumbnails: Boolean(library.localThumbnails),

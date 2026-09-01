@@ -5,6 +5,16 @@ const logger = require("../utils/logger");
 
 const VALIDATION_TTL_MS = 60 * 1000;
 const VERSION_CHECK_TIMEOUT_MS = 3000;
+const HARDWARE_DECODE_CODECS = new Set([
+  "h264",
+  "hevc",
+  "av1",
+  "vp9",
+  "vp8",
+  "mpeg2video",
+  "mpeg4",
+  "vc1"
+]);
 
 class FFmpegService {
   constructor(options) {
@@ -16,6 +26,7 @@ class FFmpegService {
     this.cachedHevcHardwareEncoder = null;
     this.cachedHevcHardwareProfile = null;
     this.cachedVaapiDevice = null;
+    this.cachedHardwareDecoders = new Map();
     this.cachedValidation = null;
     this.cachedValidationAt = 0;
     this.validationPromise = null;
@@ -30,6 +41,7 @@ class FFmpegService {
     this.cachedHevcHardwareEncoder = null;
     this.cachedHevcHardwareProfile = null;
     this.cachedVaapiDevice = null;
+    this.cachedHardwareDecoders = new Map();
     this.cachedValidation = null;
     this.cachedValidationAt = 0;
     this.validationPromise = null;
@@ -575,6 +587,76 @@ class FFmpegService {
     return profile;
   }
 
+  async canHardwareDecode(profile, filePath, videoStream) {
+    if (!profile || !profile.decoder || profile.hwaccelArgs.length === 0 || !hardwareDecodableStream(videoStream)) {
+      return false;
+    }
+
+    const cacheKey = hardwareDecodeCacheKey(profile, videoStream);
+    if (!this.cachedHardwareDecoders.has(cacheKey)) {
+      const check = this.testHardwareDecode(profile, filePath, videoStream)
+        .catch((err) => {
+          logger.full(
+            `[ffmpeg] hardware decoder failed vendor=${profile.vendor || "unknown"} `
+            + `decoder=${profile.decoder} codec=${videoStream.codec_name || "unknown"} `
+            + `size=${videoStream.width || 0}x${videoStream.height || 0} `
+            + `error="${summarizeProcessError(err.message)}"`
+          );
+          return false;
+        });
+      this.cachedHardwareDecoders.set(cacheKey, check);
+    }
+
+    const usable = await this.cachedHardwareDecoders.get(cacheKey);
+    logger.full(
+      `[ffmpeg] hardware decoder ${usable ? "usable" : "unavailable"} `
+      + `vendor=${profile.vendor || "unknown"} decoder=${profile.decoder} `
+      + `codec=${videoStream.codec_name || "unknown"} size=${videoStream.width || 0}x${videoStream.height || 0}`
+    );
+    return usable;
+  }
+
+  async testHardwareDecode(profile, filePath, videoStream) {
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      ...profile.inputArgs,
+      ...profile.hwaccelArgs,
+      "-i",
+      filePath,
+      "-map",
+      `0:${videoStream.index}`,
+      "-frames:v",
+      "1",
+      "-an",
+      "-sn",
+      "-dn",
+      "-vf",
+      hardwareFrameDownloadFilter(videoStream),
+      "-f",
+      "null",
+      "-"
+    ];
+    logger.full(
+      `[ffmpeg] testing hardware decoder vendor=${profile.vendor || "unknown"} `
+      + `decoder=${profile.decoder} codec=${videoStream.codec_name || "unknown"} file="${filePath}"`
+    );
+    await this.exec(this.ffmpegPath, args, { timeoutMs: 20000 });
+    return true;
+  }
+
+  markHardwareDecodeFailed(profile, videoStream, reason = "runtime failure") {
+    if (!profile || !profile.decoder || !videoStream) return;
+    const cacheKey = hardwareDecodeCacheKey(profile, videoStream);
+    this.cachedHardwareDecoders.set(cacheKey, Promise.resolve(false));
+    logger.info(
+      `[ffmpeg] disabled hardware decoder for source profile vendor=${profile.vendor || "unknown"} `
+      + `decoder=${profile.decoder} codec=${videoStream.codec_name || "unknown"} `
+      + `size=${videoStream.width || 0}x${videoStream.height || 0} reason="${summarizeProcessError(reason)}"`
+    );
+  }
+
   async firstUsableEncoder(encoders) {
     for (const encoder of encoders) {
       if (await this.canEncodeWith(encoder)) {
@@ -885,7 +967,7 @@ function hardwareProfileForEncoder(encoder, options = {}) {
       encoder,
       decoder: "nvdec",
       inputArgs: [],
-      hwaccelArgs: ["-hwaccel", "nvdec", "-hwaccel_output_format", "cuda"],
+      hwaccelArgs: ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
       uploadFilter: null,
       hardwareFrames: "cuda"
     };
@@ -895,11 +977,11 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     return {
       vendor: "intel",
       encoder,
-      decoder: null,
+      decoder: "qsv",
       inputArgs: [],
-      hwaccelArgs: [],
+      hwaccelArgs: ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"],
       uploadFilter: null,
-      hardwareFrames: null
+      hardwareFrames: "qsv"
     };
   }
 
@@ -908,11 +990,11 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     return {
       vendor: "vaapi",
       encoder,
-      decoder: null,
+      decoder: "vaapi",
       inputArgs: ["-vaapi_device", vaapiDevice],
-      hwaccelArgs: [],
+      hwaccelArgs: ["-hwaccel", "vaapi", "-hwaccel_device", vaapiDevice, "-hwaccel_output_format", "vaapi"],
       uploadFilter: `format=${hevc ? "p010le" : "nv12"},hwupload`,
-      hardwareFrames: null
+      hardwareFrames: "vaapi"
     };
   }
 
@@ -920,11 +1002,13 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     return {
       vendor: "amd",
       encoder,
-      decoder: null,
+      decoder: process.platform === "win32" ? "d3d11va" : null,
       inputArgs: [],
-      hwaccelArgs: [],
+      hwaccelArgs: process.platform === "win32"
+        ? ["-hwaccel", "d3d11va", "-hwaccel_output_format", "d3d11"]
+        : [],
       uploadFilter: null,
-      hardwareFrames: null
+      hardwareFrames: process.platform === "win32" ? "d3d11" : null
     };
   }
 
@@ -932,11 +1016,11 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     return {
       vendor: "apple",
       encoder,
-      decoder: null,
+      decoder: "videotoolbox",
       inputArgs: [],
-      hwaccelArgs: [],
+      hwaccelArgs: ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"],
       uploadFilter: null,
-      hardwareFrames: null
+      hardwareFrames: "videotoolbox_vld"
     };
   }
 
@@ -949,6 +1033,36 @@ function hardwareProfileForEncoder(encoder, options = {}) {
     uploadFilter: null,
     hardwareFrames: null
   };
+}
+
+function hardwareDecodableStream(stream) {
+  return HARDWARE_DECODE_CODECS.has(String(stream && stream.codec_name || "").toLowerCase());
+}
+
+function hardwareDecodeCacheKey(profile, stream) {
+  return [
+    profile.vendor || "unknown",
+    profile.decoder || "software",
+    stream.codec_name || "unknown",
+    stream.profile || "unknown",
+    stream.pix_fmt || "unknown",
+    stream.width || 0,
+    stream.height || 0
+  ].join(":");
+}
+
+function hardwareFrameDownloadFilter(stream) {
+  return `hwdownload,format=${tenBitVideoStream(stream) ? "p010le" : "nv12"}`;
+}
+
+function tenBitVideoStream(stream) {
+  const pixelFormat = String(stream && stream.pix_fmt || "").toLowerCase();
+  const bitsPerRawSample = Number.parseInt(stream && stream.bits_per_raw_sample || "", 10);
+  const profile = String(stream && stream.profile || "").toLowerCase();
+  return pixelFormat.includes("10")
+    || pixelFormat.includes("p010")
+    || bitsPerRawSample >= 10
+    || profile.includes("10");
 }
 
 function hardwareVendor(encoder) {

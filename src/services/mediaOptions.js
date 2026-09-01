@@ -22,6 +22,7 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
 
   return {
     filePath: mediaFile.filePath,
+    audioOnly,
     proTv3d: detectProTv3d(mediaFile, options.library),
     subtitleSearch: {
       enabled: Boolean(subtitlesEnabled && options.subtitles && options.subtitles.config.enabled),
@@ -57,9 +58,14 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
           language: normalizedLanguage(stream),
           label: streamLabel(stream),
           source: "embedded",
-          forced: isForced(stream)
+          forced: isForced(stream),
+          codecName: stream.codec_name || null,
+          webSwitchable: isWebTextSubtitleCodec(stream.codec_name)
         }))
-    ]
+    ].map((subtitle) => ({
+      ...subtitle,
+      webSwitchable: subtitle.id === "none" ? false : subtitle.webSwitchable !== false
+    }))
   };
 }
 
@@ -77,8 +83,14 @@ async function externalSubtitleOptions(filePath) {
       language: subtitleLanguageFromName(parsed.name, entry.name),
       label: sidecarLabel(parsed.name, entry.name),
       source: "sidecar",
-      forced: /forced/i.test(entry.name)
+      forced: /forced/i.test(entry.name),
+      webSwitchable: true
     }));
+}
+
+function isWebTextSubtitleCodec(codecName) {
+  return ["ass", "ssa", "subrip", "webvtt", "mov_text", "text"]
+    .includes(String(codecName || "").toLowerCase());
 }
 
 function isSubtitleForVideo(videoName, subtitleName) {
