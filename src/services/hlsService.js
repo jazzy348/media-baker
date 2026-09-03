@@ -327,12 +327,17 @@ class HlsService {
     return buildVodPlaylist(manifest);
   }
 
-  async waitForCachedFile(cacheKey, filename) {
+  async waitForCachedFile(cacheKey, filename, options = {}) {
     await this.ensureCacheFormat();
     this.touchCache(cacheKey);
+    const signal = options.signal || null;
     const filePath = this.getCachedFilePath(cacheKey, filename);
     if (!filePath) {
       return null;
+    }
+
+    if (signal && signal.aborted) {
+      return { status: "aborted", reason: "client-aborted" };
     }
 
     const manifestPath = path.join(this.config.hls.cachePath, cacheKey, "stream.json");
@@ -359,8 +364,15 @@ class HlsService {
       this.touchTranscode(cacheKey);
     }
 
+    if (signal && signal.aborted) {
+      return { status: "aborted", reason: "client-aborted" };
+    }
+
     let lastActivationAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
+      if (signal && signal.aborted) {
+        return { status: "aborted", reason: "client-aborted" };
+      }
       this.touchTranscode(cacheKey);
       if (await isPublishedSegment(cacheKey, filename, this.config.hls.cachePath)) {
         this.touchTranscode(cacheKey);
@@ -374,6 +386,9 @@ class HlsService {
       if (manifest && Date.now() - lastActivationAt >= SEEK_REASSERT_INTERVAL_MS) {
         await this.ensureActiveForSegment(cacheKey, manifest, segmentIndex);
         lastActivationAt = Date.now();
+        if (signal && signal.aborted) {
+          return { status: "aborted", reason: "client-aborted" };
+        }
       }
 
       if (!await fileExists(manifestPath)) {
@@ -391,7 +406,7 @@ class HlsService {
         };
       }
 
-      await delay(300);
+      await abortableDelay(300, signal);
     }
 
     return {
@@ -729,18 +744,32 @@ class HlsService {
       const prioritySegment = Number.isInteger(active.prioritySegment) ? active.prioritySegment : null;
       const priorityPending = prioritySegment !== null
         && !await isPublishedSegment(cacheKey, `segment_${String(prioritySegment).padStart(5, "0")}.ts`, this.config.hls.cachePath);
-      if (priorityPending) {
+      const bounds = await publishedSegmentBounds(cacheDir);
+      const shouldReposition = shouldRepositionTranscode(active, bounds, segmentIndex, manifest);
+      if (priorityPending && segmentIndex === prioritySegment) {
+        this.touchTranscode(cacheKey);
+        return true;
+      }
+      if (priorityPending && active.supersededPrioritySegments.has(segmentIndex)) {
+        logger.full(`[hls] ignoring superseded seek request cacheKey=${cacheKey} requestedSegment=${segmentIndex} prioritySegment=${prioritySegment}`);
+        this.touchTranscode(cacheKey);
+        return true;
+      }
+      if (priorityPending && !shouldReposition) {
         logger.full(`[hls] joining active priority seek cacheKey=${cacheKey} requestedSegment=${segmentIndex} prioritySegment=${prioritySegment}`);
         this.touchTranscode(cacheKey);
         return true;
       }
-
-      const bounds = await publishedSegmentBounds(cacheDir);
-      if (!shouldRepositionTranscode(active, bounds, segmentIndex, manifest)) {
+      if (!shouldReposition) {
         active.prioritySegment = segmentIndex;
         this.touchTranscode(cacheKey);
         return true;
       }
+      if (priorityPending) {
+        logger.info(`[hls] superseding pending seek cacheKey=${cacheKey} requestedSegment=${segmentIndex} prioritySegment=${prioritySegment}`);
+        active.supersededPrioritySegments.add(prioritySegment);
+      }
+      active.prioritySegment = segmentIndex;
     }
 
     return this.restartTranscodeForSeek(cacheKey, manifest, segmentIndex);
@@ -759,6 +788,9 @@ class HlsService {
     const playlistPath = path.join(cacheDir, "master.m3u8");
     const setup = (async () => {
       const active = this.activeTranscodes.get(cacheKey);
+      const supersededPrioritySegments = active
+        ? [...active.supersededPrioritySegments]
+        : [];
       if (active) await this.stopTranscodeForSeek(cacheKey, active, targetSegment);
       const targetFilename = `segment_${String(targetSegment).padStart(5, "0")}.ts`;
       if (await isPublishedSegment(cacheKey, targetFilename, this.config.hls.cachePath)) return;
@@ -778,6 +810,7 @@ class HlsService {
           resumeFromSegment: startSegment,
           resumeFromSeconds: startSeconds,
           requestedSegment: targetSegment,
+          supersededPrioritySegments,
           preserveCache: true,
           segmentTimeline: manifest.segments,
           sourceSignature: manifest.sourceSignature
@@ -1137,6 +1170,11 @@ class HlsService {
       startedAt: new Date().toISOString(),
       resumeFromSegment,
       prioritySegment: Number.isInteger(resume.requestedSegment) ? resume.requestedSegment : null,
+      supersededPrioritySegments: new Set(
+        Array.isArray(resume.supersededPrioritySegments)
+          ? resume.supersededPrioritySegments.filter(Number.isInteger)
+          : []
+      ),
       lastAccessAt: Date.now(),
       stoppedForIdle: false,
       stoppedForSeek: false,
@@ -2417,6 +2455,21 @@ function escapeSubtitleFilterPath(filePath) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function abortableDelay(ms, signal) {
+  if (!signal) return delay(ms);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, ms);
+    const onAbort = () => finish();
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function formatFfmpegSeconds(seconds) {

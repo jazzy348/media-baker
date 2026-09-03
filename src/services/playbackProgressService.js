@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+
 const STATUS_IN_PROGRESS = "in_progress";
 const STATUS_WATCHED = "watched";
 const STATUS_REMOVED = "removed";
@@ -347,6 +349,19 @@ class PlaybackProgressService {
     });
   }
 
+  async markShowOnDeckRemoved(userId, mediaType, showId) {
+    return this.store.save({
+      userId: userId || "global",
+      mediaType,
+      mediaId: onDeckShowSuppressionId(showId),
+      status: STATUS_REMOVED,
+      positionSeconds: 0,
+      durationSeconds: 0,
+      cacheKey: null,
+      watchedAt: null
+    });
+  }
+
   async markUnwatched(userId, mediaType, mediaId) {
     this.clearEndOfStreamSettlements(userId, mediaType, mediaId);
     return this.store.save({
@@ -376,7 +391,7 @@ class PlaybackProgressService {
       const updatedAtMs = timeMs(record.updatedAt);
       if (record.status === STATUS_IN_PROGRESS && record.positionSeconds > 0 && updatedAtMs >= cutoff) {
         const mediaFile = await mediaFileForRecord(mediaIndex, record);
-        if (mediaFile) {
+        if (mediaFile && !showOnDeckSuppressed(recordsByKey, record.mediaType, mediaFile.showId, record.updatedAt)) {
           itemsByKey.set(recordKey(record.mediaType, record.mediaId), await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "resume"));
         }
         continue;
@@ -384,7 +399,9 @@ class PlaybackProgressService {
 
       if (record.status === STATUS_WATCHED) {
         const mediaFile = await mediaFileForRecord(mediaIndex, record);
-        if (mediaFile && mediaFile.showId) {
+        if (mediaFile
+          && mediaFile.showId
+          && !showOnDeckSuppressed(recordsByKey, record.mediaType, mediaFile.showId, record.updatedAt)) {
           const showKey = `${record.mediaType}:${mediaFile.showId}`;
           const previous = latestWatchedByShow.get(showKey);
           if (!previous || compareEpisodes(mediaFile, previous.mediaFile) > 0) {
@@ -693,6 +710,19 @@ function compareEpisodes(a, b) {
   return (Number(a.season) || 0) - (Number(b.season) || 0)
     || (Number(a.episode) || 0) - (Number(b.episode) || 0)
     || String(a.filename || "").localeCompare(String(b.filename || ""));
+}
+
+function onDeckShowSuppressionId(showId) {
+  const digest = crypto.createHash("sha256").update(String(showId || "")).digest("hex");
+  return `on-deck-show:${digest.slice(0, 48)}`;
+}
+
+function showOnDeckSuppressed(recordsByKey, mediaType, showId, activityAt) {
+  if (!showId) {
+    return false;
+  }
+  const suppression = recordsByKey.get(recordKey(mediaType, onDeckShowSuppressionId(showId)));
+  return Boolean(suppression && timeMs(suppression.updatedAt) >= timeMs(activityAt));
 }
 
 function metadataIdForMediaFile(mediaFile) {

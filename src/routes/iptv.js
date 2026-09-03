@@ -8,7 +8,7 @@ module.exports = function createIptvRoutes({ config, iptv }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
-    if (!req.user || req.authMode === "share") {
+    if (!req.user) {
       next(httpError(403, "IPTV requires a user account"));
       return;
     }

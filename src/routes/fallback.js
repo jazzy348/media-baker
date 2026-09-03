@@ -9,6 +9,10 @@ function createFallbackRoutes({ fallbackStream }) {
 
   async function serveFallback(req, res, next) {
     try {
+      if (req.authMode === "library-view") {
+        next(httpError(403, "Playback is not available through a library view link"));
+        return;
+      }
       if (!fallbackStream || !fallbackStream.ready) {
         next(httpError(503, "Fallback stream is not available"));
         return;
@@ -27,6 +31,10 @@ function createFallbackSegmentRoutes({ fallbackStream }) {
 
   router.get(/^\/__stream_error_\d{5}\.ts$/, async (req, res, next) => {
     try {
+      if (req.authMode === "library-view") {
+        next(httpError(403, "Playback is not available through a library view link"));
+        return;
+      }
       if (!fallbackStream || !fallbackStream.ready) {
         next(httpError(503, "Fallback stream is not available"));
         return;

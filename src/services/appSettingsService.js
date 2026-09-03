@@ -608,11 +608,11 @@ function optimizerLibrarySettingsValue(value) {
     const settings = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
     return [String(key), {
       enabled: Boolean(settings.enabled),
-      mode: settings.mode === "all" ? "all" : "preferred",
       downmixToStereo: Boolean(settings.downmixToStereo),
       preserveHdr: Boolean(settings.preserveHdr),
+      preserveSubtitles: Boolean(settings.preserveSubtitles),
       allDay: Boolean(settings.allDay),
-      secondaryAudioLanguage: stringValue(settings.secondaryAudioLanguage, ""),
+      additionalAudioLanguages: optimizerLanguageListValue(settings.additionalAudioLanguages),
       startTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(settings.startTime || "")) ? String(settings.startTime) : "01:00",
       endTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(settings.endTime || "")) ? String(settings.endTime) : "06:00",
       lastCheckedMs: nonNegativeNumber(settings.lastCheckedMs, 0)
@@ -640,12 +640,27 @@ function optimizerFailureListValue(value) {
         libraryTitle: stringValue(failure.libraryTitle, failure.libraryKey || ""),
         title: stringValue(failure.title, path.basename(filePath)),
         filePath,
-        mode: failure.mode === "all" ? "all" : "preferred",
         message
       };
     })
     .filter(Boolean)
     .slice(0, 200);
+}
+
+function optimizerLanguageListValue(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  return value
+    .map((language) => String(language || "").trim())
+    .filter((language) => {
+      const key = language.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
 }
 
 function optimizerRetryListValue(value) {

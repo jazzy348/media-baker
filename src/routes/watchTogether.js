@@ -6,12 +6,12 @@ const { httpError } = require("../utils/httpErrors");
 
 module.exports = function createWatchTogetherRoutes(services) {
   const {
-    accountService, libraryService, mediaIndex, ffmpeg, subtitles,
+    accountService, mediaIndex, ffmpeg, subtitles,
     skipDetection, watchTogether
   } = services;
   const router = express.Router();
-  const authenticate = createAuthMiddleware(accountService, libraryService);
-  const optionalAuthenticate = createOptionalAuthMiddleware(accountService, libraryService);
+  const authenticate = createAuthMiddleware(accountService);
+  const optionalAuthenticate = createOptionalAuthMiddleware(accountService);
 
   router.post("/rooms", authenticate, async (req, res, next) => {
     try {

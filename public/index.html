@@ -576,7 +576,7 @@
           </div>
           <nav class="admin-nav" aria-label="Admin sections">
             <button id="adminAccountsTab" class="admin-nav-button" type="button">Accounts</button>
-            <button id="adminApiKeysTab" class="admin-nav-button" type="button">API Keys</button>
+            <button id="adminApiKeysTab" class="admin-nav-button" type="button">Keys</button>
             <button id="adminLibrariesTab" class="admin-nav-button" type="button">Libraries</button>
             <button id="adminDuplicatesTab" class="admin-nav-button" type="button">Duplicates</button>
             <button id="adminBackupsTab" class="admin-nav-button" type="button">Backup &amp; Restore</button>
@@ -610,11 +610,10 @@
               <div class="permission-grid">
                 <label><input id="accountIsAdmin" type="checkbox"> Admin</label>
                 <label><input id="accountCanCopyUrls" type="checkbox"> Copy playback URLs</label>
-                <label><input id="accountCanShare" type="checkbox"> Create share links</label>
                 <label><input id="accountCanLibraries" type="checkbox"> Manage libraries</label>
                 <label><input id="accountCanMetadata" type="checkbox"> Manage metadata</label>
                 <label><input id="accountCanSettings" type="checkbox"> Manage settings</label>
-                <label><input id="accountCanApiKeys" type="checkbox"> Manage API keys</label>
+                <label><input id="accountCanApiKeys" type="checkbox"> Manage keys</label>
                 <label><input id="accountCanBackups" type="checkbox"> Manage backups</label>
                 <label><input id="accountCanOptimizer" type="checkbox"> Manage optimiser</label>
                 <label><input id="accountCanReindex" type="checkbox"> Re-index libraries</label>
@@ -637,27 +636,83 @@
             <div class="admin-page-heading">
               <div>
                 <p class="eyebrow">Access</p>
-                <h2>API Keys</h2>
+                <h2>Keys</h2>
               </div>
             </div>
-            <form id="apiKeyForm" class="api-key-form">
-              <label>
-                User
-                <select id="apiKeyUserSelect"></select>
-              </label>
-              <label>
-                Name
-                <input id="apiKeyNameInput" type="text" autocomplete="off" placeholder="Automation, scripts, mobile client" required>
-              </label>
-              <button id="createApiKey" class="primary-button" type="submit">Create API key</button>
-            </form>
-            <section id="apiKeySecretPanel" class="api-key-secret hidden">
-              <p class="eyebrow">New key</p>
-              <code id="apiKeySecretValue"></code>
-              <button id="copyApiKeySecret" class="secondary-button compact-button" type="button">Copy</button>
+            <section class="keys-section">
+              <div class="keys-section-heading">
+                <h3>API Keys</h3>
+                <p>Authenticated access for applications and integrations.</p>
+              </div>
+              <form id="apiKeyForm" class="api-key-form">
+                <label>
+                  User
+                  <select id="apiKeyUserSelect"></select>
+                </label>
+                <label>
+                  Name
+                  <input id="apiKeyNameInput" type="text" autocomplete="off" placeholder="Automation, scripts, mobile client" required>
+                </label>
+                <button id="createApiKey" class="primary-button" type="submit">Create API key</button>
+              </form>
+              <section id="apiKeySecretPanel" class="api-key-secret hidden">
+                <p class="eyebrow">New key</p>
+                <code id="apiKeySecretValue"></code>
+                <button id="copyApiKeySecret" class="secondary-button compact-button" type="button">Copy</button>
+              </section>
+              <p id="apiKeyStatus" class="status"></p>
+              <h4 class="keys-list-heading">Existing API keys</h4>
+              <div id="apiKeyList" class="library-manager-list"></div>
             </section>
-            <p id="apiKeyStatus" class="status"></p>
-            <div id="apiKeyList" class="library-manager-list"></div>
+            <section class="keys-section library-view-section">
+              <div class="keys-section-heading">
+                <h3>Library View</h3>
+                <p>Create a read-only URL for browsing selected libraries without an account.</p>
+              </div>
+              <form id="libraryViewForm" class="library-view-form">
+                <fieldset class="library-view-libraries-field">
+                  <legend>Libraries</legend>
+                  <div class="library-view-libraries-toolbar">
+                    <span id="libraryViewSelectionCount" class="muted">0 selected</span>
+                    <div class="library-view-libraries-actions">
+                      <button id="libraryViewSelectAll" class="secondary-button compact-button library-view-library-action" type="button">Select all</button>
+                      <button id="libraryViewClearAll" class="secondary-button compact-button library-view-library-action" type="button">Clear</button>
+                    </div>
+                  </div>
+                  <div id="libraryViewLibraries" class="library-view-library-options"></div>
+                </fieldset>
+                <div class="library-view-details">
+                  <label>
+                    Name
+                    <input id="libraryViewNameInput" type="text" autocomplete="off" placeholder="Family library, temporary access" required>
+                  </label>
+                  <label>
+                    Expires
+                    <select id="libraryViewExpirySelect">
+                      <option value="hour">1 hour</option>
+                      <option value="day">1 day</option>
+                      <option value="week">1 week</option>
+                      <option value="month">1 month</option>
+                      <option value="unlimited">Unlimited</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label id="libraryViewCustomExpiryLabel" class="hidden">
+                    Custom expiry
+                    <input id="libraryViewCustomExpiryInput" type="datetime-local">
+                  </label>
+                  <button id="createLibraryView" class="primary-button" type="submit">Create view URL</button>
+                </div>
+              </form>
+              <section id="libraryViewSecretPanel" class="api-key-secret library-view-secret hidden">
+                <p class="eyebrow">New view URL</p>
+                <code id="libraryViewSecretValue"></code>
+                <button id="copyLibraryViewSecret" class="secondary-button compact-button" type="button">Copy</button>
+              </section>
+              <p id="libraryViewStatus" class="status"></p>
+              <h4 class="keys-list-heading">Existing view URLs</h4>
+              <div id="libraryViewList" class="library-manager-list"></div>
+            </section>
           </section>
           <section id="adminLibrariesPage" class="admin-page hidden">
             <div class="admin-page-heading">
@@ -1013,7 +1068,7 @@
                 <label>Segment wait timeout<input id="settingsHlsWait" type="number" min="1" step="1"></label>
                 <label>Minimum free cache space MiB<input id="settingsHlsMinimumFreeSpace" type="number" min="0" step="128"></label>
                 <label><input id="settingsForceTranscode" type="checkbox"> Force compatible video transcode</label>
-                <label>On-deck TTL seconds<input id="settingsOnDeckTtl" type="number" min="1" step="1"></label>
+                <label>On-Deck expiration (days)<input id="settingsOnDeckExpirationDays" type="number" min="1" step="1"></label>
                 <label>Watched threshold %<input id="settingsWatchedThreshold" type="number" min="1" max="100" step="1"></label>
               </fieldset>
               <fieldset>
@@ -1143,7 +1198,7 @@
             <div class="history-filter-bar">
               <label>User or share
                 <select id="userHistoryUserFilter">
-                  <option value="">All users and shares</option>
+                  <option value="">All users</option>
                 </select>
               </label>
               <label>Timespan

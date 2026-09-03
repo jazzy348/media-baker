@@ -53,9 +53,9 @@
   function navigate(path, options = {}) {
     const next = new URL(path, global.location.origin);
     const current = new URL(global.location.href);
-    const shareToken = current.searchParams.get("shareToken");
-    if (shareToken && !next.searchParams.has("shareToken")) {
-      next.searchParams.set("shareToken", shareToken);
+    const viewToken = current.searchParams.get("viewToken");
+    if (viewToken && !next.searchParams.has("viewToken")) {
+      next.searchParams.set("viewToken", viewToken);
     }
 
     const target = `${next.pathname}${next.search}${next.hash}`;

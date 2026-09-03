@@ -58,10 +58,15 @@ function openApiSpec() {
           in: "query",
           name: "apiKey"
         },
-        ShareToken: {
+        LibraryViewToken: {
           type: "apiKey",
           in: "header",
-          name: "X-Share-Token"
+          name: "X-Library-View-Token"
+        },
+        LibraryViewTokenQuery: {
+          type: "apiKey",
+          in: "query",
+          name: "viewToken"
         },
         PlaybackToken: {
           type: "apiKey",
@@ -253,7 +258,7 @@ function openApiSpec() {
         }, ["posterAtlas"])
       }
     },
-    security: [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }, { ShareToken: [] }],
+    security: standardSecurity(),
     paths: {
       "/api/app/version": {
         get: operation("App", "Get the running application version", "Public endpoint used by web clients to detect a completed server update.", false)
@@ -365,6 +370,21 @@ function openApiSpec() {
       },
       "/api/admin/api-keys/{id}": {
         delete: operation("Admin", "Revoke API key", "Requires API-key-management permission.", true, {
+          parameters: [pathParam("id")]
+        })
+      },
+      "/api/admin/library-views": {
+        get: operation("Admin", "List library view URLs", "Lists scoped, read-only library view URLs and their expiry state."),
+        post: operation("Admin", "Create library view URL", "Creates a revocable, accountless URL that can browse selected libraries without playback access.", true, {
+          requestBody: jsonBody(objectSchema({
+            name: { type: "string", example: "Family library" },
+            libraryKeys: { type: "array", minItems: 1, items: { type: "string" } },
+            expiresAt: { type: "string", format: "date-time", nullable: true }
+          }, ["name", "libraryKeys"]))
+        })
+      },
+      "/api/admin/library-views/{id}": {
+        delete: operation("Admin", "Revoke library view URL", "Immediately revokes a library view URL.", true, {
           parameters: [pathParam("id")]
         })
       },
@@ -681,6 +701,11 @@ function openApiSpec() {
           parameters: [pathParam("mediaType"), pathParam("id")]
         })
       },
+      "/api/progress/{mediaType}/shows/{showId}/remove": {
+        post: operation("Playback Progress", "Remove show from On Deck", "Hides a TV show from On Deck for the current user until new playback activity occurs.", true, {
+          parameters: [pathParam("mediaType"), pathParam("showId")]
+        })
+      },
       "/api/ytdlp": {
         get: operation("YT-DLP", "YT-DLP status", "Returns YT-DLP availability, download path, update state, and recent downloads.")
       },
@@ -769,7 +794,7 @@ function openApiSpec() {
         })
       },
       "/api/libraries": {
-        get: operation("Libraries", "List managed libraries", "Includes active share URLs when permitted."),
+        get: operation("Libraries", "List managed libraries", "Lists libraries available for administration."),
         post: operation("Libraries", "Add library", "Adds a library and starts background indexing.", true, {
           requestBody: jsonBody({ $ref: "#/components/schemas/LibraryInput" })
         })
@@ -794,16 +819,6 @@ function openApiSpec() {
       "/api/libraries/{libraryKey}/reindex": {
         post: operation("Libraries", "Re-index one library", "Starts a background rebuild for one library.", true, {
           parameters: [pathParam("libraryKey")]
-        })
-      },
-      "/api/libraries/{libraryKey}/shares": {
-        post: operation("Libraries", "Create share URL", "Creates a revokable URL scoped to one library.", true, {
-          parameters: [pathParam("libraryKey")]
-        })
-      },
-      "/api/libraries/{libraryKey}/shares/{shareId}": {
-        delete: operation("Libraries", "Revoke share URL", "Revokes a library share URL.", true, {
-          parameters: [pathParam("libraryKey"), pathParam("shareId")]
         })
       },
       "/api/libraries/{libraryKey}/{itemId}": {
@@ -855,7 +870,7 @@ function openApiSpec() {
         })
       },
       "/api/web-streams/{libraryKey}/{itemId}/master.m3u8": {
-        get: operation("Streams", "Serve authenticated web playback", "Requires a web-scoped playback token plus an authenticated account session, API key, or library-share session. The built-in player uses an HTTP-only cookie so account credentials are absent from its URL.", true, {
+        get: operation("Streams", "Serve authenticated web playback", "Requires a web-scoped playback token plus an authenticated account session or API key. Read-only library view links cannot create or use playback sessions. The built-in player uses an HTTP-only cookie so account credentials are absent from its URL.", true, {
           parameters: [pathParam("libraryKey"), pathParam("itemId"), queryParam("playbackToken")]
         })
       },
@@ -944,7 +959,7 @@ function operation(tag, summary, description, secured = true, extra = {}) {
     tags: [tag],
     summary,
     description,
-    ...(secured ? { security: extra.security || [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }, { ShareToken: [] }] } : { security: [] }),
+    ...(secured ? { security: extra.security || securityForTag(tag) } : { security: [] }),
     parameters: extra.parameters || [],
     requestBody: extra.requestBody,
     responses: extra.responses || {
@@ -963,6 +978,16 @@ function operation(tag, summary, description, secured = true, extra = {}) {
       500: errorResponse()
     }
   };
+}
+
+function standardSecurity() {
+  return [{ SessionToken: [] }, { BearerAuth: [] }, { ApiKey: [] }];
+}
+
+function securityForTag(tag) {
+  return tag === "Catalog"
+    ? [...standardSecurity(), { LibraryViewToken: [] }, { LibraryViewTokenQuery: [] }]
+    : standardSecurity();
 }
 
 function objectSchema(properties, required = null) {

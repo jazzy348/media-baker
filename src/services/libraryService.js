@@ -1,4 +1,3 @@
-const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const mysql = require("mysql2/promise");
@@ -43,19 +42,6 @@ class LibraryService {
       await ensureColumn(this.pool, "media_libraries", "sort_order", "INT NOT NULL DEFAULT 0");
       await ensureColumn(this.pool, "media_libraries", "track_progress", "TINYINT(1) NOT NULL DEFAULT 1");
 
-      await this.pool.execute(`
-        CREATE TABLE IF NOT EXISTS library_shares (
-          id VARCHAR(32) NOT NULL PRIMARY KEY,
-          library_key VARCHAR(64) NOT NULL,
-          token_value VARCHAR(128) NULL,
-          token_hash VARCHAR(64) NOT NULL UNIQUE,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          revoked_at TIMESTAMP NULL,
-          INDEX idx_library_shares_library (library_key),
-          INDEX idx_library_shares_token_hash (token_hash)
-        )
-      `);
-      await ensureColumn(this.pool, "library_shares", "token_value", "VARCHAR(128) NULL");
     }
 
     this.initialized = true;
@@ -78,17 +64,12 @@ class LibraryService {
     return normalizeStoredLibraries(data.libraries || []);
   }
 
-  async listWithShares() {
+  async listAvailable() {
     const storedLibraries = await this.list();
     const storedKeys = new Set(storedLibraries.map((library) => library.key));
     const managedLibraries = (this.config.libraries || [])
       .filter((library) => library.managed && !storedKeys.has(library.key));
-    const libraries = [...storedLibraries, ...managedLibraries];
-    const shares = await this.listShares();
-    return libraries.map((library) => ({
-      ...library,
-      shares: shares.filter((share) => share.libraryKey === library.key)
-    }));
+    return [...storedLibraries, ...managedLibraries];
   }
 
   async add(input) {
@@ -146,7 +127,6 @@ class LibraryService {
     await this.init();
     const selected = String(key || "");
     if (this.config.mysql.enabled) {
-      await this.pool.execute("DELETE FROM library_shares WHERE library_key = ?", [selected]);
       const [result] = await this.pool.execute("DELETE FROM media_libraries WHERE library_key = ?", [selected]);
       return result.affectedRows > 0;
     }
@@ -154,7 +134,6 @@ class LibraryService {
     const data = await this.readJson();
     const before = (data.libraries || []).length;
     data.libraries = (data.libraries || []).filter((library) => library.key !== selected);
-    data.shares = (data.shares || []).filter((share) => share.libraryKey !== selected);
     await this.writeJson(data);
     return data.libraries.length !== before;
   }
@@ -197,103 +176,6 @@ class LibraryService {
     return data.libraries;
   }
 
-  async createShare(libraryKey) {
-    await this.init();
-    const library = await this.findAvailableLibrary(libraryKey);
-    if (!library) {
-      throw httpError(404, "Library not found");
-    }
-
-    const token = crypto.randomBytes(32).toString("base64url");
-    const share = {
-      id: crypto.randomBytes(8).toString("hex"),
-      libraryKey,
-      token,
-      tokenHash: hashToken(token),
-      createdAt: new Date().toISOString(),
-      revokedAt: null
-    };
-
-    if (this.config.mysql.enabled) {
-      await this.pool.execute(
-        `INSERT INTO library_shares (id, library_key, token_value, token_hash)
-         VALUES (?, ?, ?, ?)`,
-        [share.id, share.libraryKey, share.token, share.tokenHash]
-      );
-    } else {
-      const data = await this.readJson();
-      data.shares = [...(data.shares || []), share];
-      await this.writeJson(data);
-    }
-
-    return {
-      id: share.id,
-      libraryKey: share.libraryKey,
-      token,
-      createdAt: share.createdAt,
-      revokedAt: null
-    };
-  }
-
-  async revokeShare(libraryKey, shareId) {
-    await this.init();
-    const revokedAt = new Date().toISOString();
-    if (this.config.mysql.enabled) {
-      const [result] = await this.pool.execute(
-        `UPDATE library_shares
-         SET revoked_at = ?
-         WHERE id = ? AND library_key = ? AND revoked_at IS NULL`,
-        [new Date(revokedAt), shareId, libraryKey]
-      );
-      return result.affectedRows > 0;
-    }
-
-    const data = await this.readJson();
-    const share = (data.shares || []).find((entry) => entry.id === shareId && entry.libraryKey === libraryKey && !entry.revokedAt);
-    if (!share) {
-      return false;
-    }
-    share.revokedAt = revokedAt;
-    await this.writeJson(data);
-    return true;
-  }
-
-  async verifyShareToken(token) {
-    await this.init();
-    const tokenHash = hashToken(token);
-    const shares = await this.listShares(true);
-    const share = shares.find((entry) => entry.tokenHash === tokenHash && !entry.revokedAt);
-    if (!share) {
-      return null;
-    }
-
-    const library = await this.findAvailableLibrary(share.libraryKey);
-    return library ? { share, library } : null;
-  }
-
-  async findAvailableLibrary(libraryKey) {
-    const selected = String(libraryKey || "").trim();
-    const stored = (await this.list()).find((library) => library.key === selected);
-    if (stored) return stored;
-    return (this.config.libraries || []).find((library) => library.managed && library.key === selected) || null;
-  }
-
-  async listShares(includeHash = false) {
-    await this.init();
-
-    if (this.config.mysql.enabled) {
-      const [rows] = await this.pool.execute(
-        `SELECT id, library_key, token_value, token_hash, created_at, revoked_at
-         FROM library_shares
-         ORDER BY created_at DESC`
-      );
-      return rows.map((row) => fromMysqlShare(row, includeHash));
-    }
-
-    const data = await this.readJson();
-    return (data.shares || []).map((share) => includeHash ? share : publicShare(share));
-  }
-
   async seedIfEmpty() {
     if (this.config.mysql.enabled) {
       const [[row]] = await this.pool.execute("SELECT COUNT(*) AS count FROM media_libraries");
@@ -317,7 +199,6 @@ class LibraryService {
     }
 
     data.libraries = normalizeStoredLibraries(this.config.libraries);
-    data.shares = data.shares || [];
     await this.writeJson(data);
   }
 
@@ -326,7 +207,7 @@ class LibraryService {
       return JSON.parse(await fs.readFile(this.config.libraryStorePath, "utf8"));
     } catch (err) {
       if (err.code === "ENOENT") {
-        return { libraries: [], shares: [] };
+        return { libraries: [] };
       }
       throw err;
     }
@@ -335,8 +216,7 @@ class LibraryService {
   async writeJson(data) {
     await fs.mkdir(path.dirname(this.config.libraryStorePath), { recursive: true });
     await fs.writeFile(this.config.libraryStorePath, JSON.stringify({
-      libraries: data.libraries || [],
-      shares: data.shares || []
+      libraries: data.libraries || []
     }, null, 2));
   }
 }
@@ -409,10 +289,6 @@ function slugValue(value) {
     .replace(/^-+|-+$/g, "");
 }
 
-function hashToken(token) {
-  return crypto.createHash("sha256").update(String(token || "")).digest("hex");
-}
-
 function fromMysqlLibrary(row) {
   return {
     key: row.library_key,
@@ -424,34 +300,6 @@ function fromMysqlLibrary(row) {
     trackProgress: Boolean(row.track_progress),
     sortOrder: Number(row.sort_order) || 0
   };
-}
-
-function fromMysqlShare(row, includeHash) {
-  const share = {
-    id: row.id,
-    libraryKey: row.library_key,
-    token: row.token_value || null,
-    createdAt: toIso(row.created_at),
-    revokedAt: toIso(row.revoked_at)
-  };
-  if (includeHash) {
-    share.tokenHash = row.token_hash;
-  }
-  return share;
-}
-
-function publicShare(share) {
-  return {
-    id: share.id,
-    libraryKey: share.libraryKey,
-    token: share.token || null,
-    createdAt: share.createdAt || null,
-    revokedAt: share.revokedAt || null
-  };
-}
-
-function toIso(value) {
-  return value ? new Date(value).toISOString() : null;
 }
 
 async function ensureColumn(pool, table, column, definition) {

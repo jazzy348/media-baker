@@ -9,11 +9,11 @@ const TOKEN_BYTES = 32;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_TOUCH_INTERVAL_MS = 60 * 60 * 1000;
 const API_KEY_PREFIX = "st_";
+const LIBRARY_VIEW_PREFIX = "lv_";
 
 const DEFAULT_PERMISSIONS = {
   libraries: [],
   canCopyStreamUrls: false,
-  canCreateShareLinks: false,
   canManageLibraries: false,
   canManageMetadata: false,
   canManageSettings: false,
@@ -99,6 +99,21 @@ class AccountService {
           INDEX idx_user_sessions_expires (expires_at)
         )
       `);
+
+      await this.pool.execute(`
+        CREATE TABLE IF NOT EXISTS library_view_links (
+          id VARCHAR(32) NOT NULL PRIMARY KEY,
+          link_name VARCHAR(128) NOT NULL,
+          token_value VARCHAR(128) NOT NULL,
+          token_hash VARCHAR(64) NOT NULL UNIQUE,
+          library_keys_json TEXT NOT NULL,
+          expires_at DATETIME NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          revoked_at DATETIME NULL,
+          INDEX idx_library_view_links_hash (token_hash),
+          INDEX idx_library_view_links_expires (expires_at)
+        )
+      `);
     }
 
     this.initialized = true;
@@ -131,7 +146,6 @@ class AccountService {
         ...DEFAULT_PERMISSIONS,
         isAdmin: true,
         canCopyStreamUrls: true,
-        canCreateShareLinks: true,
         canManageLibraries: true,
         canManageMetadata: true,
         canManageSettings: true,
@@ -427,6 +441,110 @@ class AccountService {
     return account ? { apiKeyId: apiKey.id, user: publicAccount(account) } : null;
   }
 
+  async createLibraryView(input = {}) {
+    await this.init();
+    const name = normalizeLibraryViewName(input.name);
+    const availableLibraryKeys = new Set((this.config.libraries || []).map((library) => library.key));
+    const libraryKeys = normalizeLibraryViewLibraries(input.libraryKeys, availableLibraryKeys);
+    const expiresAt = normalizeLibraryViewExpiry(input.expiresAt);
+    const token = `${LIBRARY_VIEW_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
+    const link = {
+      id: crypto.randomBytes(8).toString("hex"),
+      name,
+      token,
+      tokenHash: hashToken(token),
+      libraryKeys,
+      expiresAt,
+      createdAt: new Date().toISOString(),
+      revokedAt: null
+    };
+
+    if (this.config.mysql.enabled) {
+      await this.pool.execute(
+        `INSERT INTO library_view_links
+          (id, link_name, token_value, token_hash, library_keys_json, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [link.id, link.name, link.token, link.tokenHash, JSON.stringify(link.libraryKeys), expiresAt ? new Date(expiresAt) : null]
+      );
+    } else {
+      const data = await this.readJson();
+      data.libraryViews = [...(data.libraryViews || []), link];
+      await this.writeJson(data);
+    }
+
+    return publicLibraryView(link);
+  }
+
+  async listLibraryViews() {
+    await this.init();
+    if (this.config.mysql.enabled) {
+      const [rows] = await this.pool.execute(
+        `SELECT id, link_name, token_value, library_keys_json, expires_at, created_at, revoked_at
+         FROM library_view_links
+         ORDER BY created_at DESC`
+      );
+      return rows.map(fromMysqlLibraryView).map(publicLibraryView);
+    }
+
+    const data = await this.readJson();
+    return (data.libraryViews || [])
+      .map(publicLibraryView)
+      .sort((left, right) => Date.parse(right.createdAt || 0) - Date.parse(left.createdAt || 0));
+  }
+
+  async revokeLibraryView(id) {
+    await this.init();
+    const revokedAt = new Date().toISOString();
+    if (this.config.mysql.enabled) {
+      const [result] = await this.pool.execute(
+        "UPDATE library_view_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+        [new Date(revokedAt), id]
+      );
+      return result.affectedRows > 0;
+    }
+
+    const data = await this.readJson();
+    const link = (data.libraryViews || []).find((entry) => entry.id === id && !entry.revokedAt);
+    if (!link) {
+      return false;
+    }
+    link.revokedAt = revokedAt;
+    await this.writeJson(data);
+    return true;
+  }
+
+  async verifyLibraryViewToken(token) {
+    await this.init();
+    const tokenHash = hashToken(token);
+    let link = null;
+    if (this.config.mysql.enabled) {
+      const [rows] = await this.pool.execute(
+        `SELECT id, link_name, token_value, library_keys_json, expires_at, created_at, revoked_at
+         FROM library_view_links
+         WHERE token_hash = ? AND revoked_at IS NULL`,
+        [tokenHash]
+      );
+      link = rows[0] ? fromMysqlLibraryView(rows[0]) : null;
+    } else {
+      const data = await this.readJson();
+      link = (data.libraryViews || []).find((entry) => entry.tokenHash === tokenHash && !entry.revokedAt) || null;
+    }
+
+    const expiresAtMs = link && link.expiresAt ? Date.parse(link.expiresAt) : null;
+    if (!link || link.expiresAt && (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now())) {
+      return null;
+    }
+
+    const availableLibraryKeys = new Set((this.config.libraries || []).map((library) => library.key));
+    const libraryKeys = (link.libraryKeys || []).filter((key) => availableLibraryKeys.has(key));
+    return libraryKeys.length > 0 ? {
+      id: link.id,
+      name: link.name,
+      libraryKeys,
+      expiresAt: link.expiresAt || null
+    } : null;
+  }
+
   async verifySession(token) {
     await this.init();
     const sessionKey = hashToken(token);
@@ -594,7 +712,7 @@ class AccountService {
       return JSON.parse(await fs.readFile(this.config.accountStorePath, "utf8"));
     } catch (err) {
       if (err.code === "ENOENT") {
-        return { accounts: [], apiKeys: [], sessions: [] };
+        return { accounts: [], apiKeys: [], sessions: [], libraryViews: [] };
       }
       throw err;
     }
@@ -605,7 +723,8 @@ class AccountService {
     await fs.writeFile(this.config.accountStorePath, JSON.stringify({
       accounts: data.accounts || [],
       apiKeys: data.apiKeys || [],
-      sessions: data.sessions || []
+      sessions: data.sessions || [],
+      libraryViews: data.libraryViews || []
     }, null, 2));
   }
 }
@@ -629,7 +748,6 @@ function normalizePermissions(value = {}) {
       ...DEFAULT_PERMISSIONS,
       isAdmin: true,
       canCopyStreamUrls: true,
-      canCreateShareLinks: true,
       canManageLibraries: true,
       canManageMetadata: true,
       canManageSettings: true,
@@ -648,7 +766,6 @@ function normalizePermissions(value = {}) {
   }
 
   const canViewAdmin = Boolean(permissions.canViewAdmin
-    || permissions.canCreateShareLinks
     || permissions.canManageLibraries
     || permissions.canManageMetadata
     || permissions.canManageSettings
@@ -665,7 +782,6 @@ function normalizePermissions(value = {}) {
     ...DEFAULT_PERMISSIONS,
     libraries: Array.isArray(permissions.libraries) ? permissions.libraries.map(String).filter(Boolean) : [],
     canCopyStreamUrls: Boolean(permissions.canCopyStreamUrls),
-    canCreateShareLinks: Boolean(permissions.canCreateShareLinks),
     canManageLibraries: Boolean(permissions.canManageLibraries),
     canManageMetadata: Boolean(permissions.canManageMetadata),
     canManageSettings: Boolean(permissions.canManageSettings),
@@ -744,6 +860,37 @@ function normalizeApiKeyName(value) {
   return name;
 }
 
+function normalizeLibraryViewName(value) {
+  const name = String(value || "").trim();
+  if (name.length < 1 || name.length > 128) {
+    throw httpError(400, "Library view name must be 1-128 characters");
+  }
+  return name;
+}
+
+function normalizeLibraryViewLibraries(value, availableLibraryKeys) {
+  const libraryKeys = [...new Set((Array.isArray(value) ? value : []).map((key) => String(key || "").trim()).filter(Boolean))];
+  if (libraryKeys.length === 0) {
+    throw httpError(400, "Choose at least one library");
+  }
+  const unknown = libraryKeys.find((key) => !availableLibraryKeys.has(key));
+  if (unknown) {
+    throw httpError(400, `Unknown library: ${unknown}`);
+  }
+  return libraryKeys;
+}
+
+function normalizeLibraryViewExpiry(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const expiresAtMs = Date.parse(String(value));
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    throw httpError(400, "Library view expiry must be a future date and time");
+  }
+  return new Date(expiresAtMs).toISOString();
+}
+
 function publicApiKey(apiKey, account) {
   if (!apiKey || !account) {
     return null;
@@ -765,6 +912,33 @@ function fromMysqlApiKey(row) {
     name: row.key_name,
     createdAt: toIso(row.created_at),
     revokedAt: toIso(row.revoked_at)
+  };
+}
+
+function fromMysqlLibraryView(row) {
+  return {
+    id: row.id,
+    name: row.link_name,
+    token: row.token_value || null,
+    libraryKeys: parseJson(row.library_keys_json, []),
+    expiresAt: toIso(row.expires_at),
+    createdAt: toIso(row.created_at),
+    revokedAt: toIso(row.revoked_at)
+  };
+}
+
+function publicLibraryView(link) {
+  const expiresAt = link.expiresAt || null;
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : null;
+  return {
+    id: link.id,
+    name: link.name,
+    token: link.token || null,
+    libraryKeys: Array.isArray(link.libraryKeys) ? link.libraryKeys.map(String).filter(Boolean) : [],
+    expiresAt,
+    createdAt: link.createdAt || null,
+    revokedAt: link.revokedAt || null,
+    expired: Boolean(expiresAt && (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()))
   };
 }
 

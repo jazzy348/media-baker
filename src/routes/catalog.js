@@ -8,9 +8,27 @@ const { createId } = require("../utils/mediaParsers");
 const { normalizeSearchText, searchTokens } = require("../utils/searchText");
 const { establishWebStreamAuthCookie } = require("../middleware/auth");
 const logger = require("../utils/logger");
+const LIBRARY_VIEW_BLOCKED_FIELDS = new Set([
+  "filePath",
+  "path",
+  "originalUrl",
+  "playbackToken",
+  "webPlaybackToken",
+  "playlistPath"
+]);
 
 module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls, images, metadata, progress, subtitles, playbackTokens, skipDetection, openMovie }) {
   const router = express.Router();
+
+  router.use((req, res, next) => {
+    if (req.authMode !== "library-view") {
+      next();
+      return;
+    }
+    const sendJson = res.json.bind(res);
+    res.json = (value) => sendJson(sanitizeLibraryViewResponse(value));
+    next();
+  });
 
   router.get("/home", async (req, res, next) => {
     try {
@@ -269,6 +287,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
 
   router.get("/:mediaType/:id/options", async (req, res, next) => {
     try {
+      requirePlaybackAccess(req);
       assertMediaAccess(req, req.params.mediaType);
       const mediaFile = await resolveMediaFile(mediaIndex, req.params.mediaType, req.params.id);
       const library = mediaIndex.libraryForKey(req.params.mediaType);
@@ -579,6 +598,7 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
 
   router.get("/:mediaType/:id/subtitles/search", async (req, res, next) => {
     try {
+      requirePlaybackAccess(req);
       assertMediaAccess(req, req.params.mediaType);
       const library = mediaIndex.libraryForKey(req.params.mediaType);
       if (library && library.noSubtitles) {
@@ -1379,7 +1399,7 @@ async function withCatalogState(items, metadata, progress, mediaIndex, req) {
 }
 
 async function withPlaybackProgress(items, progress, mediaIndex, req) {
-  if (!progress || !progress.getMany) {
+  if (req.authMode === "library-view" || !progress || !progress.getMany) {
     return items;
   }
 
@@ -1521,6 +1541,24 @@ function requireCopyStreamPermission(req) {
   if (!req.user || (!permissions.isAdmin && !permissions.canCopyStreamUrls)) {
     throw httpError(403, "Copy stream URL access required");
   }
+}
+
+function requirePlaybackAccess(req) {
+  if (req.authMode === "library-view") {
+    throw httpError(403, "Playback is not available through a library view link");
+  }
+}
+
+function sanitizeLibraryViewResponse(value) {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeLibraryViewResponse);
+  }
+  if (!value || typeof value !== "object" || Buffer.isBuffer(value)) {
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !LIBRARY_VIEW_BLOCKED_FIELDS.has(key))
+    .map(([key, entry]) => [key, sanitizeLibraryViewResponse(entry)]));
 }
 
 function librarySkipsMetadata(mediaIndex, mediaType) {

@@ -1,7 +1,16 @@
 const express = require("express");
+const { httpError } = require("../utils/httpErrors");
 
 module.exports = function createHealthRoutes({ config, indexStore, mediaIndex, ffmpeg, indexScanScheduler, subtitles, ytdlp }) {
   const router = express.Router();
+
+  router.use((req, res, next) => {
+    if (req.authMode === "library-view") {
+      next(httpError(403, "System health is not available through a library view link"));
+      return;
+    }
+    next();
+  });
 
   router.get("/", async (req, res, next) => {
     try {

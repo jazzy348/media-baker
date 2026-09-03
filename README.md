@@ -1,45 +1,45 @@
-# Media Baker Standalone Setup
+# Media Baker
 
-Use this guide for standalone Media Baker deployments with Node.js, Express, and FFmpeg installed directly on the host.
+Media Baker is a self-hosted media library, metadata manager, and HLS streaming server with a browser interface. This guide covers a standalone installation. For containers, see the [Docker setup guide](README.docker.md).
 
 ## Features
 
-- Installable HTTPS WebUI with accounts, permissions, API keys, share URLs, self-service account settings, per-user watch state, cache-safe asset updates, and server-update reload notices.
-- Dynamic library creation, removal, ordering, folder browsing, and background re-indexing from the admin panel.
-- TV, movie, music, image, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
-- Recently added and randomized home rows, lazy library browsing, metadata-first search, show/season views, and random episode selection.
-- On Deck, next-episode handling, watch history, resume playback, manual watched/unwatched controls, and currently-playing admin view.
-- Browser playback and copyable HLS URLs for external players, with automatic next-episode and next-track playback, a movable themed music player, and minimizable floating video.
-- Optional background TV intro and credit detection with in-player skip controls, chapter support, recurring-theme matching, and post-credit scene preservation.
-- Optional per-library re-encoding optimiser with scheduled or continuous runs, parallel jobs, hardware acceleration, HDR preservation, stream-language selection, validation, and retryable failures.
-- HLS generation with cache reuse, one-transcode-per-file locking, pre-generation, configurable TTL, and fallback error stream.
-- Original, medium, and low quality presets with resolution and bitrate selection.
-- Audio-track selection, stereo mixdown, preserved 5.1, and Stabby Cinema 5.1 channel remapping.
-- Embedded and external subtitle burn-in, English subtitle preference, SubDL search, and optional ffsubsync synchronization.
-- ProTV and VRChat URL support including resume time and stereoscopic 3D mode parameters.
-- TMDb video metadata and MusicBrainz music metadata with 1024px WebP artwork caching, aliases, season artwork, episode thumbnails, manual poster URLs, unmatched-media search, provider-ID matching, rematching, and duplicate detection.
-- YT-DLP download library with playlists, live recording or HLS relay, progress, automatic indexing, and generated thumbnails.
-- M3U and HDHomeRun Live TV with EPG refresh, automatic/manual channel matching, channel filtering, cached logos, deinterlacing, and rolling HLS.
-- Optional MySQL storage for the index, settings, accounts, sessions, metadata, and playback progress.
-- JSON storage fallback when MySQL is disabled.
-- Admin pages for accounts, API keys, libraries, duplicates, backup/restore, settings, hardware graphs, currently playing, live logs, and user history.
-- Manual and scheduled compressed database backups with folder selection, weekday/time scheduling, retention, and full restore.
-- Runtime settings for metadata, subtitles, HLS, IPTV, YT-DLP, scans, logging, GPU encoding, fallback playback, and update checks.
-- Daily rotating log files with configurable retention and selectable error, info, or full logging levels.
-- Admin-only GitHub release notifications and optional automatic source updates.
+- TV, movie, music, image, anime, 3D, loose-file, and common season-folder library layouts.
+- Installable WebUI with accounts, granular permissions, per-account colour themes, selectable server branding, search, lazy-loaded libraries, and remembered navigation state.
+- Recently Added based on Media Baker's persisted first-seen time, stable random browsing, show and season pages, episode progress, watched state, On Deck, history, and shuffle playback.
+- Browser HLS playback with quality selection, switchable audio and subtitle tracks, automatic next-item playback, resumable sessions, rapid-seek recovery, and cached keyframe timelines.
+- Copyable HLS URLs for external players, including H.264/AAC compatibility output, audio/subtitle variants, progress tracking, and fallback playback.
+- Watch Together rooms with synchronized playback, guest names, chat, host controls, readiness checks, and active-room administration.
+- Optional intro and credit detection with persistent failures, previews, retries, reanalysis, chapter hints, recurring-theme matching, and post-credit scene protection.
+- Optional per-library optimiser with one configurable profile, retained audio languages, optional subtitles, stereo downmix, HDR preservation, validation, retries, and hardware acceleration.
+- TMDb video metadata and Deezer music metadata, or a compatible custom metadata service, with cached WebP artwork, artist and album art, season posters, episode thumbnails, manual matching, and duplicate detection.
+- YT-DLP downloads, playlist handling, YouTube cookies, channel subscriptions, live recording, live HLS relay, progress, automatic indexing, and generated thumbnails.
+- M3U and HDHomeRun Live TV with XMLTV programme data, channel matching, logo caching, deinterlacing, and rolling HLS.
+- Optional OpenMovie API for building simplified Media Baker clients, including VRChat integrations, with encrypted access URLs, playback variants, poster atlases, On Deck, and future URL generation.
+- MySQL storage or local JSON files for the index, settings, accounts, sessions, metadata, playback progress, keyframes, OpenMovie state, and other persistent data.
+- Admin views for accounts, keys, libraries, duplicates, backup and restore, optimisation, skip detection, settings, tasks, hardware, current playback, Watch Together rooms, logs, and user history.
+- Manual and scheduled compressed backups, rotating logs, GitHub release notifications, and supervised source updates.
 - Swagger/OpenAPI documentation at `/api/docs`.
+
+## Requirements
+
+- Node.js 24 or newer.
+- FFmpeg and FFprobe.
+- npm.
+- Optional: MySQL 8 or a compatible MySQL server.
+- Optional: ffsubsync for downloaded subtitle synchronization.
+- Optional: yt-dlp for downloads, subscriptions, recording, and relays.
+- Optional: a supported NVIDIA, Intel, AMD, or Apple GPU and its drivers.
 
 ## Standalone Setup
 
-1. Install Node.js 20 or newer.
-
-2. Install dependencies:
+1. Install dependencies:
 
    ```powershell
    npm ci
    ```
 
-3. Create `config.json`:
+2. Create the startup configuration:
 
    ```powershell
    Copy-Item config.example.json config.json
@@ -51,7 +51,7 @@ Use this guide for standalone Media Baker deployments with Node.js, Express, and
    cp config.example.json config.json
    ```
 
-4. Edit the startup configuration:
+3. Edit `config.json` if required:
 
    ```json
    {
@@ -68,7 +68,7 @@ Use this guide for standalone Media Baker deployments with Node.js, Express, and
    }
    ```
 
-5. On Windows, add the required binaries:
+4. On Windows, place binaries in `bin/`:
 
    ```text
    bin/ffmpeg.exe
@@ -77,147 +77,186 @@ Use this guide for standalone Media Baker deployments with Node.js, Express, and
    bin/yt-dlp.exe      optional
    ```
 
-   On Linux, install the equivalent commands on `PATH`.
+   On Linux and macOS, install equivalent commands on `PATH`.
 
-6. Add the optional fallback video:
+5. Optionally place a fallback video at `fallback/404.mp4`.
 
-   ```text
-   fallback/404.mp4
-   ```
-
-7. Start Media Baker through its supervisor:
+6. Start Media Baker through its supervisor:
 
    ```powershell
    npm start
    ```
 
-8. Open `http://localhost:5000`.
+7. Open `http://localhost:5000` and create the first administrator account.
 
-On first launch, create the first admin account, then add libraries from `Admin > Libraries`.
+Always use `npm start`. Running `node src/server.js` directly bypasses the supervisor and disables source-update installation.
 
-## Docker Deployment
-[Docker Setup Guide](README.docker.md)
+## Configuration And Storage
 
-## Configuration
+`config.json` is intentionally small. It provides values needed before the database and WebUI settings are available:
 
-`config.json` contains settings required before the database, account system, and WebUI settings are available:
+- `port`: HTTP port, defaulting to `5000`.
+- `mysql`: enables MySQL and supplies its connection details.
+- `libraries`: optional seed libraries for an initial deployment. Libraries should normally be managed in the WebUI afterward.
 
-- `port`: HTTP port; defaults to `5000`.
-- `mysql`: set `enabled` to `true` and provide credentials to use MySQL.
-- `libraries`: optional first-run library import; manage libraries in the WebUI afterward.
+Most settings are runtime settings stored in MySQL or `cache/settings.json`. They are managed under `Admin > Settings`, `Admin > Optimise`, and `Admin > Backup & Restore`.
 
-Runtime configuration is stored in MySQL or the JSON settings store and can be changed without restarting:
+Important standalone paths:
 
-- `Admin > Settings`: metadata, subtitles, HLS, IPTV, YT-DLP, scans, playback, intro/credit detection, logging, GPU, fallback stream, and updates. Intro and credit detection is disabled by default.
-- `Admin > Libraries`: media folders, order, re-indexing, and share URLs.
-- `Admin > Accounts`: users, passwords, permissions, and library access.
-- `Admin > API Keys`: user-scoped API keys.
-- `Admin > Backup & Restore`: backup destination, schedule, retention, manual backups, and restore.
-- `Admin > Optimise`: per-library re-encoding modes, schedules, parallel jobs, current work, full scans, and retryable failures.
-- `Admin > Skip Detection`: live analysis progress, ETA, persisted failures, marker confidence, previews, retries, and reanalysis controls.
+| Path | Purpose |
+| --- | --- |
+| `config.json` | Startup configuration |
+| `cache/` | JSON stores, metadata, artwork, HLS, subtitles, keyframes, update staging, and backups |
+| `cache/logs/` | Daily rotating logs unless configured otherwise |
+| `cache/yt-dlp/` | Default standalone YT-DLP output |
+| `public/icons/` | Built-in and administrator-supplied source icons |
+| `fallback/404.mp4` | Optional fallback video source |
+| `bin/` | Bundled Windows executables |
 
-Standalone paths:
+MySQL stores structured application data when enabled. Generated images, HLS fragments, downloaded subtitles, logs, and update files remain on disk. JSON mode stores the corresponding structured data below `cache/`.
 
-- `cache/`: JSON stores, metadata, thumbnails, subtitles, HLS, playback state, update staging, and backups.
-- `cache/logs/YYYY-MM-DD.log`: daily log files.
-- `cache/yt-dlp/`: default standalone YT-DLP output.
-- `fallback/404.mp4`: fallback video source.
-- `bin/`: Windows FFmpeg, FFprobe, ffsubsync, and yt-dlp binaries.
+## Administration
 
-The WebUI reports missing binaries. Playback remains disabled until FFmpeg and FFprobe are available; subtitle synchronization and YT-DLP are disabled when their optional binaries are missing.
+- `Accounts`: users, passwords, library access, and granular permissions.
+- `Keys`: user-scoped API keys and revocable Library View URLs.
+- `Libraries`: create, order, re-index, or remove libraries and browse server folders.
+- `Duplicates`: inspect duplicate metadata matches.
+- `Backup & Restore`: destination, schedule, retention, manual snapshots, and restore.
+- `Optimise`: global scheduling, per-library profiles, current work, queues, full checks, and retryable failures.
+- `Skip Detection`: progress, failures, marker review, retries, and fingerprint rebuilds.
+- `Settings`: branding, metadata, subtitles, YT-DLP, IPTV, HLS, playback, scans, logging, hardware acceleration, OpenMovie, fallback playback, and updates.
+- `Tasks`: running, queued, failed, and recently completed work across indexing, metadata, keyframes, streaming, optimisation, downloads, backups, and updates.
+- `Hardware`: five-minute CPU, memory, GPU, and network graphs. GPU sampling supports NVIDIA, Intel, AMD, and Apple where the operating system exposes suitable counters.
+- `Currently Playing`: active playback and Watch Together rooms.
+- `Live Log` and `User History`: operational logs and filtered account playback history.
 
-## Libraries
+## Libraries And Indexing
 
-Create libraries with:
+Create a library with a display name, type, and server-visible path. Supported types are TV, Movies, Music, Images, TV 3D, and Movies 3D. Paths may be local folders, UNC paths, mounted shares, or mapped drives visible to the account running Media Baker.
 
-- `Name`: display name, such as `Weeb TV`.
-- `Type`: `TV`, `Movies`, `Music`, `Images`, `TV 3D`, or `Movies 3D`.
-- `Path`: local path, UNC path, mapped drive, or mounted network folder.
+Movie libraries may use loose files or one folder per movie. TV libraries support season folders, specials and season zero, `S01E01`, `1x01`, anime-style layouts, and unmatched video files. Music libraries primarily use `Artist/Album/track`, but tolerate intermediate grouping folders and tagged files. Image libraries are scanned recursively.
 
-Movie libraries may contain loose files or individual movie folders. TV libraries may contain season folders, loose episodes, anime layouts, and unmatched videos. Files that cannot be parsed as episodes remain available as movie-like items instead of being discarded.
+Periodic scans add and remove media. Unreadable subdirectories are logged and skipped without stopping the rest of the library scan. A file's `addedAtMs` becomes its persistent first-seen time: later metadata changes, optimisation, or filesystem timestamp updates do not make it Recently Added again. Unambiguous renames retain both the media ID and first-seen time.
 
-Music libraries use `Artist/Album/track` folders and also accept tracks directly inside an artist folder. Media Baker groups artists and albums like TV shows and seasons, accepts common lossy and lossless audio formats, and serves songs as audio-only HLS. Existing AAC is remuxed; WAV, FLAC, and other formats are converted to high-quality AAC for consistent playback.
+Compatible video files are queued for background keyframe discovery during indexing. Keyframe timelines are stored with the media identity and file signature in MySQL or JSON. Playback reuses them while size and modification time still match, and refreshes stale data when the source changes.
 
-Image libraries recursively index common image formats and display the original files in the WebUI. Copied image URLs preserve the aspect ratio while capping oversized images within 1024x1024; cached derivatives, posters, thumbnails, album art, and channel icons use WebP without modifying library originals. Existing cached images are converted automatically in the background after upgrading.
+## Playback And Progress
 
-Periodic scans add new files, remove missing files, and discover newly released episodes for On Deck. Network shares must already be accessible to the account running Media Baker. Windows services should use UNC paths because interactive mapped drives may not exist in the service session.
+Media Baker serves HLS for browser and copied playback. It reuses compatible streams where possible and transcodes only the tracks or video properties that require it. Original, medium, and low quality profiles are available.
+
+The browser player exposes switchable audio and WebVTT subtitle renditions where supported. Track changes prepare and buffer the replacement before switching. Copied URLs remain compatibility-oriented HLS and can select a fixed audio/subtitle variant. Audio output supports stereo, preserved surround, 5.1, and Stabby Cinema channel mapping.
+
+HLS fragments are cached on disk and shared by identical playback requests. Missing seek positions can reposition FFmpeg using the stored keyframe timeline. Abandoned requests are cancelled so rapid seeking does not keep reasserting obsolete positions. The minimum-free-space setting can remove inactive HLS caches before generation; active readers and transcodes are protected.
+
+Logged-in browser playback writes account progress and refreshes On Deck. Users can remove a movie or show from On Deck; it remains suppressed until that media is watched again. Copied playback estimates progress from delivered HLS segments, so it can be less precise than browser-reported playback.
+
+### Watch Together
+
+Users with `Copy playback URLs` permission can create Watch Together rooms. Logged-in participants retain normal account progress; guests choose a temporary room name. Playback starts after the initial participants report enough buffered media. The host can play, pause, seek, kick participants, close the room, or allow everyone to control playback. Late joiners synchronize without pausing existing viewers. Chat records joins, control-policy changes, kicks, and other room events. Empty rooms are removed automatically, and administrators can inspect or close active rooms.
 
 ## Re-encode And Optimise
 
-The optimiser is disabled by default and is available to accounts with the `Manage optimiser` permission under `Admin > Optimise`. It supports TV and movie libraries. Both the global optimiser switch and the individual library switch must be enabled before a library will run.
+The optimiser is disabled by default and supports TV and movie libraries. Both the global switch and a library's switch must be enabled. Libraries may run all day or inside a daily time window, with 1-8 parallel jobs.
 
-Each library can run continuously or inside a daily start/end window. The scan interval controls how often eligible work is checked, and `Parallel jobs` allows 1-8 files to be processed at once. Normal runs inspect files added or changed since the library's last optimiser checkpoint. `Check all files` ignores that checkpoint and checks the entire selected library; compatible files are probed and skipped without being rewritten.
+Each library has one profile:
 
-### Output Modes
+- The preferred audio language is inherited from `Admin > Settings`.
+- Additional audio languages can be selected per library.
+- Commentary and audio-description tracks are excluded.
+- `Preserve subtitles` retains suitable subtitle streams; otherwise subtitles are omitted from rewritten output.
+- `Downmix to stereo` converts retained surround audio to AAC stereo; otherwise channel layouts are preserved where possible.
+- `Preserve HDR` keeps detected HDR as 10-bit HEVC with available colour metadata.
 
-- **Simple mode: preferred audio** targets an MP4 containing one video track and the preferred programme audio track. Other audio and all subtitle tracks are removed when a rewrite is required. Existing compatible MP4 files using H.264 or HEVC video with AAC, AC-3, E-AC-3, or MP3 audio are left unchanged unless stereo downmix is required.
-- **Full mode: original + preferred/secondary** retains programme audio matching the metadata-reported original language, the user's preferred audio language, and the optional secondary language. If original-language metadata is unavailable, configure the secondary language explicitly when it differs from the preferred language. Commentary and audio-description tracks are removed. It also keeps the best full and forced subtitle tracks matching the configured subtitle language. The result is MKV when multiple retained audio tracks or subtitles require it; otherwise it is MP4.
+Video normally targets H.264 using quality-based encoding. Media Baker can use supported NVIDIA, Intel QSV, VAAPI/AMD, or Apple VideoToolbox decoding and encoding, with an automatic software fallback. Already-compatible files are probed and skipped rather than rewritten.
 
-`Downmix to stereo` converts retained surround tracks to stereo. In Full mode it also keeps one best track per retained language instead of preserving duplicate surround variants. When downmix is disabled, the original channel count is preserved. Audio that requires conversion is encoded as AAC.
+Outputs are written to temporary files and validated for codecs, stream counts, channel layouts, duration, timestamps, and packet continuity before replacing the source. Heartbeat lock files prevent two workers or instances from processing the same file. Failed sources remain unchanged and can be retried from the failure panel.
 
-Video normally targets H.264 with quality-based encoding. `Preserve HDR` keeps detected HDR video as 10-bit HEVC and preserves its available colour metadata, preventing the optimiser from repeatedly treating the retained HEVC output as unfinished work. Media Baker uses the detected NVIDIA, Intel QSV, VAAPI/AMD, or Apple VideoToolbox encoder when available and falls back to software encoding.
+The optimiser needs a writable library and enough temporary space for intermediate streams and the final output. Keep independent backups of irreplaceable media.
 
-### Replacement And Recovery
+## Metadata And Artwork
 
-The optimiser writes video and audio passes to temporary files, regenerates timestamps, assembles the final container, and validates codecs, stream counts, channel layouts, duration, packet timelines, and intentional gaps. Only a validated output replaces the source. Replacement briefly renames the source to a backup and restores it if installing the new file fails; the backup is deleted after a successful replacement.
+Select either `TMDb and Deezer` or `Custom` under `Admin > Settings > Metadata`.
 
-Successful optimisation therefore replaces the original file and may change its extension. Keep an independent backup of irreplaceable media and ensure the library is writable with enough free space for the temporary streams and final output. Docker media mounts must not be read-only when the optimiser is enabled.
+- TMDb supplies movie and TV metadata, posters, season artwork, and episode stills. Configure an API key or read access token.
+- Deezer supplies built-in artist, album, and music metadata without a Media Baker API key.
+- A custom service receives normalized information derived from each media file, together with the requested language. The service decides which metadata sources to use and returns results in Media Baker's standard format.
 
-Media Baker uses heartbeat lock files beside source media so separate optimiser workers or Media Baker instances do not process the same file concurrently. Failed files remain unchanged and appear in the Failures panel. `Retry failures` clears their displayed failures and queues those paths for another run; a successful retry removes the stored failure, while another failure updates it rather than creating a duplicate.
+Metadata is cached and missing fields are rechecked. Artwork is converted to WebP and constrained within 1024x1024 without changing its aspect ratio. Cached artwork lives on disk even when structured metadata uses MySQL. Users with metadata permission can search, apply or refresh matches, edit posters, refresh season posters, and inspect duplicates.
 
-## Metadata And Subtitles
+See the [Custom Metadata API specification](README.metadata-service-api.md) for the endpoints and response format a compatible service must provide.
 
-Enable metadata in `Admin > Settings` and provide a TMDb API key or read access token for video libraries. Music libraries use MusicBrainz without an API key and cache album covers from the Cover Art Archive. Metadata can be preloaded in the background and is permanently cached. Admins and permitted users can search unmatched items, enter a provider ID, rematch incorrect results, edit poster URLs, and inspect duplicate matches.
-
-Media Baker can instead use a compatible custom metadata service. Select `Custom` in `Admin > Settings > Metadata`, then enter its base URL and API key. See the [Custom Metadata API specification](README.metadata-service-api.md) to implement a compatible service.
-
-Enable SubDL to search for subtitles only when requested. Selected subtitles are downloaded beside the media cache and can be synchronized with ffsubsync before being burned into the HLS output.
+SubDL subtitle search is performed only when requested. Selected subtitles may be synchronized with ffsubsync before use. Browser playback can overlay supported subtitles; fixed copied variants may require subtitle processing as part of their HLS output.
 
 ## YT-DLP
 
-Enable YT-DLP in `Admin > Settings`, select a download folder, and use the Download button in the WebUI. Media Baker requests H.264 video and AAC audio when available, shows active progress, indexes completed files automatically, and generates local thumbnails. Playlist downloads are optional.
+Enable YT-DLP under `Admin > Settings`, choose a download folder, and use the Download action in the WebUI. Media Baker prefers H.264 video and AAC audio when available, reports progress, indexes completed files, and creates thumbnails.
 
-Live URLs offer two actions. **Record stream** downloads from the current live position and normalises the completed recording to 48 kHz AAC with timestamp correction before indexing it. **Relay live** creates a rolling HLS stream that can be played in the WebUI or copied using a unique playback token. Relay FFmpeg processes stop after one minute without a viewer.
+- The administrator can force a yt-dlp update from Settings.
+- A Netscape-format `cookies.txt` can be uploaded. Cookies are passed only to YouTube requests.
+- Node.js is supplied to yt-dlp as its JavaScript runtime.
+- Direct videos and explicit playlists are supported according to the playlist setting.
+- A YouTube channel URL prompts the user to download the channel or create a subscription.
+- Creating a subscription downloads the existing channel catalogue, records downloaded IDs, and checks for new uploads. The default interval is 24 hours and is configurable.
+- Removing a subscription stops future checks without deleting downloaded media.
+- Live URLs can be recorded or relayed as rolling HLS. Relays stop when inactive.
 
 ## Live TV
 
-Enable IPTV in `Admin > Settings` and choose an M3U playlist or HDHomeRun device. Add an XMLTV EPG URL or mounted file for programme data.
+Enable IPTV under `Admin > Settings` and choose an M3U playlist or HDHomeRun lineup. Add an XMLTV URL or mounted guide file for programme information.
 
-- Channel and EPG sources refresh on a configurable interval and can be reloaded manually.
-- EPG channels are fuzzy-matched automatically and can be corrected manually.
-- Channel logos are cached locally and stale guide data is removed during refresh.
-- Live streams are normalized to browser-compatible H.264/AAC when required.
-- Auto, forced, smooth, and per-channel deinterlacing modes are available.
-- Rolling HLS uses memory when available and stops FFmpeg after the channel has no viewers.
+- Sources refresh on a configurable interval and can be refreshed manually.
+- EPG channels are matched automatically and may be corrected manually.
+- Logos are cached locally.
+- Incompatible streams are normalized to H.264/AAC.
+- Automatic, forced, smooth, and per-channel deinterlacing modes are available.
+- Rolling HLS is shared and inactive FFmpeg processes are stopped.
 
-Live TV access is granted per user like a library permission.
+Live TV permission is assigned per account like library access.
 
-## Authentication
+## Keys And Authentication
 
-- Browser login returns a persistent session token.
-- API keys inherit the selected user's permissions.
-- Share URLs grant access to one library only and can be revoked.
-- Copying playback URLs requires the per-user `Copy playback URLs` permission.
-- Copied links use copy-scoped tokens on `/api/streams`; built-in web playback uses separate tokens on `/api/web-streams` and also requires the originating session, API key, or library share.
-- Admin API routes enforce account permissions; release-update endpoints require a full admin account.
+Browser sessions last seven days and use sliding expiration. Active sessions refresh their expiry at most once per hour. Account preferences, including playback defaults and the interface colour, follow the account across devices.
+
+`Admin > Keys` contains:
+
+- **API Keys:** inherit the selected user's current permissions and can be revoked.
+- **Library View URLs:** read-only, account-free access to selected libraries. They may expire after one hour, one day, one week, one month, a custom time, or never. Visitors can browse, search, and inspect metadata, but cannot play, copy URLs, share, reveal paths, write progress, or administer the server.
+
+Copying playback URLs and creating Watch Together rooms require `Copy playback URLs`. Built-in playback tokens are scoped separately from copied playback tokens.
+
+## OpenMovie API
+
+OpenMovie is a simplified API for building clients around Media Baker. It provides ready-made media lists, artwork references, playback variants, On Deck data, and playback URLs, so a lightweight client does not need to reproduce the full Media Baker WebUI or account flow. It was designed for restricted environments such as VRChat, but it can also be used by other clients that benefit from stable, pre-generated URLs.
+
+OpenMovie is disabled by default and can be enabled in `Admin > Settings`. When disabled, all OpenMovie endpoints are inaccessible.
+
+The client authenticates once by sending an API key to `/api/openmovie/auth`. Media Baker returns encrypted URLs for movie, TV, On Deck, and future catalogue requests. The returned catalogue data also contains encrypted poster, atlas, playback, and audio/subtitle variant URLs. These URLs contain the minimum information Media Baker needs to authorize and resolve the request, so the client does not send the API key again. Revoking the original key or changing its permissions also affects its generated URLs.
+
+Internal incremental IDs remain stable for clients that need pre-generated URLs, but are not exposed publicly. Poster atlases use a 4x3 layout with 12 slots. Published static atlases are immutable; dynamic On Deck atlases are regenerated from the current page.
+
+See `/api/docs` for the current request and response schemas.
+
+## Branding And Themes
+
+Source PNG icons live in `public/icons`. On first startup Media Baker chooses an icon if none is configured, generates required sizes in the cache, and retains that choice across restarts. Administrators can select another built-in or custom icon under Settings. The selected icon is used by the navigation, login screen, favicon, and web-app manifest.
+
+Each account can select a preset accent colour or use the colour picker. The preview updates immediately and the saved preference applies whenever that account signs in.
 
 ## Updates
 
-Media Baker checks `jazzy348/media-baker` for releases every six hours by default. Only admins see release notifications. Pre-release checks and automatic installation are configurable in `Admin > Settings > Updates`.
+Media Baker checks `jazzy348/media-baker` for releases every six hours by default. Pre-release checks and automatic installation are configurable. Pre-release and stable releases display their available changelog to administrators.
 
-Always start Media Baker with `npm start`. The supervisor owns one server child, installs staged source after that child exits, and starts the new version. Active playback stops during an update. Running `node src/server.js` directly disables update installation.
+The supervisor stops the server child, installs the staged source and npm dependencies, then starts the new version. Active playback stops during an update. Changes to Node.js, FFmpeg, operating-system packages, or service configuration still require a manual host update.
 
-When served over HTTPS, the WebUI offers installation as an app. The browser that starts an update reloads automatically when the new server is ready; other open clients show a reload notice after they reconnect. Plain HTTP remains available as a normal WebUI but does not advertise installation.
+## Backup And Restore
 
-Releases must:
+Backups can run manually or on selected weekdays at a local server time. Retention removes the oldest Media Baker snapshots beyond the configured count.
 
-- Match the Git tag to `package.json` and `package-lock.json`.
-- Keep `npm start` set to `node src/supervisor.js`.
-- Include `src/supervisor.js` and `src/services/updateInstaller.js`.
+MySQL snapshots include every Media Baker table. JSON snapshots include accounts, sessions, libraries, settings, index data, metadata, playback progress, keyframes, skip markers, and OpenMovie state, including the deployment-specific encryption secret. Restore replaces the matching storage backend and restarts Media Baker.
 
-Update staging is stored under `cache/updates`.
+Also back up `config.json`, media, downloaded files, cached artwork when required, custom icons, and the fallback source. A database restore does not restore those external files.
 
-## API Docs
+## API Documentation
 
 Swagger UI:
 
@@ -230,11 +269,3 @@ Raw OpenAPI JSON:
 ```text
 http://localhost:5000/api/docs/openapi.json
 ```
-
-## Backup And Restore
-
-Open `Admin > Backup & Restore` to choose a destination and create a compressed snapshot manually or on selected weekdays at a local server time. Retention removes the oldest Media Baker snapshots beyond the configured count.
-
-MySQL snapshots contain every table in the configured Media Baker database. JSON snapshots contain accounts, sessions, libraries, settings, index data, metadata, playback progress, and skip markers. Restore fully replaces the matching storage backend and restarts Media Baker.
-
-Keep `config.json`, media mounts, downloaded media, and the fallback source in your host backup plan; database restore does not replace those files.

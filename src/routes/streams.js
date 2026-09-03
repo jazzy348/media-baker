@@ -58,7 +58,22 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, ffmpeg, 
         return;
       }
 
-      const segment = await hls.waitForCachedFile(req.params.cacheKey, req.params.filename);
+      const segmentWait = new AbortController();
+      const abortSegmentWait = () => segmentWait.abort();
+      req.once("aborted", abortSegmentWait);
+      res.once("close", abortSegmentWait);
+      let segment;
+      try {
+        segment = await hls.waitForCachedFile(req.params.cacheKey, req.params.filename, {
+          signal: segmentWait.signal
+        });
+      } finally {
+        req.off("aborted", abortSegmentWait);
+        res.off("close", abortSegmentWait);
+      }
+      if (segmentWait.signal.aborted || segment && segment.status === "aborted") {
+        return;
+      }
       if (segment && segment.status === "pending") {
         logger.full(`[hls] segment pending cacheKey=${req.params.cacheKey} filename=${req.params.filename} reason=${segment.reason}`);
         res.set("Retry-After", "2");
@@ -307,6 +322,7 @@ function isHlsToken(payload, cacheKey, surface) {
 
 function canUseWebStream(req, mediaType, surface) {
   if (surface !== "web") return true;
+  if (req.authMode === "library-view") return false;
   if (!req.authMode || !mediaType) return false;
   if (req.user && req.playbackTokenPayload.userId !== req.user.id) return false;
   if (req.allowedLibraryKey) return req.allowedLibraryKey === mediaType;

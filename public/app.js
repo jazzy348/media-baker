@@ -1,4 +1,4 @@
-const initialShareToken = new URLSearchParams(window.location.search).get("shareToken") || "";
+const initialLibraryViewToken = new URLSearchParams(window.location.search).get("viewToken") || "";
 const navigation = window.MediaBakerNavigation;
 const apiClient = window.MediaBakerApi;
 const PLAYBACK_PREFERENCES_KEY = "mediaBakerPlaybackPreferences";
@@ -24,8 +24,8 @@ const THEME_PRESET_COLOURS = new Set([
 ]);
 
 const state = {
-  token: initialShareToken ? "" : localStorage.getItem("streamToken") || "",
-  shareToken: initialShareToken,
+  token: initialLibraryViewToken ? "" : localStorage.getItem("streamToken") || "",
+  libraryViewToken: initialLibraryViewToken,
   user: null,
   setupMode: false,
   selected: null,
@@ -419,7 +419,6 @@ const els = {
   accountLibrariesSelect: document.getElementById("accountLibrariesSelect"),
   accountIsAdmin: document.getElementById("accountIsAdmin"),
   accountCanCopyUrls: document.getElementById("accountCanCopyUrls"),
-  accountCanShare: document.getElementById("accountCanShare"),
   accountCanLibraries: document.getElementById("accountCanLibraries"),
   accountCanMetadata: document.getElementById("accountCanMetadata"),
   accountCanSettings: document.getElementById("accountCanSettings"),
@@ -456,6 +455,21 @@ const els = {
   copyApiKeySecret: document.getElementById("copyApiKeySecret"),
   apiKeyStatus: document.getElementById("apiKeyStatus"),
   apiKeyList: document.getElementById("apiKeyList"),
+  libraryViewForm: document.getElementById("libraryViewForm"),
+  libraryViewNameInput: document.getElementById("libraryViewNameInput"),
+  libraryViewLibraries: document.getElementById("libraryViewLibraries"),
+  libraryViewSelectionCount: document.getElementById("libraryViewSelectionCount"),
+  libraryViewSelectAll: document.getElementById("libraryViewSelectAll"),
+  libraryViewClearAll: document.getElementById("libraryViewClearAll"),
+  libraryViewExpirySelect: document.getElementById("libraryViewExpirySelect"),
+  libraryViewCustomExpiryLabel: document.getElementById("libraryViewCustomExpiryLabel"),
+  libraryViewCustomExpiryInput: document.getElementById("libraryViewCustomExpiryInput"),
+  createLibraryView: document.getElementById("createLibraryView"),
+  libraryViewSecretPanel: document.getElementById("libraryViewSecretPanel"),
+  libraryViewSecretValue: document.getElementById("libraryViewSecretValue"),
+  copyLibraryViewSecret: document.getElementById("copyLibraryViewSecret"),
+  libraryViewStatus: document.getElementById("libraryViewStatus"),
+  libraryViewList: document.getElementById("libraryViewList"),
   settingsForm: document.getElementById("settingsForm"),
   settingsLogLevel: document.getElementById("settingsLogLevel"),
   settingsLogRetentionDays: document.getElementById("settingsLogRetentionDays"),
@@ -533,7 +547,7 @@ const els = {
   settingsHlsWait: document.getElementById("settingsHlsWait"),
   settingsHlsMinimumFreeSpace: document.getElementById("settingsHlsMinimumFreeSpace"),
   settingsForceTranscode: document.getElementById("settingsForceTranscode"),
-  settingsOnDeckTtl: document.getElementById("settingsOnDeckTtl"),
+  settingsOnDeckExpirationDays: document.getElementById("settingsOnDeckExpirationDays"),
   settingsWatchedThreshold: document.getElementById("settingsWatchedThreshold"),
   settingsSkipDetectionEnabled: document.getElementById("settingsSkipDetectionEnabled"),
   settingsOpenMovieEnabled: document.getElementById("settingsOpenMovieEnabled"),
@@ -576,6 +590,7 @@ let nativePlayerErrorHandler = null;
 let autoAdvanceInFlight = false;
 let musicSeeking = false;
 let videoSeeking = false;
+let videoLastSeekAt = 0;
 let videoControlsHideTimer = null;
 let videoSubtitlePositionFrame = null;
 let videoSubtitleResizeObserver = null;
@@ -658,7 +673,7 @@ els.loginForm.addEventListener("submit", async (event) => {
     state.user = result.user;
     setPlaybackPreferences(result.user && result.user.preferences);
     applyFeatures(result.features);
-    state.shareToken = "";
+    state.libraryViewToken = "";
     state.setupMode = false;
     localStorage.setItem("streamToken", state.token);
     els.loginOverlay.classList.add("hidden");
@@ -707,7 +722,7 @@ els.lockButton.addEventListener("click", () => {
   state.token = "";
   state.user = null;
   setPlaybackPreferences(null);
-  state.shareToken = "";
+  state.libraryViewToken = "";
   state.libraries = [];
   state.homeRequestId += 1;
   state.homeCache.clear();
@@ -786,6 +801,12 @@ els.accountForm.addEventListener("submit", saveAccount);
 els.resetAccountForm.addEventListener("click", resetAccountForm);
 els.apiKeyForm.addEventListener("submit", createApiKey);
 els.copyApiKeySecret.addEventListener("click", copyNewApiKey);
+els.libraryViewForm.addEventListener("submit", createLibraryView);
+els.libraryViewLibraries.addEventListener("change", updateLibraryViewSelectionCount);
+els.libraryViewSelectAll.addEventListener("click", () => setAllLibraryViewSelections(true));
+els.libraryViewClearAll.addEventListener("click", () => setAllLibraryViewSelections(false));
+els.libraryViewExpirySelect.addEventListener("change", updateLibraryViewExpiryControl);
+els.copyLibraryViewSecret.addEventListener("click", copyNewLibraryViewUrl);
 els.settingsForm.addEventListener("submit", saveSettings);
 els.retrySkipDetectionFailures.addEventListener("click", retrySkipDetectionFailures);
 els.reanalyseSkipDetection.addEventListener("click", () => reanalyseSkipDetection(false));
@@ -1096,7 +1117,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 navigation.onChange((route) => {
-  if (!state.token && !state.shareToken && route.name !== "watch") {
+  if (!state.token && !state.libraryViewToken && route.name !== "watch") {
     return;
   }
   renderRoute(route).catch(() => {
@@ -1128,7 +1149,7 @@ async function boot() {
     return;
   }
 
-  if (!state.token && !state.shareToken && initialRoute.name !== "watch") {
+  if (!state.token && !state.libraryViewToken && initialRoute.name !== "watch") {
     els.loginOverlay.classList.remove("hidden");
     revealApp();
     return;
@@ -1143,21 +1164,24 @@ async function boot() {
     }
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
-    if (initialRoute.name !== "watch" || state.token || state.shareToken) {
+    if (initialRoute.name !== "watch" || state.token || state.libraryViewToken) {
       await loadLibrarySidebar(true);
     }
     await renderRoute(initialRoute);
     refreshIptvAvailability();
-    refreshSystemHealthInBackground();
-    refreshUpdateStatusInBackground();
+    if (!state.libraryViewToken) {
+      refreshSystemHealthInBackground();
+      refreshUpdateStatusInBackground();
+    }
   } catch (err) {
-    if (!state.shareToken) {
+    const libraryViewFailed = Boolean(state.libraryViewToken);
+    if (!state.libraryViewToken) {
       localStorage.removeItem("streamToken");
     }
     state.token = "";
     state.user = null;
     setPlaybackPreferences(null);
-    state.shareToken = "";
+    state.libraryViewToken = "";
     updateAdminControls();
     if (initialRoute.name === "watch") {
       els.loginOverlay.classList.add("hidden");
@@ -1165,6 +1189,9 @@ async function boot() {
         els.watchTogetherJoinStatus.textContent = routeError.message || "This Watch Together room is unavailable.";
       });
     } else {
+      if (libraryViewFailed) {
+        els.loginError.textContent = "This library view URL is invalid, expired, or has been revoked.";
+      }
       els.loginOverlay.classList.remove("hidden");
     }
   } finally {
@@ -1197,11 +1224,11 @@ async function renderRoute(route) {
     if (watchTogetherSession) {
       closePlayer({ navigate: false });
     }
-    if (route.name === "history" && !state.shareToken) {
+    if (route.name === "history" && !state.libraryViewToken) {
       await openHistoryView();
       return;
     }
-    if (route.name === "live-tv" && !state.shareToken) {
+    if (route.name === "live-tv" && !state.libraryViewToken) {
       if (state.iptvEnabled && canAccessLiveTv()) {
         await openLiveTv(route.start, route.pinnedToNow);
         return;
@@ -1250,7 +1277,7 @@ function readableRouteName(value) {
 }
 
 async function loadLibrarySidebar(force = false) {
-  if ((!state.token && !state.shareToken) || state.libraries.length > 0 && !force) {
+  if ((!state.token && !state.libraryViewToken) || state.libraries.length > 0 && !force) {
     renderLibrarySidebar();
     return;
   }
@@ -1479,7 +1506,9 @@ async function loadHome(mode = state.homeMode) {
     limit: String(HOME_ROW_PAGE_SIZE)
   });
   const homeRequest = api(`/api/catalog/home?${params.toString()}`);
-  const onDeckRequest = api("/api/progress/on-deck").catch(() => null);
+  const onDeckRequest = state.libraryViewToken
+    ? Promise.resolve(null)
+    : api("/api/progress/on-deck").catch(() => null);
 
   let data;
   let onDeck;
@@ -2056,6 +2085,17 @@ async function openDetails(item, detailOptions = {}) {
   els.detailsPanel.setAttribute("aria-hidden", "false");
   updatePlaybackControls();
 
+  if (state.libraryViewToken) {
+    if (item.itemType === "image" && detailsImageUrl) {
+      showImageViewer(detailsImageUrl, item.title);
+    } else {
+      loadMetadata(item);
+    }
+    els.filePath.value = "";
+    updateDetailsAdminControls();
+    return;
+  }
+
   if (item.itemType === "image") {
     if (detailsImageUrl) {
       showImageViewer(detailsImageUrl, item.title);
@@ -2251,7 +2291,7 @@ async function openSeasonView(mediaType, showId, seasonNumber, options = {}) {
       ...(hasPermission("canManageMetadata") ? [{ label: "Match show", onClick: () => rematchShowMetadata(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Edit poster", onClick: () => openSeriesPosterEditor(mediaType, show) }] : []),
       ...(hasPermission("canManageMetadata") ? [{ label: "Refresh season posters", onClick: (event) => refreshSeasonArtwork(mediaType, show, event.currentTarget, seasonNumber) }] : []),
-      ...(state.user && !state.shareToken ? [{ label: seasonWatchedActionLabel(season), onClick: (event) => markSeasonWatched(mediaType, show, season, event.currentTarget) }] : []),
+      ...(state.user && !state.libraryViewToken ? [{ label: seasonWatchedActionLabel(season), onClick: (event) => markSeasonWatched(mediaType, show, season, event.currentTarget) }] : []),
       { label: "Show", onClick: () => openShowView(mediaType, showId) }
     ],
     content
@@ -2621,7 +2661,7 @@ async function openHistoryView() {
 }
 
 async function refreshIptvAvailability() {
-  if (!state.token || state.shareToken || !canAccessLiveTv()) {
+  if (!state.token || state.libraryViewToken || !canAccessLiveTv()) {
     state.iptvEnabled = false;
     updateAdminControls();
     return;
@@ -3304,7 +3344,6 @@ function editAccount(account) {
   const permissions = account.permissions || {};
   els.accountIsAdmin.checked = Boolean(permissions.isAdmin);
   els.accountCanCopyUrls.checked = Boolean(permissions.canCopyStreamUrls);
-  els.accountCanShare.checked = Boolean(permissions.canCreateShareLinks);
   els.accountCanLibraries.checked = Boolean(permissions.canManageLibraries);
   els.accountCanMetadata.checked = Boolean(permissions.canManageMetadata);
   els.accountCanSettings.checked = Boolean(permissions.canManageSettings);
@@ -3332,7 +3371,6 @@ function resetAccountForm() {
   els.accountPasswordInput.placeholder = "Required for new accounts";
   els.accountIsAdmin.checked = false;
   els.accountCanCopyUrls.checked = false;
-  els.accountCanShare.checked = false;
   els.accountCanLibraries.checked = false;
   els.accountCanMetadata.checked = false;
   els.accountCanSettings.checked = false;
@@ -3444,7 +3482,6 @@ function setAdminNavState(page) {
 
 function accountPermissionsFromForm() {
   const canViewAdmin = els.accountIsAdmin.checked
-    || els.accountCanShare.checked
     || els.accountCanLibraries.checked
     || els.accountCanMetadata.checked
     || els.accountCanSettings.checked
@@ -3460,7 +3497,6 @@ function accountPermissionsFromForm() {
   return {
     isAdmin: els.accountIsAdmin.checked,
     canCopyStreamUrls: els.accountCanCopyUrls.checked,
-    canCreateShareLinks: els.accountCanShare.checked,
     canManageLibraries: els.accountCanLibraries.checked,
     canManageMetadata: els.accountCanMetadata.checked,
     canManageSettings: els.accountCanSettings.checked,
@@ -3484,20 +3520,38 @@ async function loadApiKeys() {
   }
 
   els.apiKeyStatus.textContent = "Loading API keys...";
+  els.libraryViewStatus.textContent = "Loading library view URLs...";
   els.apiKeyList.innerHTML = "";
+  els.libraryViewList.innerHTML = "";
   els.apiKeySecretPanel.classList.add("hidden");
+  els.libraryViewSecretPanel.classList.add("hidden");
 
   try {
-    const data = await api("/api/admin/api-keys");
-    fillSelect(els.apiKeyUserSelect, (data.accounts || []).map((account) => ({
+    const [apiKeyData, libraryViewData] = await Promise.all([
+      api("/api/admin/api-keys"),
+      api("/api/admin/library-views")
+    ]);
+    fillSelect(els.apiKeyUserSelect, (apiKeyData.accounts || []).map((account) => ({
       id: account.id,
       label: account.username
     })));
+    els.libraryViewLibraries.innerHTML = (libraryViewData.libraries || []).map((library) => `
+      <label class="library-view-library-option">
+        <input type="checkbox" value="${escapeHtml(library.key)}">
+        <span>${escapeHtml(library.title)}</span>
+      </label>
+    `).join("");
+    updateLibraryViewSelectionCount();
     els.apiKeyList.innerHTML = "";
-    (data.apiKeys || []).forEach((apiKey) => els.apiKeyList.appendChild(apiKeyCard(apiKey)));
-    els.apiKeyStatus.textContent = (data.apiKeys || []).length === 0 ? "No API keys created yet." : "";
+    (apiKeyData.apiKeys || []).forEach((apiKey) => els.apiKeyList.appendChild(apiKeyCard(apiKey)));
+    els.apiKeyStatus.textContent = (apiKeyData.apiKeys || []).length === 0 ? "No API keys created yet." : "";
+    const libraryTitles = new Map((libraryViewData.libraries || []).map((library) => [library.key, library.title]));
+    (libraryViewData.links || []).forEach((link) => els.libraryViewList.appendChild(libraryViewCard(link, libraryTitles)));
+    els.libraryViewStatus.textContent = (libraryViewData.links || []).length === 0 ? "No library view URLs created yet." : "";
+    updateLibraryViewExpiryControl();
   } catch (err) {
     els.apiKeyStatus.textContent = err.message || "Failed to load API keys.";
+    els.libraryViewStatus.textContent = err.message || "Failed to load library view URLs.";
   }
 }
 
@@ -3572,6 +3626,163 @@ async function revokeApiKey(apiKey) {
     els.apiKeyStatus.textContent = "API key revoked.";
   } catch (err) {
     els.apiKeyStatus.textContent = err.message || "Failed to revoke API key.";
+  }
+}
+
+function libraryViewCard(link, libraryTitles) {
+  const inactive = Boolean(link.revokedAt || link.expired);
+  const cardElement = document.createElement("section");
+  cardElement.className = `library-manager-card api-key-card${inactive ? " revoked" : ""}`;
+  const libraries = (link.libraryKeys || []).map((key) => libraryTitles.get(key) || key).join(", ");
+  const stateLabel = link.revokedAt
+    ? `Revoked ${formatDate(link.revokedAt)}`
+    : link.expired
+      ? `Expired ${formatDate(link.expiresAt)}`
+      : link.expiresAt
+        ? `Expires ${formatDate(link.expiresAt)}`
+        : "Never expires";
+  cardElement.innerHTML = `
+    <div class="library-manager-heading">
+      <div>
+        <h3>${escapeHtml(link.name)}</h3>
+        <div class="library-path">${escapeHtml(libraries)} - ${escapeHtml(stateLabel)} - Created ${escapeHtml(formatDate(link.createdAt))}</div>
+      </div>
+      <div class="library-card-actions">
+        ${link.url ? '<button class="secondary-button compact-button copy-library-view" type="button">Copy URL</button>' : ""}
+        ${inactive ? "" : '<button class="secondary-button compact-button revoke-library-view" type="button">Revoke</button>'}
+      </div>
+    </div>
+  `;
+  const copyButton = cardElement.querySelector(".copy-library-view");
+  if (copyButton) {
+    copyButton.addEventListener("click", async () => {
+      await copyText(link.url);
+      els.libraryViewStatus.textContent = "Library view URL copied.";
+    });
+  }
+  const revokeButton = cardElement.querySelector(".revoke-library-view");
+  if (revokeButton) {
+    revokeButton.addEventListener("click", () => revokeLibraryView(link));
+  }
+  return cardElement;
+}
+
+function updateLibraryViewExpiryControl() {
+  const custom = els.libraryViewExpirySelect.value === "custom";
+  els.libraryViewCustomExpiryLabel.classList.toggle("hidden", !custom);
+  els.libraryViewCustomExpiryInput.required = custom;
+  const minimum = new Date(Date.now() + 60 * 1000);
+  els.libraryViewCustomExpiryInput.min = localDateTimeInputValue(minimum);
+  if (custom && !els.libraryViewCustomExpiryInput.value) {
+    els.libraryViewCustomExpiryInput.value = localDateTimeInputValue(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  }
+}
+
+function libraryViewExpiry() {
+  const mode = els.libraryViewExpirySelect.value;
+  if (mode === "unlimited") {
+    return null;
+  }
+  if (mode === "custom") {
+    const custom = new Date(els.libraryViewCustomExpiryInput.value);
+    if (!els.libraryViewCustomExpiryInput.value || Number.isNaN(custom.getTime()) || custom.getTime() <= Date.now()) {
+      throw new Error("Choose a future expiry date and time.");
+    }
+    return custom.toISOString();
+  }
+  const expiresAt = new Date();
+  if (mode === "hour") expiresAt.setHours(expiresAt.getHours() + 1);
+  if (mode === "day") expiresAt.setDate(expiresAt.getDate() + 1);
+  if (mode === "week") expiresAt.setDate(expiresAt.getDate() + 7);
+  if (mode === "month") expiresAt.setMonth(expiresAt.getMonth() + 1);
+  return expiresAt.toISOString();
+}
+
+function localDateTimeInputValue(date) {
+  const offset = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function updateLibraryViewSelectionCount() {
+  const inputs = Array.from(els.libraryViewLibraries.querySelectorAll('input[type="checkbox"]'));
+  const selected = inputs.filter((input) => input.checked).length;
+  els.libraryViewSelectionCount.textContent = inputs.length > 0
+    ? `${selected} of ${inputs.length} selected`
+    : "No libraries available";
+  els.libraryViewSelectAll.disabled = inputs.length === 0 || selected === inputs.length;
+  els.libraryViewClearAll.disabled = selected === 0;
+}
+
+function setAllLibraryViewSelections(checked) {
+  els.libraryViewLibraries.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.checked = checked;
+  });
+  updateLibraryViewSelectionCount();
+}
+
+async function createLibraryView(event) {
+  event.preventDefault();
+  const name = els.libraryViewNameInput.value.trim();
+  const libraryKeys = Array.from(els.libraryViewLibraries.querySelectorAll('input[type="checkbox"]:checked'))
+    .map((input) => input.value);
+  if (!name || libraryKeys.length === 0) {
+    els.libraryViewStatus.textContent = "Enter a name and choose at least one library.";
+    return;
+  }
+
+  let expiresAt;
+  try {
+    expiresAt = libraryViewExpiry();
+  } catch (err) {
+    els.libraryViewStatus.textContent = err.message;
+    return;
+  }
+
+  els.createLibraryView.disabled = true;
+  els.libraryViewStatus.textContent = "Creating library view URL...";
+  try {
+    const result = await api("/api/admin/library-views", state.token, {
+      method: "POST",
+      body: JSON.stringify({ name, libraryKeys, expiresAt })
+    });
+    const url = result.link && result.link.url;
+    els.libraryViewNameInput.value = "";
+    els.libraryViewLibraries.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      input.checked = false;
+    });
+    updateLibraryViewSelectionCount();
+    await loadApiKeys();
+    if (url) {
+      els.libraryViewSecretValue.textContent = url;
+      els.libraryViewSecretPanel.classList.remove("hidden");
+      await copyText(url);
+      els.libraryViewStatus.textContent = "Library view URL created and copied.";
+    }
+  } catch (err) {
+    els.libraryViewStatus.textContent = err.message || "Failed to create library view URL.";
+  } finally {
+    els.createLibraryView.disabled = false;
+  }
+}
+
+async function copyNewLibraryViewUrl() {
+  const url = els.libraryViewSecretValue.textContent;
+  if (!url) return;
+  await copyText(url);
+  els.libraryViewStatus.textContent = "Library view URL copied.";
+}
+
+async function revokeLibraryView(link) {
+  if (!window.confirm(`Revoke library view "${link.name}"?`)) {
+    return;
+  }
+  els.libraryViewStatus.textContent = "Revoking library view URL...";
+  try {
+    await api(`/api/admin/library-views/${encodeURIComponent(link.id)}`, state.token, { method: "DELETE" });
+    await loadApiKeys();
+    els.libraryViewStatus.textContent = "Library view URL revoked.";
+  } catch (err) {
+    els.libraryViewStatus.textContent = err.message || "Failed to revoke library view URL.";
   }
 }
 
@@ -3737,6 +3948,7 @@ function renderOptimizer(data) {
   els.optimizerLibraryList.innerHTML = "";
   renderOptimizerWork(data);
   renderOptimizerFailures(data.failures || []);
+  const preferredAudioLanguage = String(data.preferredAudioLanguage || "English").trim() || "English";
   (data.libraries || []).forEach((library) => {
     const row = document.createElement("section");
     row.className = "library-manager-card optimizer-library-card";
@@ -3755,15 +3967,10 @@ function renderOptimizer(data) {
         </div>
       </div>
       <div class="settings-grid optimizer-library-settings">
-        <label>Output mode
-          <select class="optimizer-library-mode">
-            <option value="preferred"${library.mode === "preferred" ? " selected" : ""}>Simple mode: preferred audio</option>
-            <option value="all"${library.mode === "all" ? " selected" : ""}>Full mode: original + preferred/secondary</option>
-          </select>
-        </label>
-        <label class="optimizer-secondary-language${library.mode === "all" ? "" : " hidden"}">Secondary audio language<input class="optimizer-library-secondary-language" type="text" list="languageOptions" autocomplete="off" placeholder="Optional" value="${escapeHtml(library.secondaryAudioLanguage || "")}"></label>
+        ${optimizerAudioLanguagePicker(library, preferredAudioLanguage)}
         <label class="settings-toggle"><input class="optimizer-library-downmix" type="checkbox"${library.downmixToStereo ? " checked" : ""}> Downmix to stereo</label>
         <label class="settings-toggle"><input class="optimizer-library-preserve-hdr" type="checkbox"${library.preserveHdr ? " checked" : ""}> Preserve HDR</label>
+        <label class="settings-toggle"><input class="optimizer-library-preserve-subtitles" type="checkbox"${library.preserveSubtitles ? " checked" : ""}> Preserve subtitles</label>
         <label class="settings-toggle"><input class="optimizer-library-all-day" type="checkbox"${library.allDay ? " checked" : ""}> Run all the time</label>
         <label>Start time<input class="optimizer-library-start" type="time" value="${escapeHtml(library.startTime || "01:00")}"></label>
         <label>End time<input class="optimizer-library-end" type="time" value="${escapeHtml(library.endTime || "06:00")}"></label>
@@ -3774,12 +3981,67 @@ function renderOptimizer(data) {
 }
 
 function handleOptimizerLibrarySettingChange(event) {
-  if (!event.target.matches(".optimizer-library-mode")) {
-    return;
-  }
+  if (!event.target.matches(".optimizer-library-additional-language")) return;
   const row = event.target.closest(".optimizer-library-card");
-  const secondaryLanguage = row && row.querySelector(".optimizer-secondary-language");
-  secondaryLanguage?.classList.toggle("hidden", event.target.value !== "all");
+  updateOptimizerLanguageSummary(row);
+}
+
+function optimizerAudioLanguagePicker(library, preferredLanguage) {
+  const preferredKey = optimizerLanguageKey(preferredLanguage);
+  const selectedLanguages = Array.isArray(library.additionalAudioLanguages)
+    ? library.additionalAudioLanguages.map((language) => String(language || "").trim()).filter(Boolean)
+    : [];
+  const selectedKeys = new Set(selectedLanguages.map(optimizerLanguageKey));
+  const choices = [];
+  const seen = new Set([preferredKey]);
+  [...document.querySelectorAll("#languageOptions option")]
+    .map((option) => String(option.value || "").trim())
+    .concat(selectedLanguages)
+    .forEach((language) => {
+      const key = optimizerLanguageKey(language);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      choices.push(language);
+    });
+  const options = choices.map((language) => `
+    <label class="optimizer-language-option">
+      <input class="optimizer-library-additional-language" type="checkbox" data-language="${escapeHtml(language)}"${selectedKeys.has(optimizerLanguageKey(language)) ? " checked" : ""}>
+      ${escapeHtml(language)}
+    </label>
+  `).join("");
+  return `
+    <div class="optimizer-language-field">
+      <span>Audio languages</span>
+      <details class="optimizer-language-picker" data-preferred-language="${escapeHtml(preferredLanguage)}">
+        <summary>${escapeHtml(optimizerLanguageSummary(preferredLanguage, selectedLanguages.length))}</summary>
+        <div class="optimizer-language-options">
+          <label class="optimizer-language-option preferred">
+            <input type="checkbox" checked disabled>
+            ${escapeHtml(preferredLanguage)} (preferred)
+          </label>
+          ${options}
+        </div>
+      </details>
+    </div>
+  `;
+}
+
+function updateOptimizerLanguageSummary(row) {
+  const picker = row && row.querySelector(".optimizer-language-picker");
+  const summary = picker && picker.querySelector("summary");
+  if (!summary) return;
+  const count = picker.querySelectorAll(".optimizer-library-additional-language:checked").length;
+  summary.textContent = optimizerLanguageSummary(picker.dataset.preferredLanguage, count);
+}
+
+function optimizerLanguageSummary(preferredLanguage, additionalCount) {
+  const preferred = String(preferredLanguage || "English").trim() || "English";
+  const count = Math.max(0, Number(additionalCount) || 0);
+  return count > 0 ? `${preferred} + ${count} additional` : `${preferred} (preferred)`;
+}
+
+function optimizerLanguageKey(language) {
+  return String(language || "").trim().toLowerCase();
 }
 
 function renderOptimizerWork(data) {
@@ -3882,7 +4144,7 @@ function renderOptimizerFailures(failures) {
       <div class="optimizer-failure-heading">
         <div>
           <h3>${escapeHtml(failure.title || "Unknown file")}</h3>
-          <p class="library-path">${escapeHtml(failure.libraryTitle || failure.libraryKey || "Unknown library")} - ${escapeHtml(failure.mode || "")}</p>
+          <p class="library-path">${escapeHtml(failure.libraryTitle || failure.libraryKey || "Unknown library")}</p>
         </div>
         <span>${escapeHtml(formatTimestamp(failure.at))}</span>
       </div>
@@ -4229,10 +4491,12 @@ async function saveOptimizerSettings(event) {
     els.optimizerLibraryList.querySelectorAll(".optimizer-library-card").forEach((row) => {
       libraries[row.dataset.libraryKey] = {
         enabled: row.querySelector(".optimizer-library-enabled").checked,
-        mode: row.querySelector(".optimizer-library-mode").value,
         downmixToStereo: row.querySelector(".optimizer-library-downmix").checked,
         preserveHdr: row.querySelector(".optimizer-library-preserve-hdr").checked,
-        secondaryAudioLanguage: row.querySelector(".optimizer-library-secondary-language").value.trim(),
+        preserveSubtitles: row.querySelector(".optimizer-library-preserve-subtitles").checked,
+        additionalAudioLanguages: [...row.querySelectorAll(".optimizer-library-additional-language:checked")]
+          .map((input) => input.dataset.language)
+          .filter(Boolean),
         allDay: row.querySelector(".optimizer-library-all-day").checked,
         startTime: row.querySelector(".optimizer-library-start").value || "01:00",
         endTime: row.querySelector(".optimizer-library-end").value || "06:00",
@@ -4529,7 +4793,7 @@ function fillSettingsForm(settings, branding = null) {
   els.settingsHlsWait.value = hls.segmentWaitTimeoutSeconds ?? 90;
   els.settingsHlsMinimumFreeSpace.value = hls.minimumFreeSpaceMiB ?? 1024;
   els.settingsForceTranscode.checked = Boolean(hls.forceTranscodeCompatibleVideo);
-  els.settingsOnDeckTtl.value = playback.onDeckTtlSeconds ?? 1209600;
+  els.settingsOnDeckExpirationDays.value = Math.max(1, Math.round((playback.onDeckTtlSeconds ?? 1209600) / 86400));
   els.settingsWatchedThreshold.value = playback.watchedThresholdPercent ?? 10;
   els.settingsSkipDetectionEnabled.checked = Boolean(skipDetection.enabled);
   els.settingsOpenMovieEnabled.checked = Boolean(openMovie.enabled);
@@ -5104,7 +5368,7 @@ function settingsFromForm() {
       segmentSeconds: intInput(els.settingsIptvSegmentSeconds, 6, 2)
     },
     playback: {
-      onDeckTtlSeconds: intInput(els.settingsOnDeckTtl, 1209600),
+      onDeckTtlSeconds: intInput(els.settingsOnDeckExpirationDays, 14, 1) * 86400,
       watchedThresholdPercent: intInput(els.settingsWatchedThreshold, 10)
     },
     skipDetection: {
@@ -5197,7 +5461,7 @@ function intInput(input, fallback, minimum = 1) {
 }
 
 function openAccountPanel() {
-  if (!state.user || state.shareToken) {
+  if (!state.user || state.libraryViewToken) {
     return;
   }
   els.selfAccountUsername.value = state.user.username || "";
@@ -6061,7 +6325,7 @@ function historyDateInputValue(date) {
 
 function populateUserHistoryUsers(users) {
   const selected = els.userHistoryUserFilter.value;
-  els.userHistoryUserFilter.innerHTML = '<option value="">All users and shares</option>';
+  els.userHistoryUserFilter.innerHTML = '<option value="">All users</option>';
   for (const user of users) {
     const option = document.createElement("option");
     option.value = user.id;
@@ -6195,7 +6459,6 @@ async function loadLibraryManager() {
 
 function canViewLibraryAdmin() {
   return hasPermission("canManageLibraries")
-    || hasPermission("canCreateShareLinks")
     || hasPermission("canReindex");
 }
 
@@ -6212,7 +6475,6 @@ function libraryManagerCard(library) {
         <div class="library-path">${escapeHtml(library.key)} - ${escapeHtml(library.rawType || library.type)} - ${escapeHtml(library.path)}</div>
       </div>
       <div class="library-card-actions">
-        ${hasPermission("canCreateShareLinks") ? '<button class="secondary-button compact-button create-share" type="button">Create share URL</button>' : ""}
         ${hasPermission("canReindex") ? '<button class="secondary-button compact-button reindex-library" type="button">Re-index</button>' : ""}
         ${hasPermission("canManageLibraries") && !library.managed ? '<button class="secondary-button compact-button delete-library" type="button">Remove</button>' : ""}
       </div>
@@ -6223,7 +6485,6 @@ function libraryManagerCard(library) {
         Store playback progress
       </label>
     ` : ""}
-    <div class="share-list"></div>
   `;
 
   const progressToggle = cardElement.querySelector(".track-library-progress");
@@ -6231,10 +6492,6 @@ function libraryManagerCard(library) {
     progressToggle.addEventListener("change", () => updateLibraryProgress(library, progressToggle));
   }
 
-  const shareButton = cardElement.querySelector(".create-share");
-  if (shareButton) {
-    shareButton.addEventListener("click", () => createLibraryShare(library.key));
-  }
   const reindexButton = cardElement.querySelector(".reindex-library");
   if (reindexButton) {
     reindexButton.addEventListener("click", () => reindexLibrary(library.key, library.title, reindexButton));
@@ -6243,8 +6500,6 @@ function libraryManagerCard(library) {
   if (deleteButton) {
     deleteButton.addEventListener("click", () => deleteLibrary(library.key, library.title));
   }
-  const shareList = cardElement.querySelector(".share-list");
-  renderShares(shareList, library);
   return cardElement;
 }
 
@@ -6329,37 +6584,6 @@ async function saveLibraryOrder() {
 function clearLibraryDropTargets() {
   els.libraryManagerList.querySelectorAll(".drop-target").forEach((cardElement) => {
     cardElement.classList.remove("drop-target");
-  });
-}
-
-function renderShares(container, library) {
-  const activeShares = (library.shares || []).filter((share) => !share.revokedAt);
-  if (activeShares.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "status";
-    empty.textContent = "No active share URLs.";
-    container.appendChild(empty);
-    return;
-  }
-
-  activeShares.forEach((share) => {
-    const row = document.createElement("div");
-    row.className = "share-row";
-    const canCopy = Boolean(share.url);
-    row.innerHTML = `
-      <span class="status">${canCopy ? "Created" : "Legacy share"} ${escapeHtml(formatDate(share.createdAt))}</span>
-      <button class="secondary-button compact-button copy-share" type="button" ${canCopy ? "" : "disabled"}>${canCopy ? "Copy" : "Unavailable"}</button>
-      <button class="secondary-button compact-button revoke-share" type="button">Revoke</button>
-    `;
-    const copyButton = row.querySelector(".copy-share");
-    if (canCopy) {
-      copyButton.addEventListener("click", async () => {
-        await copyText(share.url);
-        els.libraryManagerStatus.textContent = "Share URL copied.";
-      });
-    }
-    row.querySelector(".revoke-share").addEventListener("click", () => revokeLibraryShare(library.key, share.id));
-    container.appendChild(row);
   });
 }
 
@@ -6546,23 +6770,6 @@ async function deleteLibrary(key, title) {
   }
 }
 
-async function createLibraryShare(key) {
-  els.libraryManagerStatus.textContent = "Creating share URL...";
-  try {
-    const result = await api(`/api/libraries/${encodeURIComponent(key)}/shares`, state.token, { method: "POST" });
-    const url = result.share && result.share.url;
-    if (url) {
-      await copyText(url);
-      els.libraryManagerStatus.textContent = "Share URL copied. You can copy it again from this list later.";
-    } else {
-      els.libraryManagerStatus.textContent = "Share created.";
-    }
-    await loadLibraryManager();
-  } catch (err) {
-    els.libraryManagerStatus.textContent = "Failed to create share URL.";
-  }
-}
-
 async function copyText(value) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -6573,18 +6780,7 @@ async function copyText(value) {
     // Fall through to the prompt fallback.
   }
 
-  window.prompt("Copy share URL", value);
-}
-
-async function revokeLibraryShare(libraryKey, shareId) {
-  els.libraryManagerStatus.textContent = "Revoking share URL...";
-  try {
-    await api(`/api/libraries/${encodeURIComponent(libraryKey)}/shares/${encodeURIComponent(shareId)}`, state.token, { method: "DELETE" });
-    await loadLibraryManager();
-    els.libraryManagerStatus.textContent = "Share URL revoked.";
-  } catch (err) {
-    els.libraryManagerStatus.textContent = "Failed to revoke share URL.";
-  }
+  window.prompt("Copy value", value);
 }
 
 async function loadNextLibraryPage() {
@@ -7492,26 +7688,35 @@ function renderDetailsProgress(progress) {
 }
 
 function updateManagementActions(progress) {
-  const onDeck = progress && progress.status === "in_progress" && Number(progress.positionSeconds) > 0;
+  const onDeck = selectedItemIsOnDeck(progress);
   els.removeOnDeck.classList.toggle("hidden", !onDeck);
   els.markWatched.textContent = isWatchedProgress(progress) ? "Mark unwatched" : "Mark watched";
 }
 
+function selectedItemIsOnDeck(progress = state.selected && state.selected.progress) {
+  if (!state.selected || state.selected.onDeckRemoved) {
+    return false;
+  }
+  return ["resume", "next"].includes(state.selected.onDeckReason)
+    || Boolean(progress && progress.status === "in_progress" && Number(progress.positionSeconds) > 0);
+}
+
 function updateAdminControls() {
-  els.accountButton.classList.toggle("hidden", !state.user || Boolean(state.shareToken));
+  els.lockButton.classList.toggle("hidden", Boolean(state.libraryViewToken));
+  els.accountButton.classList.toggle("hidden", !state.user || Boolean(state.libraryViewToken));
   els.accountButton.title = state.user ? `Account settings for ${state.user.username}` : "Account settings";
   els.adminPanelButton.classList.toggle("hidden", !hasPermission("canViewAdmin"));
-  els.liveTvButton.classList.toggle("hidden", !state.token || Boolean(state.shareToken) || !state.iptvEnabled || !canAccessLiveTv());
+  els.liveTvButton.classList.toggle("hidden", !state.token || Boolean(state.libraryViewToken) || !state.iptvEnabled || !canAccessLiveTv());
   const ytdlp = state.health && state.health.binaries && state.health.binaries.ytdlp;
   const ytdlpUnavailable = Boolean(state.features.ytdlp && ytdlp && !ytdlp.ok);
-  els.downloadButton.classList.toggle("hidden", !state.token || Boolean(state.shareToken) || !state.features.ytdlp);
+  els.downloadButton.classList.toggle("hidden", !state.token || Boolean(state.libraryViewToken) || !state.features.ytdlp);
   els.downloadButton.disabled = ytdlpUnavailable;
   els.downloadButton.title = ytdlpUnavailable ? "YT-DLP is enabled but not available on the server." : "Download URL";
   renderUpdateBanner();
 }
 
 function canAccessLiveTv() {
-  if (!state.user || state.shareToken) {
+  if (!state.user || state.libraryViewToken) {
     return false;
   }
   const permissions = state.user.permissions || {};
@@ -7522,17 +7727,22 @@ function updateDetailsAdminControls() {
   const signedIn = Boolean(state.user);
   const canManageMetadata = hasPermission("canManageMetadata");
   const image = Boolean(state.selected && state.selected.itemType === "image");
+  const libraryView = Boolean(state.libraryViewToken);
   els.editPoster.classList.toggle("hidden", image || !canManageMetadata);
   els.pregenerateHls.classList.toggle("hidden", image || !isAdminMode());
   els.rematchMetadata.classList.toggle("hidden", image || !canManageMetadata);
   els.markWatched.classList.toggle("hidden", image || !signedIn);
-  els.removeOnDeck.classList.toggle("hidden", image || !signedIn || !(state.selected && state.selected.progress && state.selected.progress.status === "in_progress" && Number(state.selected.progress.positionSeconds) > 0));
-  els.playStream.classList.toggle("hidden", image);
+  els.removeOnDeck.classList.toggle("hidden", image || !signedIn || !selectedItemIsOnDeck());
+  els.playStream.classList.toggle("hidden", image || libraryView);
   els.copyUrl.classList.toggle("hidden", !hasPermission("canCopyStreamUrls"));
   els.startWatchTogether.classList.toggle("hidden", image || !hasPermission("canCopyStreamUrls"));
+  els.toggleFilePath.closest(".file-path-block").classList.toggle("hidden", libraryView);
   els.copyUrl.textContent = image ? "Copy image URL" : "Copy URL";
   for (const select of [els.audioSelect, els.qualitySelect, els.subtitleSelect]) {
-    select.closest("label").classList.toggle("hidden", image);
+    select.closest("label").classList.toggle("hidden", image || libraryView);
+  }
+  if (libraryView) {
+    els.audioChannelsLabel.classList.add("hidden");
   }
 }
 
@@ -7549,7 +7759,7 @@ function isAdminMode() {
 }
 
 function hasPermission(permission) {
-  if (!state.user || state.shareToken) {
+  if (!state.user || state.libraryViewToken) {
     return false;
   }
   const permissions = state.user.permissions || {};
@@ -7783,7 +7993,7 @@ function readLocalPlaybackPreferences() {
 
 let savePlaybackPreferencesTimer = null;
 function persistPlaybackPreferences(preferences) {
-  if (!state.token || state.shareToken || !state.user) {
+  if (!state.token || state.libraryViewToken || !state.user) {
     return;
   }
   window.clearTimeout(savePlaybackPreferencesTimer);
@@ -8648,6 +8858,8 @@ async function openWebPlayer(url, options = {}) {
     const startHls = (source, isFallback = false) => {
       const player = new window.Hls(isFallback ? {} : options.hlsOptions || {});
       let liveRecoveryAttempts = 0;
+      let seekRecoveryAttempts = 0;
+      let seekRecoveryTimer = null;
       hlsPlayer = player;
       player.on(window.Hls.Events.ERROR, (event, data) => {
         if (!data || !data.fatal) {
@@ -8676,7 +8888,25 @@ async function openWebPlayer(url, options = {}) {
             return;
           }
         }
+        const recentSeek = Date.now() - videoLastSeekAt < 60000;
+        const recoverableSeekError = data.type === window.Hls.ErrorTypes.NETWORK_ERROR
+          || data.type === window.Hls.ErrorTypes.MEDIA_ERROR;
+        if (!isFallback && !options.live && recentSeek && recoverableSeekError && seekRecoveryAttempts < 4) {
+          seekRecoveryAttempts += 1;
+          setPlayerStatus("Buffering the new playback position...");
+          clearTimeout(seekRecoveryTimer);
+          seekRecoveryTimer = setTimeout(() => {
+            if (hlsPlayer !== player) return;
+            if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+              player.recoverMediaError();
+            } else {
+              player.startLoad(Math.max(0, Number(video.currentTime) || 0));
+            }
+          }, Math.min(1500, seekRecoveryAttempts * 350));
+          return;
+        }
         if (!isFallback && startFallback()) {
+          clearTimeout(seekRecoveryTimer);
           cancelPendingHlsAudioSwitch();
           player.destroy();
           if (hlsPlayer === player) {
@@ -8691,6 +8921,8 @@ async function openWebPlayer(url, options = {}) {
       });
       player.on(window.Hls.Events.FRAG_BUFFERED, (event, data) => {
         liveRecoveryAttempts = 0;
+        seekRecoveryAttempts = 0;
+        clearTimeout(seekRecoveryTimer);
         if (!isFallback) {
           if (!pendingHlsAudioSwitch || pendingHlsAudioSwitch.player !== player) {
             setPlayerStatus("");
@@ -8984,6 +9216,8 @@ function handleVideoSeeking() {
   if (!Number.isFinite(targetSeconds)) {
     return;
   }
+
+  videoLastSeekAt = Date.now();
 
   seekEndRecoveryAttempted = false;
   const explicitCreditsSkip = videoEndSkipRequested
@@ -10298,7 +10532,7 @@ async function markSelectedWatched() {
 
 async function markSeasonWatched(mediaType, show, season, button = null) {
   const episodes = season && Array.isArray(season.episodes) ? season.episodes : [];
-  if (!state.user || state.shareToken || episodes.length === 0) {
+  if (!state.user || state.libraryViewToken || episodes.length === 0) {
     return;
   }
   const watched = seasonFullyWatched(season);
@@ -10359,27 +10593,47 @@ async function removeSelectedOnDeck() {
     return;
   }
 
-  els.removeOnDeck.disabled = true;
-  els.copyStatus.textContent = "Removing from On Deck...";
+  await removeOnDeckItem(state.selected, els.removeOnDeck);
+}
+
+async function removeOnDeckItem(item, button = null) {
+  if (!item) {
+    return;
+  }
+
+  if (button) button.disabled = true;
+  const selected = state.selected
+    && state.selected.mediaType === item.mediaType
+    && state.selected.id === item.id;
+  if (selected) els.copyStatus.textContent = "Removing from On Deck...";
   try {
-    const result = await api(`/api/progress/${state.selected.mediaType}/${state.selected.id}/remove`, state.token, {
+    const path = item.showId
+      ? `/api/progress/${encodeURIComponent(item.mediaType)}/shows/${encodeURIComponent(item.showId)}/remove`
+      : `/api/progress/${encodeURIComponent(item.mediaType)}/${encodeURIComponent(item.id)}/remove`;
+    const result = await api(path, state.token, {
       method: "POST",
       body: JSON.stringify({})
     });
-    state.selected = {
-      ...state.selected,
-      progress: result.progress
-    };
-    renderDetailsProgress(result.progress);
-    updateManagementActions(result.progress);
-    updateRenderedCardsProgress(state.selected, result.progress);
-    removeOnDeckCard(state.selected);
+    if (selected) {
+      state.selected = {
+        ...state.selected,
+        ...(result.progress ? { progress: result.progress } : {}),
+        onDeckReason: null,
+        onDeckRemoved: true
+      };
+      if (result.progress) {
+        renderDetailsProgress(result.progress);
+        updateRenderedCardsProgress(state.selected, result.progress);
+      }
+      updateManagementActions(state.selected.progress);
+    }
+    removeOnDeckCard(item);
     await refreshOnDeckRow({ force: true }).catch(() => {});
-    els.copyStatus.textContent = "Removed from On Deck.";
+    if (selected) els.copyStatus.textContent = "Removed from On Deck.";
   } catch (err) {
-    els.copyStatus.textContent = "Failed to remove from On Deck.";
+    if (selected) els.copyStatus.textContent = err.message || "Failed to remove from On Deck.";
   } finally {
-    els.removeOnDeck.disabled = false;
+    if (button) button.disabled = false;
   }
 }
 
@@ -10389,9 +10643,10 @@ function removeOnDeckCard(item) {
     return;
   }
 
-  const key = mediaKey(item);
-  const cardElement = section.querySelector(`.card[data-media-key="${cssEscape(key)}"]`);
-  if (cardElement) {
+  const cardElements = item.showId
+    ? section.querySelectorAll(`.card[data-show-key="${cssEscape(`${item.mediaType}:${item.showId}`)}"]`)
+    : section.querySelectorAll(`.card[data-media-key="${cssEscape(mediaKey(item))}"]`);
+  for (const cardElement of cardElements) {
     cardElement.remove();
   }
 
@@ -10421,8 +10676,8 @@ async function api(path, token = state.token, options = {}) {
   };
   if (token) {
     headers["X-Session-Token"] = token;
-  } else if (state.shareToken) {
-    headers["X-Share-Token"] = state.shareToken;
+  } else if (state.libraryViewToken) {
+    headers["X-Library-View-Token"] = state.libraryViewToken;
   }
 
   return apiClient.requestJson(path, {
@@ -10437,8 +10692,8 @@ async function publicApi(path, options = {}) {
 }
 
 function authQuery() {
-  if (state.shareToken && !state.token) {
-    return { name: "shareToken", value: state.shareToken };
+  if (state.libraryViewToken && !state.token) {
+    return { name: "viewToken", value: state.libraryViewToken };
   }
 
   return { name: "authToken", value: state.token };

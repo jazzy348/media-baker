@@ -1,21 +1,15 @@
-const { shareProgressUserId } = require("../utils/progressIdentity");
-
-function createAuthMiddleware(accountService, libraryService = null) {
+function createAuthMiddleware(accountService) {
   return async (req, res, next) => {
-    const shareToken = extractShareToken(req);
-    if (shareToken && libraryService) {
+    const libraryViewToken = extractLibraryViewToken(req);
+    if (libraryViewToken && accountService) {
       try {
-        const share = await libraryService.verifyShareToken(shareToken);
-        if (share) {
-          req.authMode = "share";
-          req.authToken = shareToken;
-          req.authParamName = "shareToken";
-          req.authFromCookie = req.authCookieType === "share";
-          req.shareToken = shareToken;
-          req.share = share.share;
-          req.progressUserId = shareProgressUserId(share.share.id);
-          req.allowedLibraryKey = share.library.key;
-          req.allowedLibrary = share.library;
+        const libraryView = await accountService.verifyLibraryViewToken(libraryViewToken);
+        if (libraryView) {
+          req.authMode = "library-view";
+          req.authToken = libraryViewToken;
+          req.authParamName = "viewToken";
+          req.libraryView = libraryView;
+          req.allowedLibraryKeys = libraryView.libraryKeys;
           next();
           return;
         }
@@ -95,8 +89,8 @@ function createWatchTogetherStreamMiddleware(watchTogether) {
   };
 }
 
-function createOptionalAuthMiddleware(accountService, libraryService = null) {
-  const authenticate = createAuthMiddleware(accountService, libraryService);
+function createOptionalAuthMiddleware(accountService) {
+  const authenticate = createAuthMiddleware(accountService);
   return (req, res, next) => authenticate(req, res, (err) => {
     if (err && err.status === 401) {
       next();
@@ -180,20 +174,14 @@ function extractApiKey(req) {
   return null;
 }
 
-function extractShareToken(req) {
-  const headerToken = req.get("x-share-token");
+function extractLibraryViewToken(req) {
+  const headerToken = req.get("x-library-view-token");
   if (headerToken) {
     return headerToken;
   }
 
-  if (typeof req.query.shareToken === "string") {
-    return req.query.shareToken;
-  }
-
-  const cookieToken = cookieValue(req, "media_baker_web_share");
-  if (cookieToken) {
-    req.authCookieType = "share";
-    return cookieToken;
+  if (typeof req.query.viewToken === "string") {
+    return req.query.viewToken;
   }
 
   return null;
@@ -206,14 +194,8 @@ function establishWebStreamAuthCookie(req, res) {
     secure: req.secure || req.get("x-forwarded-proto") === "https",
     path: "/api/web-streams"
   };
-  if (req.authMode === "share" && req.authToken) {
-    res.cookie("media_baker_web_share", req.authToken, options);
-    res.clearCookie("media_baker_web_session", options);
-    return;
-  }
   if ((req.authMode === "user" || req.authMode === "admin") && req.authParamName === "authToken" && req.authToken) {
     res.cookie("media_baker_web_session", req.authToken, options);
-    res.clearCookie("media_baker_web_share", options);
   }
 }
 
@@ -225,7 +207,6 @@ function clearWebStreamAuthCookies(req, res) {
     path: "/api/web-streams"
   };
   res.clearCookie("media_baker_web_session", options);
-  res.clearCookie("media_baker_web_share", options);
 }
 
 function cookieValue(req, name) {

@@ -5,6 +5,14 @@ const { httpError } = require("../utils/httpErrors");
 module.exports = function createProgressRoutes({ mediaIndex, metadata, progress, skipDetection }, options = {}) {
   const router = express.Router();
 
+  router.use((req, res, next) => {
+    if (req.authMode === "library-view") {
+      next(httpError(403, "Playback progress is not available through a library view link"));
+      return;
+    }
+    next();
+  });
+
   router.get("/on-deck", async (req, res, next) => {
     try {
       res.json({
@@ -138,6 +146,28 @@ module.exports = function createProgressRoutes({ mediaIndex, metadata, progress,
         ok: true,
         progress: await progress.get(progressUserId(req), record.mediaType, record.mediaId)
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/:mediaType/shows/:showId/remove", async (req, res, next) => {
+    try {
+      requireAuthenticatedUser(req);
+      assertMediaAccess(req, req.params.mediaType);
+      requireProgressTracking(mediaIndex, req.params.mediaType);
+      const library = mediaIndex.libraryForKey(req.params.mediaType);
+      if (!library || library.type !== "tv") {
+        next(httpError(404, "Show not found"));
+        return;
+      }
+      const show = await mediaIndex.getShow(req.params.showId, library.key);
+      if (!show) {
+        next(httpError(404, "Show not found"));
+        return;
+      }
+      await progress.markShowOnDeckRemoved(progressUserId(req), req.params.mediaType, show.id);
+      res.json({ ok: true, showId: show.id });
     } catch (err) {
       next(err);
     }

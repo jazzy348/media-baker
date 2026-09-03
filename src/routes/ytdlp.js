@@ -6,7 +6,7 @@ module.exports = function createYtDlpRoutes({ ytdlp, ytdlpRelay, playbackTokens 
   const router = express.Router();
 
   router.use((req, res, next) => {
-    if (req.authMode === "share") {
+    if (!req.user) {
       next(httpError(403, "YT-DLP downloads require a user account."));
       return;
     }

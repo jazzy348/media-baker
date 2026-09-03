@@ -6,10 +6,18 @@ const { syncYtDlpLibrary } = require("../services/ytdlpService");
 module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, progress, libraryService, appSettings, indexScanScheduler }) {
   const router = express.Router();
 
-  router.get("/", requireAnyPermission(["canManageLibraries", "canCreateShareLinks", "canReindex"]), async (req, res, next) => {
+  router.use((req, res, next) => {
+    if (req.authMode === "library-view") {
+      next(httpError(403, "Library management is not available through a library view link"));
+      return;
+    }
+    next();
+  });
+
+  router.get("/", requireAnyPermission(["canManageLibraries", "canReindex"]), async (req, res, next) => {
     try {
       res.json({
-        libraries: withShareUrls(req, (await libraryService.listWithShares()).filter((library) => canAccessLibrary(req, library.key)))
+        libraries: (await libraryService.listAvailable()).filter((library) => canAccessLibrary(req, library.key))
       });
     } catch (err) {
       next(err);
@@ -33,7 +41,7 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, pr
       config.libraries = libraries;
       syncYtDlpLibrary(config);
       await saveIndexLibraryOrder(mediaIndex);
-      res.json({ libraries: withShareUrls(req, await libraryService.listWithShares()) });
+      res.json({ libraries: await libraryService.listAvailable() });
     } catch (err) {
       next(err);
     }
@@ -81,33 +89,6 @@ module.exports = function createLibraryRoutes({ config, mediaIndex, metadata, pr
       await refreshLibraryConfig(config, libraryService, mediaIndex);
       const indexScan = startBackgroundReindex(indexScanScheduler, mediaIndex, metadata, "library-remove");
       res.json({ ok: true, indexScan });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.post("/:libraryKey/shares", requirePermission("canCreateShareLinks"), async (req, res, next) => {
-    try {
-      assertLibraryAccess(req, req.params.libraryKey);
-      const share = await libraryService.createShare(req.params.libraryKey);
-      res.status(201).json({
-        share: publicShareWithUrl(req, share)
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  router.delete("/:libraryKey/shares/:shareId", requirePermission("canCreateShareLinks"), async (req, res, next) => {
-    try {
-      assertLibraryAccess(req, req.params.libraryKey);
-      const revoked = await libraryService.revokeShare(req.params.libraryKey, req.params.shareId);
-      if (!revoked) {
-        next(httpError(404, "Share not found"));
-        return;
-      }
-
-      res.json({ ok: true });
     } catch (err) {
       next(err);
     }
@@ -515,32 +496,4 @@ function canAccessLibrary(req, libraryKey) {
     return req.allowedLibraryKeys.includes(libraryKey);
   }
   return true;
-}
-
-function publicShareWithUrl(req, share) {
-  return {
-    id: share.id,
-    libraryKey: share.libraryKey,
-    createdAt: share.createdAt,
-    revokedAt: share.revokedAt || null,
-    url: shareUrl(req, share.token)
-  };
-}
-
-function withShareUrls(req, libraries) {
-  return libraries.map((library) => ({
-    ...library,
-    shares: (library.shares || []).map((share) => ({
-      ...share,
-      url: share.token && !share.revokedAt ? shareUrl(req, share.token) : null
-    }))
-  }));
-}
-
-function shareUrl(req, token) {
-  const proto = String(req.get("x-forwarded-proto") || req.protocol || "http").split(",")[0].trim();
-  const host = req.get("x-forwarded-host") || req.get("host");
-  const url = new URL("/", `${proto}://${host}`);
-  url.searchParams.set("shareToken", token);
-  return url.toString();
 }

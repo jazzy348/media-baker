@@ -5,9 +5,8 @@ const logger = require("../utils/logger");
 const { httpError } = require("../utils/httpErrors");
 const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
-const { shareProgressUserId } = require("../utils/progressIdentity");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, playbackSync, mediaIndex, metadata, indexScanScheduler, libraryService, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks, watchTogether }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, playbackSync, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks, watchTogether }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -128,6 +127,57 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
       const removed = await accountService.revokeApiKey(req.params.id);
       if (!removed) {
         next(httpError(404, "API key not found"));
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/library-views", requirePermission("canManageApiKeys"), async (req, res, next) => {
+    try {
+      const libraries = librariesAvailableToRequest(config, req);
+      const allowedLibraryKeys = new Set(libraries.map((library) => library.key));
+      const links = (await accountService.listLibraryViews())
+        .filter((link) => !Array.isArray(req.allowedLibraryKeys) || link.libraryKeys.every((key) => allowedLibraryKeys.has(key)))
+        .map((link) => libraryViewWithUrl(req, link));
+      res.json({
+        libraries: libraries.map((library) => ({ key: library.key, title: library.title, type: library.type })),
+        links
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/library-views", requirePermission("canManageApiKeys"), async (req, res, next) => {
+    try {
+      const body = req.body || {};
+      const allowedLibraryKeys = new Set(librariesAvailableToRequest(config, req).map((library) => library.key));
+      const selectedLibraryKeys = Array.isArray(body.libraryKeys) ? body.libraryKeys.map(String) : [];
+      if (selectedLibraryKeys.some((key) => !allowedLibraryKeys.has(key))) {
+        next(httpError(403, "Library access required"));
+        return;
+      }
+      const link = await accountService.createLibraryView(body);
+      res.status(201).json({ link: libraryViewWithUrl(req, link) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.delete("/library-views/:id", requirePermission("canManageApiKeys"), async (req, res, next) => {
+    try {
+      const visibleLink = (await accountService.listLibraryViews()).find((link) => link.id === req.params.id);
+      const allowedLibraryKeys = new Set(librariesAvailableToRequest(config, req).map((library) => library.key));
+      if (!visibleLink || Array.isArray(req.allowedLibraryKeys) && visibleLink.libraryKeys.some((key) => !allowedLibraryKeys.has(key))) {
+        next(httpError(404, "Library view not found"));
+        return;
+      }
+      const revoked = await accountService.revokeLibraryView(req.params.id);
+      if (!revoked) {
+        next(httpError(404, "Library view not found"));
         return;
       }
       res.json({ ok: true });
@@ -470,9 +520,9 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/history", requirePermission("canViewUserHistory"), async (req, res, next) => {
     try {
-      const { accounts, accountsById, shareSubjects, sharesById } = await loadHistorySubjects(accountService, libraryService);
+      const { accounts, accountsById } = await loadHistorySubjects(accountService);
       const userId = String(req.query.userId || "").trim() || null;
-      if (userId && !accountsById.has(userId) && !sharesById.has(userId)) {
+      if (userId && !accountsById.has(userId)) {
         next(httpError(400, "Unknown history user"));
         return;
       }
@@ -495,19 +545,15 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
         ...page,
         items: page.items.map((item) => {
           const account = accountsById.get(item.userId);
-          const share = sharesById.get(item.userId);
           return {
             ...item,
             user: {
               id: item.userId,
-              username: account ? account.username : share ? share.username : item.userId
+              username: account ? account.username : item.userId
             }
           };
         }),
-        users: [
-          ...accounts.map((account) => ({ id: account.id, username: account.username })),
-          ...shareSubjects
-        ],
+        users: accounts.map((account) => ({ id: account.id, username: account.username })),
         filters: {
           userId,
           timespan,
@@ -524,17 +570,16 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/currently-playing", requirePermission("canViewUserHistory"), async (req, res, next) => {
     try {
-      const { accountsById, sharesById } = await loadHistorySubjects(accountService, libraryService);
+      const { accountsById } = await loadHistorySubjects(accountService);
       const items = await progress.currentlyPlaying(mediaIndex, metadata, req.authToken, req.authParamName);
       res.json({
         items: items.map((item) => {
           const account = accountsById.get(item.userId);
-          const share = sharesById.get(item.userId);
           return {
             ...item,
             user: {
               id: item.userId,
-              username: account ? account.username : share ? share.username : item.userId
+              username: account ? account.username : item.userId
             }
           };
         })
@@ -889,29 +934,32 @@ function validHistoryTime(value) {
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
 }
 
-function shareHistoryLabel(share, libraryTitles) {
-  const title = libraryTitles.get(share.libraryKey) || share.libraryKey;
-  const suffix = String(share.id || "").slice(0, 8);
-  return `Share: ${title} (${suffix}${share.revokedAt ? ", revoked" : ""})`;
+function librariesAvailableToRequest(config, req) {
+  const allowedLibraryKeys = Array.isArray(req.allowedLibraryKeys) ? new Set(req.allowedLibraryKeys) : null;
+  return (config.libraries || []).filter((library) => !allowedLibraryKeys || allowedLibraryKeys.has(library.key));
 }
 
-async function loadHistorySubjects(accountService, libraryService) {
-  const [accounts, shares, libraries] = await Promise.all([
-    accountService.list(),
-    libraryService.listShares(),
-    libraryService.list()
-  ]);
-  const accountsById = new Map(accounts.map((account) => [account.id, account]));
-  const libraryTitles = new Map(libraries.map((library) => [library.key, library.title]));
-  const shareSubjects = shares.map((share) => ({
-    id: shareProgressUserId(share.id),
-    username: shareHistoryLabel(share, libraryTitles)
-  }));
+function libraryViewWithUrl(req, link) {
+  const { token, ...publicLink } = link;
+  return {
+    ...publicLink,
+    url: token && !link.revokedAt && !link.expired ? libraryViewUrl(req, token) : null
+  };
+}
+
+function libraryViewUrl(req, token) {
+  const proto = String(req.get("x-forwarded-proto") || req.protocol || "http").split(",")[0].trim();
+  const host = req.get("x-forwarded-host") || req.get("host");
+  const url = new URL("/", `${proto}://${host}`);
+  url.searchParams.set("viewToken", token);
+  return url.toString();
+}
+
+async function loadHistorySubjects(accountService) {
+  const accounts = await accountService.list();
   return {
     accounts,
-    accountsById,
-    shareSubjects,
-    sharesById: new Map(shareSubjects.map((share) => [share.id, share]))
+    accountsById: new Map(accounts.map((account) => [account.id, account]))
   };
 }
 

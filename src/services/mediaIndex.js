@@ -1184,13 +1184,24 @@ function reconcileMediaIdentity(collection, previousCollection, type) {
 
   const currentItems = collectionMediaItems(collection, type);
   const previousItems = collectionMediaItems(previousCollection, type);
-  if (currentItems.length === 0 || previousItems.length === 0) {
+  if (currentItems.length === 0) {
     return collection;
   }
 
+  const firstSeenAtMs = Date.now();
+  const previousByPath = new Map(previousItems
+    .map((item) => [normalizedFilePath(item.filePath), item]));
   const currentPaths = new Set(currentItems.map((item) => normalizedFilePath(item.filePath)));
-  const previousPaths = new Set(previousItems.map((item) => normalizedFilePath(item.filePath)));
-  const addedItems = currentItems.filter((item) => !previousPaths.has(normalizedFilePath(item.filePath)));
+  const addedItems = [];
+  for (const item of currentItems) {
+    const previous = previousByPath.get(normalizedFilePath(item.filePath));
+    if (previous) {
+      item.addedAtMs = validAddedAtMs(previous.addedAtMs, firstSeenAtMs);
+    } else {
+      item.addedAtMs = firstSeenAtMs;
+      addedItems.push(item);
+    }
+  }
   const removedItems = previousItems.filter((item) => !currentPaths.has(normalizedFilePath(item.filePath)));
   const addedByFingerprint = groupByFingerprint(addedItems);
   const removedByFingerprint = groupByFingerprint(removedItems);
@@ -1204,14 +1215,17 @@ function reconcileMediaIdentity(collection, previousCollection, type) {
     const item = additions[0];
     const previous = removals[0];
     item.id = previous.id;
-    if (Number.isFinite(Number(previous.addedAtMs))) {
-      item.addedAtMs = Number(previous.addedAtMs);
-    }
+    item.addedAtMs = validAddedAtMs(previous.addedAtMs, firstSeenAtMs);
     logger.full(`[index] file rename retained id=${item.id} from="${previous.filePath}" to="${item.filePath}"`);
   }
 
   rebuildCollectionLookups(collection, type);
   return collection;
+}
+
+function validAddedAtMs(value, fallback) {
+  const addedAtMs = Number(value);
+  return Number.isFinite(addedAtMs) && addedAtMs > 0 ? addedAtMs : fallback;
 }
 
 function collectionMediaItems(collection, type) {

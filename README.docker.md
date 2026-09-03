@@ -1,55 +1,42 @@
 # Media Baker Docker Setup
 
-Use this guide for Docker deployments. The image includes Node.js, Linux FFmpeg and FFprobe, ffsubsync, yt-dlp, Intel and Mesa VAAPI drivers, and the Media Baker WebUI.
+This guide covers Media Baker's Docker deployment. For application features and standalone installation, see the [main README](README.md).
 
-## Features
+The image currently contains:
 
-- Installable HTTPS WebUI with accounts, permissions, API keys, share URLs, self-service account settings, per-user watch state, cache-safe asset updates, and server-update reload notices.
-- Dynamic library creation, removal, ordering, folder browsing, and background re-indexing from the admin panel.
-- TV, movie, music, image, anime, 3D, loose-file, and Plex-style folder scanning, including `S01E01` and `1x01` episode names.
-- Recently added and randomized home rows, lazy library browsing, metadata-first search, show/season views, and random episode selection.
-- On Deck, next-episode handling, watch history, resume playback, and currently-playing admin view.
-- Browser playback and copyable HLS URLs for external players, with automatic next-episode and next-track playback, a movable themed music player, and minimizable floating video.
-- Optional background TV intro and credit detection with in-player skip controls, chapter support, recurring-theme matching, and post-credit scene preservation.
-- HLS cache reuse, one-transcode-per-file locking, pre-generation, quality presets, and fallback error stream.
-- Audio/subtitle selection, subtitle burn-in, SubDL search, subtitle sync, preserved 5.1, stereo mixdown, and Stabby Cinema 5.1 remapping.
-- ProTV and VRChat URL support including resume time and stereoscopic 3D mode parameters.
-- TMDb video metadata and MusicBrainz music metadata with 1024px WebP artwork caching, aliases, season artwork, episode thumbnails, manual matching, poster editing, and duplicate detection.
-- YT-DLP downloads, playlists, live recording or HLS relay, progress, automatic indexing, and generated thumbnails.
-- M3U and HDHomeRun Live TV with EPG refresh/matching, cached logos, deinterlacing, and rolling HLS.
-- MySQL storage or local JSON fallback for indexes, settings, accounts, sessions, metadata, and playback progress.
-- Admin settings, database backup/restore, hardware/network graphs, currently playing, live logs, history, and rotating log files.
-- Admin-only GitHub release notifications and optional automatic source updates.
-- Swagger/OpenAPI documentation at `/api/docs`.
+- Node.js 24.
+- FFmpeg and FFprobe.
+- ffsubsync and yt-dlp in a Python virtual environment.
+- Intel QSV/VAAPI and Mesa VAAPI userspace packages.
+- `tini` for process supervision.
+- The Media Baker WebUI and source-update supervisor.
 
-## Fixed Container Paths
+Docker mode is selected by `MEDIA_BAKER_DOCKER=1`, which is already set by the supplied Dockerfile.
 
-Docker mode is enabled with `MEDIA_BAKER_DOCKER=1`.
+## Container Paths
 
 | Container path | Purpose |
 | --- | --- |
-| `/config/config.json` | Startup configuration |
-| `/cache` | JSON data, metadata, HLS, thumbnails, subtitles, playback state, database backups, and source updates |
-| `/cache/app/current` | Automatically installed application source |
-| `/logs` | Daily log files |
-| `/downloads` | YT-DLP output |
+| `/config/config.json` | Read-only startup configuration |
+| `/cache` | JSON stores, metadata, artwork, HLS, subtitles, keyframes, backups, branding derivatives, and source updates |
+| `/cache/app/current` | Source installed by Media Baker's updater |
+| `/logs` | Daily rotating log files |
+| `/downloads` | Default YT-DLP output |
 | `/fallback/404.mp4` | Optional fallback source |
-| `/media/...` | Mounted media libraries |
+| `/media/...` | User-defined media mounts |
 
-Use the WebUI for runtime settings and library management. `config.json` only contains the port and optional MySQL credentials.
+Keep `/cache` persistent even when MySQL is enabled. Generated artwork, HLS fragments, update state, and other disk-backed data are not stored in MySQL.
 
 ## Setup
 
-0. Pull the repo.
-   Windows Powershell and linux
-   
-   ```powershell and linux
-   git clone git clone https://github.com/jazzy348/media-baker.git
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/jazzy348/media-baker.git
    cd media-baker
    ```
-   
 
-2. Create folders and configuration.
+2. Create persistent folders and the configuration file.
 
    Windows PowerShell:
 
@@ -65,9 +52,7 @@ Use the WebUI for runtime settings and library management. `config.json` only co
    cp config.example.json config.json
    ```
 
-3. Put the optional fallback video at `fallback/404.mp4`.
-
-4. Edit `config.json`:
+3. Edit `config.json`:
 
    ```json
    {
@@ -84,7 +69,11 @@ Use the WebUI for runtime settings and library management. `config.json` only co
    }
    ```
 
-5. Edit media mounts in `docker-compose.yml`:
+   When MySQL runs in another Compose service, set `host` to that service name rather than `localhost`.
+
+4. Optionally place a fallback video at `fallback/404.mp4`.
+
+5. Edit the media mounts in `docker-compose.yml`:
 
    ```yaml
    volumes:
@@ -99,25 +88,37 @@ Use the WebUI for runtime settings and library management. `config.json` only co
 
 6. Build and start:
 
-   ```powershell
+   ```bash
    docker compose up -d --build
    ```
 
-7. Open `http://localhost:5000`.
+7. Open `http://localhost:5000`, create the first administrator account, then add libraries using container paths such as `/media/tv`.
 
-On first launch, create the first admin account, then add libraries using container paths such as `/media/tv` and `/media/movies`.
+The WebUI manages runtime settings. `config.json` remains limited to settings required before the application database is available.
 
-Configure manual or scheduled database snapshots in `Admin > Backup & Restore`. The default destination is `/cache/backups`, which persists through the existing `./cache:/cache` mount. A restore replaces the configured MySQL database or JSON stores and restarts the supervised app process.
+## Media Mounts
 
-When intro and credit detection is enabled, `Admin > Skip Detection` shows live progress, ETA, persisted failures, marker confidence, previews, retries, and reanalysis controls.
+Media Baker only sees container paths. A host path such as `/mnt/media/Movies` must be configured in the WebUI using its mounted path, such as `/media/movies`.
 
-## Custom Metadata Services
+Read-only mounts are sufficient for indexing and playback:
 
-Select `Custom` in `Admin > Settings > Metadata`, then enter the compatible service's base URL and API key. For containers on the same Docker network, use the service's container hostname and port; `localhost` inside the Media Baker container refers to Media Baker itself. See the [Custom Metadata API specification](README.metadata-service-api.md) to implement a compatible service.
+```yaml
+- "/mnt/media/Movies:/media/movies:ro"
+```
+
+The optimiser replaces validated source files and therefore requires a writable mount:
+
+```yaml
+- "/mnt/media/Movies:/media/movies"
+```
+
+YT-DLP output, downloaded subtitles, and any other path that Media Baker writes must also be backed by a writable persistent mount. Ensure the container process has permission to read and write the corresponding host directories.
+
+Unreadable subdirectories are logged and skipped; they no longer stop the remainder of a library scan.
 
 ## SMB And NAS Media
 
-Mount SMB/NAS shares on the Docker host, then bind-mount the mounted folder:
+The simplest approach is to mount the share on the Docker host and bind-mount it:
 
 ```yaml
 volumes:
@@ -141,118 +142,208 @@ volumes:
       o: "username=media-user,password=media-password,vers=3.0,ro"
 ```
 
-Protect share credentials. On Windows Docker Desktop, use local paths such as:
+Protect credentials in production, preferably with Docker secrets or a credentials file. On Windows Docker Desktop, use a shared host path:
 
 ```yaml
 - "D:/Media/Movies:/media/movies:ro"
 ```
 
-Mapped drive letters such as `Z:` are normally unavailable inside Docker.
+Mapped drive letters such as `Z:` are not normally available inside Linux containers.
 
-## GPU Encoding
+## MySQL
 
-Enable GPU encoding in `Admin > Settings`. Media Baker detects supported H.264 hardware encoders at startup, caches the selected profile, and falls back to `libx264`.
+MySQL is optional. When disabled, persistent structured data is written below `/cache`. When enabled, Media Baker creates and manages its tables in the configured database.
 
-The image includes the userspace components for modern and legacy Intel VAAPI, Intel QSV, and AMD VAAPI. The supplied `docker-compose.yml` contains commented GPU passthrough blocks so the appropriate one can be enabled for the Docker host.
+Example with a Compose service:
+
+```yaml
+services:
+  media-baker:
+    depends_on:
+      - mysql
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: media_baker
+      MYSQL_USER: media_baker
+      MYSQL_PASSWORD: change-me
+      MYSQL_ROOT_PASSWORD: change-root
+    volumes:
+      - "./mysql:/var/lib/mysql"
+```
+
+`config.json` would use:
+
+```json
+{
+  "mysql": {
+    "enabled": true,
+    "host": "mysql",
+    "port": 3306,
+    "user": "media_baker",
+    "password": "change-me",
+    "database": "media_baker",
+    "connectionLimit": 5
+  }
+}
+```
+
+Do not expose MySQL publicly unless it is separately secured.
+
+## Custom Metadata Services
+
+Select `Custom` under `Admin > Settings > Metadata`, then enter the compatible service's base URL and API key. Containers on the same network should use a Compose service hostname:
+
+```text
+http://metadata-service:5051
+```
+
+Do not use `localhost` for a metadata service running in another container. Use the other container's Compose service name and internal port, such as `http://metadata-service:5051`.
+
+If the metadata service runs on the Docker host instead, Docker Desktop users can normally use a URL such as `http://host.docker.internal:5051`. On Linux, use the host's reachable LAN address or configure the `host.docker.internal` host-gateway mapping in Compose.
+
+The custom service may use any metadata sources. It only needs to provide the endpoints and response format described in the [Custom Metadata API specification](README.metadata-service-api.md).
+
+## GPU Acceleration
+
+Enable GPU acceleration in `Admin > Settings`. Media Baker can use hardware decoding and encoding for streaming and optimisation, and falls back to software when a detected path fails.
+
+The Hardware page can display NVIDIA, Intel, or AMD activity when the host, container, and operating-system counters expose it. GPU usage monitoring and FFmpeg acceleration are related but separate capabilities.
 
 ### NVIDIA
 
-NVIDIA driver libraries must match the host driver, so the NVIDIA Container Toolkit injects them into the container at runtime. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the Docker host:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg2
-
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
-
-Enable access in `docker-compose.yml`:
+Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the Docker host, then enable the existing Compose option:
 
 ```yaml
-container_name: media-baker
-gpus: all #Put under here ^
+services:
+  media-baker:
+    gpus: all
 ```
+
+The host driver provides matching NVIDIA libraries at runtime. The image sets `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`.
 
 ### Intel And AMD
 
-Pass `/dev/dri` into the container:
+Pass the host DRM devices into the container:
 
 ```yaml
-devices:
-  - /dev/dri:/dev/dri
+services:
+  media-baker:
+    devices:
+      - "/dev/dri:/dev/dri"
 ```
 
-The image already includes Intel QSV/VAAPI and AMD VAAPI userspace drivers plus `vainfo`; the host device still needs to be passed through as shown above.
+The image includes Intel and Mesa VAAPI userspace packages plus `vainfo`. Device permissions and driver support still depend on the Docker host.
+
+Useful checks:
+
+```bash
+docker compose exec media-baker vainfo
+docker compose exec media-baker ffmpeg -hide_banner -encoders
+```
 
 ## YT-DLP
 
-Enable YT-DLP in `Admin > Settings`, choose the `/downloads` path or another mounted container folder, and use the Download button in the WebUI. Completed files are indexed automatically and receive generated thumbnails. Live URLs can be recorded into the library or relayed as rolling HLS for the WebUI or a unique third-party playback URL; completed live recordings receive 48 kHz AAC timestamp normalisation before indexing.
+The default output is `/downloads`. Enable YT-DLP in Settings and keep that mount writable.
 
-## Live TV
+- Administrators can update yt-dlp from the WebUI.
+- YouTube `cookies.txt` data is stored under the persistent cache and is only supplied for YouTube URLs.
+- Node.js 24 is passed to yt-dlp as its JavaScript runtime.
+- Channel subscriptions download the existing channel catalogue and then check for new uploads. The default interval is 24 hours.
+- Subscription download archives are stored in `/cache`, so they survive container recreation.
+- Live URLs can be recorded to the library or relayed through rolling HLS.
 
-Enable IPTV in `Admin > Settings` and choose an M3U source or HDHomeRun device. Add an XMLTV EPG URL or mounted guide file when programme data is required.
+## HLS, Storage, And Shared Memory
 
-- Source refresh interval and startup buffer are configurable.
-- EPG matching is automatic with manual channel overrides.
-- Channel logos are cached locally.
-- Incompatible streams are transcoded to H.264/AAC.
-- Global and per-channel deinterlacing modes are available.
-- Live HLS uses shared memory when available and stops inactive FFmpeg processes.
+HLS data is generated below `/cache`. Media Baker can remove inactive HLS caches when free space falls below the configured reserve, while active readers and transcodes remain protected. Size the cache volume for concurrent streams and long media.
 
-The supplied Compose file reserves 512 MB of shared memory.
+The supplied Compose file reserves 512 MiB of shared memory:
+
+```yaml
+shm_size: "512mb"
+```
+
+Live TV uses shared memory when available and falls back to disk-backed cache behavior where necessary.
+
+## OpenMovie
+
+OpenMovie is a simplified API for building lightweight clients around Media Baker, including clients running in restricted environments such as VRChat. It supplies ready-made catalogues, poster atlases, playback variants, On Deck data, and playback URLs without requiring the client to reproduce the full WebUI.
+
+OpenMovie is disabled by default and is controlled in `Admin > Settings`. A client sends an API key only to the initial authentication endpoint. That endpoint returns encrypted access URLs used for later catalogue, artwork, and playback requests. OpenMovie registries and the unique encryption secret for the deployment are stored with the application's persistent data and included in Media Baker backups.
+
+Do not publish `/cache`, `config.json`, API keys, or backup files through a web server.
+
+## Branding
+
+Media Baker selects one source icon on first startup and stores generated sizes in `/cache`. The selection remains stable across restarts and can be changed in Settings.
+
+To add a custom source icon to a Docker deployment, add its transparent PNG to `public/icons` in the build context and rebuild the image. Generated derivatives remain in the persistent cache.
 
 ## Updates
 
-Configure release checks, prereleases, and automatic installation in `Admin > Settings > Updates`. Only admins see release notifications.
+Configure release checks, prereleases, and automatic installation in `Admin > Settings > Updates`. The supervisor installs source releases and npm production dependencies under `/cache/app/current`, then restarts the server child. The `/cache` mount preserves those source updates across an ordinary container restart or recreation.
 
-The supervisor installs source releases under `/cache/app/current`, stops its server child, and starts the new version. The `/cache` mount preserves source updates across container recreation. Active streams stop during an update.
+Rebuild the image when a release changes Node.js, FFmpeg, Python tools, system packages, the Dockerfile, Compose configuration, or the supervisor:
 
-When served over HTTPS, the WebUI offers installation as an app. The browser that starts an update reloads automatically when the new server is ready; other open clients show a reload notice after they reconnect. Plain HTTP remains available as a normal WebUI but does not advertise installation.
-
-Rebuild the image when a release changes Node.js, FFmpeg, system packages, the supervisor, or Docker configuration:
-
-```powershell
+```bash
 git pull
 docker compose up -d --build
 ```
+
+Active streams stop during either update method.
+
+## Backup And Restore
+
+`Admin > Backup & Restore` can create manual or scheduled compressed snapshots. The default destination is `/cache/backups`.
+
+- MySQL mode snapshots all Media Baker tables.
+- JSON mode snapshots the persistent application stores.
+- OpenMovie capability secrets and registries are included.
+- A restore replaces the selected storage backend and restarts Media Baker.
+
+Separately back up:
+
+- `config.json`.
+- `cache/`.
+- `downloads/`.
+- Custom icons and the fallback source.
+- The MySQL volume when MySQL is enabled.
+- Media files, especially when the optimiser has write access.
 
 ## Useful Commands
 
 Build and start:
 
-```powershell
+```bash
 docker compose up -d --build
 ```
 
 View logs:
 
-```powershell
+```bash
 docker compose logs -f media-baker
 ```
 
 Restart:
 
-```powershell
+```bash
 docker compose restart media-baker
 ```
 
 Stop:
 
-```powershell
+```bash
 docker compose down
 ```
 
-## API Docs
+Open a shell:
+
+```bash
+docker compose exec media-baker sh
+```
+
+## API Documentation
 
 Swagger UI:
 
@@ -265,7 +356,3 @@ Raw OpenAPI JSON:
 ```text
 http://localhost:5000/api/docs/openapi.json
 ```
-
-## Backup
-
-Back up `config.json`, `cache/`, `logs/`, `downloads/`, and the MySQL database when enabled.

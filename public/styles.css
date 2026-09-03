@@ -1795,7 +1795,7 @@ textarea {
 
 .optimizer-library-settings {
   display: grid;
-  grid-template-columns: minmax(240px, 2fr) minmax(210px, 1.4fr) repeat(3, minmax(160px, 1fr)) repeat(2, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -1811,6 +1811,90 @@ textarea {
   height: 44px;
   min-height: 44px;
   padding: 10px 12px;
+}
+
+.optimizer-language-field {
+  position: relative;
+  display: grid;
+  grid-column: span 2;
+  gap: 6px;
+  align-self: end;
+  min-width: 0;
+}
+
+.optimizer-language-picker {
+  position: relative;
+}
+
+.optimizer-language-picker summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 36px 0 12px;
+  overflow: hidden;
+  color: var(--text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.optimizer-language-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+.optimizer-language-picker summary::after {
+  position: absolute;
+  right: 13px;
+  width: 7px;
+  height: 7px;
+  content: "";
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.optimizer-language-picker[open] summary {
+  border-color: rgba(var(--accent-rgb), 0.72);
+}
+
+.optimizer-language-picker[open] summary::after {
+  transform: translateY(2px) rotate(225deg);
+}
+
+.optimizer-language-options {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  width: max(100%, 250px);
+  max-height: 260px;
+  padding: 8px;
+  overflow-y: auto;
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
+}
+
+.settings-form .optimizer-language-option:has(input[type="checkbox"]) {
+  min-height: 38px;
+  padding: 7px 9px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+
+.settings-form .optimizer-language-option:has(input[type="checkbox"]):hover {
+  background: rgba(var(--accent-rgb), 0.1);
+}
+
+.optimizer-language-option.preferred {
+  color: var(--muted);
 }
 
 .optimizer-work-panel,
@@ -2101,6 +2185,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .optimizer-language-field {
+    grid-column: span 1;
+  }
+
   .optimizer-work-stage {
     align-items: start;
     flex-direction: column;
@@ -2380,21 +2468,6 @@ textarea {
 
 .library-card-actions .compact-button {
   min-width: max-content;
-}
-
-.share-list {
-  display: grid;
-  gap: 8px;
-}
-
-.share-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 10px;
-  align-items: center;
-  padding: 8px 10px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
 }
 
 .primary-button {
@@ -3298,12 +3371,130 @@ textarea {
   align-items: end;
 }
 
+.keys-section {
+  display: grid;
+  gap: 14px;
+}
+
+.keys-section + .keys-section {
+  margin-top: 34px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.keys-section-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.keys-section-heading h3,
+.keys-section-heading p {
+  margin: 0;
+}
+
+.keys-section-heading p {
+  color: var(--muted);
+}
+
+.keys-list-heading {
+  margin: 6px 0 0;
+}
+
+.library-view-form {
+  display: grid;
+  gap: 14px;
+}
+
+.library-view-form label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.library-view-libraries-field {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.library-view-libraries-field legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+.library-view-libraries-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  margin-bottom: 6px;
+}
+
+.library-view-libraries-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.library-view-form .library-view-library-action {
+  min-height: 30px;
+  padding: 5px 9px;
+}
+
+.library-view-library-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  max-height: 178px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.library-view-form .library-view-library-option {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.library-view-form .library-view-library-option:hover {
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.library-view-form .library-view-library-option:has(input:checked) {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.38);
+}
+
+.library-view-library-option input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--cyan);
+}
+
+.library-view-details {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(160px, 240px) minmax(190px, 260px) auto;
+  gap: 12px;
+  align-items: end;
+}
+
 .api-key-form label {
   display: grid;
   gap: 8px;
 }
 
-.api-key-form input {
+.api-key-form input,
+.library-view-details input {
   width: 100%;
   min-height: 44px;
   color: var(--text);
@@ -3313,6 +3504,17 @@ textarea {
   padding: 10px 12px;
   outline: 0;
   font: inherit;
+}
+
+.api-key-form input:focus,
+.library-view-details input:focus {
+  border-color: rgba(var(--accent-rgb), 0.72);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
+}
+
+.library-view-form button {
+  min-height: 44px;
+  white-space: nowrap;
 }
 
 .api-key-secret {
@@ -3333,6 +3535,11 @@ textarea {
   color: var(--text);
   background: rgba(0, 0, 0, 0.28);
   border-radius: 8px;
+}
+
+.library-view-secret code {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .api-key-card.revoked {
@@ -3533,6 +3740,8 @@ textarea {
   .settings-feature-body,
   .compact-feature-body,
   .api-key-form,
+  .library-view-form,
+  .library-view-details,
   .api-key-secret,
   .duplicate-row {
     grid-template-columns: 1fr;

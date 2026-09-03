@@ -41,12 +41,11 @@ const LANGUAGE_GROUPS = [
 ];
 
 class OptimiserService {
-  constructor(config, ffmpeg, mediaIndex, appSettings = null, metadata = null) {
+  constructor(config, ffmpeg, mediaIndex, appSettings = null) {
     this.config = config;
     this.ffmpeg = ffmpeg;
     this.mediaIndex = mediaIndex;
     this.appSettings = appSettings;
-    this.metadata = metadata;
     this.timer = null;
     this.running = false;
     this.stopRequested = false;
@@ -104,6 +103,7 @@ class OptimiserService {
       enabled: Boolean(this.config.optimizer && this.config.optimizer.enabled),
       scanIntervalSeconds: optimiserScanIntervalSeconds(this.config),
       parallelJobs: optimizerParallelJobs(this.config),
+      preferredAudioLanguage: String(this.config.streaming && this.config.streaming.preferredAudioLanguage || "english"),
       running: this.running,
       current: currentJobs[0] || null,
       currentJobs,
@@ -225,7 +225,7 @@ class OptimiserService {
         let libraryProcessed = 0;
         const checkpointMs = options.ignoreCheckpoint ? 0 : Number(librarySettings.lastCheckedMs) || startedAt;
         const items = await this.libraryItems(library, checkpointMs);
-        logFull(`[optimiser] library starting key=${library.key} type=${library.type} mode=${librarySettings.mode} files=${items.length} allDay=${librarySettings.allDay} window=${librarySettings.startTime}-${librarySettings.endTime} checkpointMs=${checkpointMs}`);
+        logFull(`[optimiser] library starting key=${library.key} type=${library.type} files=${items.length} allDay=${librarySettings.allDay} window=${librarySettings.startTime}-${librarySettings.endTime} checkpointMs=${checkpointMs}`);
         const results = await this.optimizeLibraryItems(library, librarySettings, items);
         processed += results.processed;
         libraryProcessed = results.processed;
@@ -347,21 +347,18 @@ class OptimiserService {
 
     const probe = await this.ffmpeg.probe(item.filePath);
     const preferredAudioLanguage = this.config.streaming.preferredAudioLanguage;
-    const preferredSubtitleLanguage = optimiserSubtitleLanguage(this.config);
     const audioLanguages = {
       preferred: preferredAudioLanguage,
-      secondary: settings.secondaryAudioLanguage,
-      original: await this.originalLanguageForItem(library, item)
+      additional: settings.additionalAudioLanguages
     };
     const streamPlan = createOptimiserStreamPlan(
       probe,
       settings,
-      audioLanguages,
-      preferredSubtitleLanguage
+      audioLanguages
     );
-    const outputPath = optimizedOutputPath(item.filePath, settings.mode, streamPlan);
-    if (isAlreadyOptimized(item.filePath, probe, outputPath, settings, audioLanguages, preferredSubtitleLanguage)) {
-      logFull(`[optimiser] skipped already-optimised file="${item.filePath}" mode=${settings.mode}`);
+    const outputPath = optimizedOutputPath(item.filePath, streamPlan);
+    if (isAlreadyOptimized(item.filePath, probe, outputPath, settings, audioLanguages)) {
+      logFull(`[optimiser] skipped already-optimised file="${item.filePath}"`);
       return "skipped";
     }
 
@@ -397,7 +394,7 @@ class OptimiserService {
       const currentJob = createCurrentJob(library, item, outputPath, optimiserStageCount(streamPlan));
       this.currentJobs.set(currentJob.id, currentJob);
       let stageIndex = 0;
-      logFull(`[optimiser] starting library=${library.key} mode=${settings.mode} input="${item.filePath}" output="${outputPath}"`);
+      logFull(`[optimiser] starting library=${library.key} input="${item.filePath}" output="${outputPath}"`);
       logFull(`[optimiser] retained streams ${describeStreamPlan(streamPlan)}`);
       try {
         let videoArgs = this.videoFfmpegArgs(
@@ -556,8 +553,7 @@ class OptimiserService {
           audioTempPaths,
           item.filePath,
           tempPath,
-          streamPlan,
-          preferredSubtitleLanguage
+          streamPlan
         );
         logFull(`[optimiser] ffmpeg mux ${muxArgs.map(quoteArg).join(" ")}`);
         beginOptimiserStage(currentJob, "mux", "Assembling final file", ++stageIndex);
@@ -598,19 +594,6 @@ class OptimiserService {
       return "processed";
     } finally {
       await lock.release();
-    }
-  }
-
-  async originalLanguageForItem(library, item) {
-    if (!this.config.metadata || !this.config.metadata.enabled || !this.metadata
-      || typeof this.metadata.getCachedOriginalLanguage !== "function") {
-      return null;
-    }
-    try {
-      return await this.metadata.getCachedOriginalLanguage(library.key, [item.showId, item.id]);
-    } catch (err) {
-      logFull(`[optimiser] original language lookup failed library=${library.key} id=${item.id} message="${err.message}"`);
-      return null;
     }
   }
 
@@ -748,7 +731,6 @@ class OptimiserService {
       libraryTitle: library.title || library.key,
       title: item.title || item.filename || path.basename(item.filePath),
       filePath: item.filePath,
-      mode: settings.mode === "all" ? "all" : "preferred",
       message: String(err && err.message || "Optimiser failed")
     };
     await this.updateFailures((failures) => [
@@ -932,7 +914,7 @@ class OptimiserService {
     return args;
   }
 
-  muxFfmpegArgs(videoPath, audioPaths, inputPath, outputPath, streamPlan, preferredSubtitleLanguage = "english") {
+  muxFfmpegArgs(videoPath, audioPaths, inputPath, outputPath, streamPlan) {
     const args = [
       "-hide_banner",
       "-y",
@@ -964,7 +946,7 @@ class OptimiserService {
       "-c:v",
       "copy",
       ...(streamPlan.audio.length > 0 ? ["-c:a", "copy"] : ["-an"]),
-      ...subtitleEncodingArgs(streamPlan.subtitles, preferredSubtitleLanguage, outputPath)
+      ...subtitleEncodingArgs(streamPlan.subtitles, outputPath)
     );
     if (path.extname(outputPath).toLowerCase() === ".mp4") {
       args.push("-movflags", "+faststart");
@@ -1366,11 +1348,11 @@ function normalizeLibrarySettings(library, input = {}) {
     title: library.title,
     type: library.type,
     enabled: Boolean(input.enabled),
-    mode: input.mode === "all" ? "all" : "preferred",
     downmixToStereo: Boolean(input.downmixToStereo),
     preserveHdr: Boolean(input.preserveHdr),
+    preserveSubtitles: Boolean(input.preserveSubtitles),
     allDay: Boolean(input.allDay),
-    secondaryAudioLanguage: String(input.secondaryAudioLanguage || "").trim(),
+    additionalAudioLanguages: normalizeLanguageList(input.additionalAudioLanguages),
     startTime: timeValue(input.startTime, "01:00"),
     endTime: timeValue(input.endTime, "06:00"),
     lastCheckedMs: nonNegativeNumber(input.lastCheckedMs, 0)
@@ -1436,16 +1418,12 @@ function formatDuration(value) {
   return [hours, minutes, remainder].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
-function optimizedOutputPath(filePath, mode, streamPlan = null) {
+function optimizedOutputPath(filePath, streamPlan = null) {
   const parsed = path.parse(filePath);
-  return path.join(parsed.dir, `${parsed.name}.${optimizedOutputExtension(mode, streamPlan)}`);
+  return path.join(parsed.dir, `${parsed.name}.${optimizedOutputExtension(streamPlan)}`);
 }
 
-function optimizedOutputExtension(mode, streamPlan) {
-  if (mode !== "all") {
-    return "mp4";
-  }
-
+function optimizedOutputExtension(streamPlan) {
   const audioCount = streamPlan && streamPlan.audio ? streamPlan.audio.length : 0;
   const subtitleCount = streamPlan && streamPlan.subtitles ? streamPlan.subtitles.length : 0;
   return audioCount > 1 || subtitleCount > 0 ? "mkv" : "mp4";
@@ -1468,7 +1446,7 @@ function selectRetainedAudio(audioStreams, languages = {}) {
   if (audioStreams.length === 0) return [];
   const programmeStreams = audioStreams.filter((stream) => !isAuxiliaryAudio(stream));
   const candidates = programmeStreams.length > 0 ? programmeStreams : audioStreams;
-  const retainedLanguages = [languages.preferred, languages.original, languages.secondary]
+  const retainedLanguages = [languages.preferred, ...normalizeLanguageList(languages.additional)]
     .map((language) => String(language || "").trim())
     .filter(Boolean);
   const retained = candidates.filter((stream) => (
@@ -1490,7 +1468,7 @@ function selectOneAudioPerLanguage(audioStreams, languages = {}) {
 }
 
 function retainedAudioLanguageKey(stream, languages) {
-  const matched = [languages.preferred, languages.original, languages.secondary]
+  const matched = [languages.preferred, ...normalizeLanguageList(languages.additional)]
     .map((language) => String(language || "").trim())
     .find((language) => language && languageMatches(stream, language));
   return matched ? languageAliases(matched)[0] : streamLanguageKey(stream);
@@ -1504,17 +1482,14 @@ function downmixSourceScore(stream) {
   return score;
 }
 
-function selectRetainedSubtitles(subtitleStreams, preferredLanguage) {
-  const matching = subtitleStreams.filter((stream) => languageMatches(stream, preferredLanguage));
-  const full = bestSubtitle(matching.filter((stream) => !isForcedSubtitle(stream)), false);
-  const forced = bestSubtitle(matching.filter(isForcedSubtitle), true);
-  return [
-    full ? { stream: full, forced: false } : null,
-    forced ? { stream: forced, forced: true } : null
-  ].filter(Boolean);
+function selectRetainedSubtitles(subtitleStreams) {
+  return subtitleStreams.map((stream) => ({
+    stream,
+    forced: isForcedSubtitle(stream)
+  }));
 }
 
-function createOptimiserStreamPlan(probe, settings, audioLanguages, preferredSubtitleLanguage) {
+function createOptimiserStreamPlan(probe, settings, audioLanguages) {
   const video = streamsOfType(probe, "video")[0];
   if (!video) {
     throw new Error("Optimiser could not find a video track");
@@ -1522,19 +1497,15 @@ function createOptimiserStreamPlan(probe, settings, audioLanguages, preferredSub
   const preserveHdr = Boolean(settings.preserveHdr && isHdrVideo(video));
 
   const sourceAudio = streamsOfType(probe, "audio");
-  const preferredAudio = selectPreferredAudio(sourceAudio, audioLanguages.preferred);
-  let retainedAudio = settings.mode === "all"
-    ? selectRetainedAudio(sourceAudio, audioLanguages)
-    : preferredAudio ? [preferredAudio] : [];
+  let retainedAudio = selectRetainedAudio(sourceAudio, audioLanguages);
   if (settings.downmixToStereo) {
     retainedAudio = selectOneAudioPerLanguage(retainedAudio, audioLanguages);
   }
-  const retainedSubtitles = settings.mode === "all"
-    ? selectRetainedSubtitles(streamsOfType(probe, "subtitle"), preferredSubtitleLanguage)
+  const retainedSubtitles = settings.preserveSubtitles
+    ? selectRetainedSubtitles(streamsOfType(probe, "subtitle"))
     : [];
 
   return {
-    mode: settings.mode,
     downmixToStereo: settings.downmixToStereo,
     preserveHdr,
     video: {
@@ -1596,45 +1567,16 @@ function describeStreamPlan(plan) {
   return `${video} audio=[${audio}] subtitles=[${subtitles}]`;
 }
 
-function bestSubtitle(streams, forced) {
-  return streams
-    .map((stream, order) => ({ stream, order, score: subtitleScore(stream, forced) }))
-    .sort((left, right) => right.score - left.score || left.order - right.order)[0]?.stream || null;
-}
-
-function subtitleScore(stream, forced) {
-  const title = String(stream && stream.tags && stream.tags.title || "").toLowerCase();
-  const codec = String(stream && stream.codec_name || "").toLowerCase();
-  let score = 0;
-  if (stream.disposition && stream.disposition.default) score += 30;
-  if (["ass", "ssa"].includes(codec)) score += 25;
-  else if (["subrip", "webvtt", "mov_text"].includes(codec)) score += 20;
-  else if (codec === "hdmv_pgs_subtitle") score += 5;
-  if (/\bmain\b/.test(title)) score += 15;
-  if (/\b(?:sdh|cc|hearing impaired)\b/.test(title)) score -= 15;
-  if (/\bdub\b/.test(title)) score -= 10;
-  if (forced && stream.disposition && stream.disposition.forced) score += 40;
-  if (forced && /\b(?:forced|signs?|songs?)\b/.test(title)) score += 30;
-  return score;
-}
-
-function subtitleEncodingArgs(subtitles, preferredLanguage, outputPath) {
+function subtitleEncodingArgs(subtitles, outputPath) {
   if (subtitles.length === 0) return ["-sn"];
   const args = ["-c:s", "copy"];
-  const outputExtension = path.extname(outputPath).toLowerCase();
-  const languageName = displayLanguageName(preferredLanguage);
-  subtitles.forEach((subtitle, outputIndex) => {
-    if (outputExtension === ".mkv"
-      && String(subtitle.stream && subtitle.stream.codec_name || "").toLowerCase() === "mov_text") {
-      args.push(`-c:s:${outputIndex}`, "srt");
-    }
-    args.push(
-      `-metadata:s:s:${outputIndex}`,
-      `title=${languageName}${subtitle.forced ? " Forced" : ""}`,
-      `-disposition:s:${outputIndex}`,
-      subtitle.forced ? "forced" : "0"
-    );
-  });
+  if (path.extname(outputPath).toLowerCase() === ".mkv") {
+    subtitles.forEach((subtitle, outputIndex) => {
+      if (String(subtitle.stream && subtitle.stream.codec_name || "").toLowerCase() === "mov_text") {
+        args.push(`-c:s:${outputIndex}`, "srt");
+      }
+    });
+  }
   return args;
 }
 
@@ -1678,29 +1620,43 @@ function languageAliases(value) {
   return LANGUAGE_GROUPS.find((aliases) => aliases.includes(normalized)) || [normalized];
 }
 
-function displayLanguageName(value) {
-  const aliases = languageAliases(value);
-  const name = aliases.find((alias) => alias.length > 3) || String(value || "Subtitle");
-  return name.charAt(0).toUpperCase() + name.slice(1);
+function normalizeLanguageList(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value
+    .map((language) => String(language || "").trim())
+    .filter((language) => {
+      const key = languageAliases(language)[0];
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
 }
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function isAlreadyOptimized(filePath, probe, outputPath, settings, audioLanguages, preferredSubtitleLanguage) {
+function isAlreadyOptimized(filePath, probe, outputPath, settings, audioLanguages) {
   const video = streamsOfType(probe, "video")[0];
   const audio = streamsOfType(probe, "audio");
+  const subtitles = streamsOfType(probe, "subtitle");
   const extension = path.extname(filePath).toLowerCase();
   const preserveHdr = Boolean(settings.preserveHdr && isHdrVideo(video));
-  if (extension === ".mp4" && settings.mode !== "all") {
-    const selectedAudio = selectPreferredAudio(audio, audioLanguages.preferred);
+  let retainedAudio = selectRetainedAudio(audio, audioLanguages);
+  if (settings.downmixToStereo) {
+    retainedAudio = selectOneAudioPerLanguage(retainedAudio, audioLanguages);
+  }
+  const retainedSubtitles = settings.preserveSubtitles ? selectRetainedSubtitles(subtitles) : [];
+  if (extension === ".mp4" && path.extname(outputPath).toLowerCase() === ".mp4") {
     const videoCodec = String(video && video.codec_name || "").toLowerCase();
-    const audioCodec = String(selectedAudio && selectedAudio.codec_name || "").toLowerCase();
     if (
       SIMPLE_MP4_VIDEO_CODECS.has(videoCodec)
-      && (!selectedAudio || SIMPLE_MP4_AUDIO_CODECS.has(audioCodec))
-      && (!settings.downmixToStereo || !selectedAudio || Number(selectedAudio.channels) <= 2)
+      && audio.length === retainedAudio.length
+      && audio.every((stream) => SIMPLE_MP4_AUDIO_CODECS.has(String(stream.codec_name || "").toLowerCase()))
+      && (!settings.downmixToStereo || audio.every((stream) => Number(stream.channels) <= 2))
+      && subtitles.length === retainedSubtitles.length
     ) {
       return true;
     }
@@ -1713,29 +1669,11 @@ function isAlreadyOptimized(filePath, probe, outputPath, settings, audioLanguage
   const outputExtension = path.extname(outputPath).toLowerCase();
   if (extension !== outputExtension) return false;
 
-  if (settings.mode === "all") {
-    let retainedAudio = selectRetainedAudio(audio, audioLanguages);
-    if (settings.downmixToStereo) {
-      retainedAudio = selectOneAudioPerLanguage(retainedAudio, audioLanguages);
-    }
-    const subtitles = streamsOfType(probe, "subtitle");
-    const retainedSubtitles = selectRetainedSubtitles(subtitles, preferredSubtitleLanguage);
-    return audio.length > 0
-      && audio.every((stream) => stream.codec_name === "aac")
-      && retainedAudio.length === audio.length
-      && (!settings.downmixToStereo || audio.every((stream) => Number(stream.channels) <= 2))
-      && retainedSubtitles.length === subtitles.length
-      && retainedSubtitles.every((subtitle) => {
-        const title = String(subtitle.stream.tags && subtitle.stream.tags.title || "");
-        return title === `${displayLanguageName(preferredSubtitleLanguage)}${subtitle.forced ? " Forced" : ""}`
-          && Boolean(subtitle.stream.disposition && subtitle.stream.disposition.forced) === subtitle.forced;
-      });
-  }
-  return false;
-}
-
-function optimiserSubtitleLanguage(config) {
-  return config && config.subtitles && config.subtitles.defaultLanguage || "english";
+  return audio.length > 0
+    && audio.every((stream) => stream.codec_name === "aac")
+    && retainedAudio.length === audio.length
+    && (!settings.downmixToStereo || audio.every((stream) => Number(stream.channels) <= 2))
+    && retainedSubtitles.length === subtitles.length;
 }
 
 function videoEncodingArgs(encoder, hardwareProfile, streamPlan, hardwareDecodeEnabled = false) {

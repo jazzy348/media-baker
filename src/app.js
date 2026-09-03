@@ -187,7 +187,7 @@ async function createApp() {
   const iptv = new IptvService(config, ffmpeg, cachedImages);
   const updates = new UpdateService(config);
   const backups = new BackupService(config, appSettings);
-  const optimizer = new OptimiserService(config, ffmpeg, mediaIndex, appSettings, metadata);
+  const optimizer = new OptimiserService(config, ffmpeg, mediaIndex, appSettings);
   const tasks = new TaskService({
     mediaIndex,
     metadata,
@@ -281,7 +281,7 @@ async function createApp() {
   app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
   app.use(
     "/api/web-streams",
-    createAuthMiddleware(accountService, libraryService),
+    createAuthMiddleware(accountService),
     createStreamAuthMiddleware(playbackTokens),
     createStreamRoutes(app.locals.services, { surface: "web" })
   );
@@ -292,7 +292,7 @@ async function createApp() {
     createStreamRoutes(app.locals.services, { surface: "watch" })
   );
   app.use("/api/openmovie", createOpenMovieRoutes(app.locals.services));
-  app.use(createAuthMiddleware(accountService, libraryService));
+  app.use(createAuthMiddleware(accountService));
 
   app.use("/api/admin", createAdminRoutes(app.locals.services));
   app.use("/api/health", createHealthRoutes(app.locals.services));
@@ -361,6 +361,7 @@ function injectWebAppVersion(html, version) {
 
 function shouldServeFallbackStream(req, fallbackStream) {
   return (req.method === "GET" || req.method === "HEAD")
+    && req.authMode !== "library-view"
     && fallbackStream
     && fallbackStream.ready
     && (isWebStreamRequest(req) || !isBrowserRequest(req));
