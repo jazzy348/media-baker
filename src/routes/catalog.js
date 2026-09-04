@@ -176,6 +176,40 @@ module.exports = function createCatalogRoutes({ config, mediaIndex, ffmpeg, hls,
     }
   });
 
+  router.get("/libraries/:mediaType/random-item", async (req, res, next) => {
+    try {
+      requirePlaybackAccess(req);
+      const category = categoryForMediaType(config, req, req.params.mediaType);
+      if (!category || !category.folderBrowser) {
+        next(httpError(404, "Playable collection not found"));
+        return;
+      }
+
+      const folder = normalizeCatalogFolder(req.query.folder);
+      if (!folder) {
+        next(httpError(400, "A collection folder is required"));
+        return;
+      }
+
+      const collection = await mediaIndex.loadCollection(category.collection, "movies");
+      const browser = mediaFolderItems(category, collection.items, folder, authContext(req));
+      const excludeId = String(req.query.exclude || "").trim();
+      const candidates = browser.items.length > 1
+        ? browser.items.filter((item) => item.id !== excludeId)
+        : browser.items;
+      const selected = candidates.length > 0
+        ? candidates[crypto.randomInt(candidates.length)]
+        : null;
+      const enriched = selected
+        ? await withCatalogState([selected], metadata, progress, mediaIndex, req)
+        : [];
+
+      res.json({ item: enriched[0] || null });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/libraries/:mediaType/image-folder-collage", async (req, res, next) => {
     try {
       const category = categoryForMediaType(config, req, req.params.mediaType);
@@ -1636,7 +1670,16 @@ function mediaFolderItems(category, items, currentFolder, auth) {
   for (const item of items) {
     const itemFolder = catalogFolderForMedia(category, item);
     if (itemFolder === currentFolder) {
-      directItems.push(movieCatalogItem(category, item));
+      directItems.push({
+        ...movieCatalogItem(category, item),
+        ...(currentFolder ? {
+          shuffleCollection: {
+            type: "folder",
+            id: currentFolder,
+            title: path.basename(currentFolder)
+          }
+        } : {})
+      });
       continue;
     }
 

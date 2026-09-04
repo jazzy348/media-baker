@@ -219,6 +219,7 @@ class HlsService {
 
     const cacheKey = await this.buildCacheKey(mediaFile.filePath, {
       rendition: "subtitle",
+      subtitleFormatVersion: 3,
       subtitle: selectedSubtitle
     });
     const cacheDir = path.join(this.config.hls.cachePath, cacheKey);
@@ -248,26 +249,38 @@ class HlsService {
 
   async createSubtitleRendition(mediaFile, subtitleId, cacheKey, cacheDir, subtitlePath, metadataPath) {
     const probe = await this.ffmpeg.probe(mediaFile.filePath, { useDefaultProbeLimits: true });
-    const source = await this.subtitleRenditionSource(mediaFile.filePath, probe, subtitleId);
+    let source = await this.subtitleRenditionSource(mediaFile.filePath, probe, subtitleId);
     await fs.rm(cacheDir, { recursive: true, force: true });
     await fs.mkdir(cacheDir, { recursive: true });
     const temporarySubtitlePath = path.join(cacheDir, "subtitle.tmp.vtt");
-    const args = [
-      "-hide_banner", "-y",
-      "-copyts",
-      "-i", source.path,
-      "-map", source.map,
-      "-c:s", "webvtt",
-      temporarySubtitlePath
-    ];
-    logger.full(`[ffmpeg] subtitle rendition ${quoteCommand(this.ffmpeg.ffmpegPath, args)}`);
+    const temporaryAssPath = path.join(cacheDir, "subtitle.tmp.ass");
     try {
+      if (["ass", "ssa"].includes(source.codec)) {
+        const extractArgs = [
+          "-hide_banner", "-y", "-copyts", "-i", source.path,
+          "-map", source.map, "-c:s", "ass", temporaryAssPath
+        ];
+        logger.full(`[ffmpeg] subtitle extraction ${quoteCommand(this.ffmpeg.ffmpegPath, extractArgs)}`);
+        await waitForFfmpeg(this.ffmpeg.spawn(extractArgs), "subtitle extraction");
+        const ass = await fs.readFile(temporaryAssPath, "utf8");
+        await fs.writeFile(temporaryAssPath, prepareAssForWebVtt(ass), "utf8");
+        source = { path: temporaryAssPath, map: "0:0" };
+      }
+      const args = [
+        "-hide_banner", "-y", "-copyts", "-i", source.path,
+        "-map", source.map, "-c:s", "webvtt", temporarySubtitlePath
+      ];
+      logger.full(`[ffmpeg] subtitle rendition ${quoteCommand(this.ffmpeg.ffmpegPath, args)}`);
       await waitForFfmpeg(this.ffmpeg.spawn(args), "subtitle rendition");
-      await addWebVttTimestampMap(temporarySubtitlePath);
+      await prepareWebVtt(temporarySubtitlePath);
       await fs.rename(temporarySubtitlePath, subtitlePath);
     } catch (err) {
       await fs.rm(temporarySubtitlePath, { force: true }).catch(() => {});
       throw err;
+    } finally {
+      await fs.rm(temporaryAssPath, { force: true }).catch((err) => {
+        logger.error(`[hls] temporary subtitle cleanup failed cacheKey=${cacheKey} message="${err.message}"`);
+      });
     }
     const duration = mediaDurationSeconds(probe);
     await fs.writeFile(metadataPath, JSON.stringify({ duration }), "utf8");
@@ -280,7 +293,7 @@ class HlsService {
     if (externalName) {
       const externalPath = await findExternalSubtitleByName(inputPath, externalName);
       if (!externalPath) throw new Error(`Requested sidecar subtitle was not found: ${externalName}`);
-      return { path: externalPath, map: "0:0" };
+      return { path: externalPath, map: "0:0", codec: path.extname(externalPath).slice(1).toLowerCase() };
     }
 
     const cachedName = cachedSubtitleName(subtitleId);
@@ -289,7 +302,7 @@ class HlsService {
       if (!cachedPath || !await fileExists(cachedPath)) {
         throw new Error(`Requested cached subtitle was not found: ${cachedName}`);
       }
-      return { path: cachedPath, map: "0:0" };
+      return { path: cachedPath, map: "0:0", codec: path.extname(cachedPath).slice(1).toLowerCase() };
     }
 
     const requestedIndex = streamIndex(subtitleId);
@@ -300,7 +313,7 @@ class HlsService {
     if (!isTextSubtitleCodec(String(stream.codec_name || "").toLowerCase())) {
       throw new Error(`Subtitle stream ${requestedIndex} cannot be converted to switchable WebVTT`);
     }
-    return { path: inputPath, map: `0:${requestedIndex}` };
+    return { path: inputPath, map: `0:${requestedIndex}`, codec: String(stream.codec_name).toLowerCase() };
   }
 
   getCachedFilePath(cacheKey, filename) {
@@ -2539,13 +2552,72 @@ async function waitForFfmpeg(child, description) {
   });
 }
 
-async function addWebVttTimestampMap(filePath) {
+function prepareAssForWebVtt(content) {
+  let section = "";
+  let fields = [];
+  const invisibleStyles = new Set();
+  return content.split(/\r?\n/).map((line) => {
+    if (/^\[.*\]$/.test(line)) {
+      section = line.toLowerCase();
+      fields = [];
+    }
+    if (line.startsWith("Format:")) {
+      fields = line.slice(7).split(",").map((field) => field.trim().toLowerCase());
+    }
+    if (section === "[v4+ styles]" && line.startsWith("Style:")) {
+      const values = line.slice(6).split(",").map((value) => value.trim());
+      if (["primarycolour", "secondarycolour", "outlinecolour", "backcolour"].every((field) => (
+        /^&HFF[0-9A-F]{6}&?$/i.test(values[fields.indexOf(field)] || "")
+      ))) invisibleStyles.add(values[fields.indexOf("name")]);
+    }
+    if (section !== "[events]" || !line.startsWith("Dialogue:")) return line;
+    if (fields.at(-1) !== "text") throw new Error("Unexpected ASS event format");
+    // FFmpeg normalises ASS fields; only the final Text field may contain commas.
+    const values = line.slice(9).split(",");
+    const prefix = values.slice(0, fields.length - 1);
+    const text = values.slice(fields.length - 1).join(",");
+    const style = prefix[fields.indexOf("style")].trim();
+    if (invisibleStyles.has(style) && !/\\(?:alpha|[1-4]a|r)/i.test(text)) return "";
+    const cleaned = stripAssDrawings(text);
+    const visible = cleaned.replace(/\{[^{}]*\}/g, "").replace(/\\[Nnh]/g, " ").trim();
+    return visible ? `Dialogue:${prefix.join(",")},${cleaned}` : "";
+  }).filter((line) => line !== "").join("\n") + "\n";
+}
+
+function stripAssDrawings(text) {
+  let drawing = false;
+  return text.split(/(\{[^{}]*\})/g).map((part) => {
+    if (part.startsWith("{")) {
+      // Drawing coordinates are outside override blocks, until a p0/reset tag.
+      for (const match of part.matchAll(/\\(?:p(-?\d+)|r[^\\}]*)/g)) {
+        drawing = match[1] !== undefined && Number(match[1]) > 0;
+      }
+      return part;
+    }
+    return drawing ? "" : part;
+  }).join("");
+}
+
+async function prepareWebVtt(filePath) {
   const content = await fs.readFile(filePath, "utf8");
-  if (!content.startsWith("WEBVTT") || content.includes("X-TIMESTAMP-MAP=")) return;
-  const updated = content.replace(
-    /^WEBVTT(?:\r?\n)?/,
-    "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n\n"
-  );
+  if (!content.startsWith("WEBVTT")) throw new Error("Invalid WebVTT subtitle rendition");
+  // Only clean cue payloads; timing, cue settings, and header metadata stay intact.
+  let updated = content.replace(/\r\n/g, "\n").split(/\n{2,}/).map((block) => {
+    const lines = block.split("\n");
+    const timingIndex = lines.findIndex((line) => /^\S+\s+-->\s+\S+/.test(line));
+    if (timingIndex < 0) return block;
+    const text = lines.slice(timingIndex + 1).join("\n")
+      .replace(/\{[^{}]*\}/g, "")
+      .split("\n").filter((line) => line.trim()).join("\n");
+    return text.trim() ? [...lines.slice(0, timingIndex + 1), text].join("\n") : "";
+  }).filter(Boolean).join("\n\n");
+  if (!updated.includes("X-TIMESTAMP-MAP=")) {
+    updated = updated.replace(
+      /^WEBVTT(?:\n)?/,
+      "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0\n"
+    );
+  }
+  updated += "\n\n";
   await fs.writeFile(filePath, updated);
 }
 

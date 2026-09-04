@@ -2044,7 +2044,7 @@ async function openDetails(item, detailOptions = {}) {
   }
 
   state.selected = item;
-  state.selectedPlaybackShuffle = detailOptions.shuffle && isEpisodeItem(item)
+  state.selectedPlaybackShuffle = detailOptions.shuffle && isShufflePlayableItem(item)
     ? createPlaybackShuffle(item, detailOptions.shuffleItems)
     : null;
   state.options = null;
@@ -2481,6 +2481,32 @@ function openRandomEpisode(mediaType, show) {
   openDetails(episode, { shuffle: true, shuffleItems });
 }
 
+async function openRandomCollectionItem(mediaType, folder, button = null) {
+  const originalLabel = button && button.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Choosing...";
+  }
+  try {
+    const params = new URLSearchParams({ folder });
+    const response = await api(`/api/catalog/libraries/${encodeURIComponent(mediaType)}/random-item?${params.toString()}`);
+    if (!response.item) {
+      if (button) button.textContent = "No videos";
+      return;
+    }
+    await openDetails(response.item, { shuffle: true });
+  } catch (err) {
+    if (button) button.textContent = "Try again";
+  } finally {
+    if (button) {
+      window.setTimeout(() => {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }, 1200);
+    }
+  }
+}
+
 function showContentView({ title, subtitle, actions, content }) {
   stopHomeRowLoading();
   hideLiveTvView();
@@ -2538,6 +2564,9 @@ async function openLibraryView(libraryKey, title, folder = "", options = {}) {
     title: folder ? catalogFolderName(folder) : title,
     subtitle: "Loading...",
     actions: [
+      ...(folder && libraryKey === "yt-dlp" && !state.libraryViewToken
+        ? [{ label: "Random video", onClick: (event) => openRandomCollectionItem(libraryKey, folder, event.currentTarget) }]
+        : []),
       ...(folder ? [{ label: "Back", onClick: () => openLibraryView(libraryKey, state.libraryView && state.libraryView.title || title, parentFolderPath(folder), { restore: true }) }] : [])
     ],
     content: section
@@ -6960,6 +6989,22 @@ function isEpisodeItem(item) {
   return item && item.showId && item.season !== undefined;
 }
 
+function shuffleCollectionForItem(item) {
+  const collection = item && item.shuffleCollection;
+  if (!collection || collection.type !== "folder" || !collection.id) {
+    return null;
+  }
+  return {
+    type: "folder",
+    id: String(collection.id),
+    title: String(collection.title || "")
+  };
+}
+
+function isShufflePlayableItem(item) {
+  return Boolean(item && (item.showId || shuffleCollectionForItem(item)));
+}
+
 function isShowCard(item) {
   return Boolean(item)
     && (item.itemType === "show"
@@ -8724,6 +8769,7 @@ async function playStream() {
     mediaType: state.selected.mediaType,
     mediaId: state.selected.id,
     showId: state.selected.showId || null,
+    shuffleCollection: shuffleCollectionForItem(state.selected),
     category: state.selected.category || "",
     title: state.selected.title || "Playback",
     audioOnly: state.selected.itemType === "track",
@@ -8765,11 +8811,12 @@ async function openWebPlayer(url, options = {}) {
       mediaId: options.mediaId,
       audioOnly: Boolean(options.audioOnly),
       showId: options.showId || null,
+      shuffleCollection: shuffleCollectionForItem(options),
       hasSequentialNext: Boolean(options.hasSequentialNext),
       nextItem: options.nextItem || null
     }
     : null;
-  activePlaybackShuffle = options.shuffle && activePlaybackMedia && activePlaybackMedia.showId
+  activePlaybackShuffle = options.shuffle && isShufflePlayableItem(activePlaybackMedia)
     ? createPlaybackShuffle(activePlaybackMedia, options.shuffle.items)
     : null;
   webProgressLastReportedAt = 0;
@@ -9759,14 +9806,14 @@ function createPlaybackShuffle(item, items = []) {
   return {
     enabled: true,
     mediaType: item.mediaType,
-    showId: item.showId,
+    showId: item.showId || null,
+    shuffleCollection: shuffleCollectionForItem(item),
     items: Array.isArray(items) ? items : []
   };
 }
 
 function updateVideoShuffleControl() {
-  const available = Boolean(activePlaybackMedia
-    && activePlaybackMedia.showId
+  const available = Boolean(isShufflePlayableItem(activePlaybackMedia)
     && !activePlaybackMedia.audioOnly
     && !watchTogetherSession);
   const enabled = available && Boolean(activePlaybackShuffle && activePlaybackShuffle.enabled);
@@ -9779,13 +9826,21 @@ function updateVideoShuffleControl() {
 }
 
 async function toggleVideoShuffle() {
-  if (!activePlaybackMedia || !activePlaybackMedia.showId || watchTogetherSession) {
+  if (!isShufflePlayableItem(activePlaybackMedia) || watchTogetherSession) {
     return;
   }
 
   if (activePlaybackShuffle && activePlaybackShuffle.enabled) {
     activePlaybackShuffle = null;
     els.webPlayer.dataset.autoAdvance = activePlaybackMedia.hasSequentialNext ? "true" : "false";
+    updateVideoShuffleControl();
+    return;
+  }
+
+  const collection = shuffleCollectionForItem(activePlaybackMedia);
+  if (collection) {
+    activePlaybackShuffle = createPlaybackShuffle(activePlaybackMedia);
+    els.webPlayer.dataset.autoAdvance = "true";
     updateVideoShuffleControl();
     return;
   }
@@ -9811,9 +9866,21 @@ async function toggleVideoShuffle() {
   }
 }
 
-function randomShuffleItem(currentId) {
+async function randomShuffleItem(currentId) {
   if (!activePlaybackShuffle || !activePlaybackShuffle.enabled) {
     return null;
+  }
+  const collection = shuffleCollectionForItem(activePlaybackShuffle);
+  if (collection) {
+    const params = new URLSearchParams({ folder: collection.id });
+    if (currentId) params.set("exclude", currentId);
+    try {
+      const response = await api(`/api/catalog/libraries/${encodeURIComponent(activePlaybackShuffle.mediaType)}/random-item?${params.toString()}`);
+      return response.item || null;
+    } catch (err) {
+      setPlayerStatus("The next random video could not be loaded.");
+      return null;
+    }
   }
   const items = activePlaybackShuffle.items || [];
   const candidates = items.length > 1
@@ -10341,9 +10408,12 @@ async function handleWebPlayerEnded() {
   const shuffle = activePlaybackShuffle && activePlaybackShuffle.enabled
     ? { ...activePlaybackShuffle, items: [...activePlaybackShuffle.items] }
     : null;
-  const nextItem = els.webPlayer.dataset.autoAdvance === "true"
-    ? randomShuffleItem(activePlaybackMedia && activePlaybackMedia.mediaId) || activePlaybackMedia && activePlaybackMedia.nextItem
+  const shuffledItem = els.webPlayer.dataset.autoAdvance === "true"
+    ? await randomShuffleItem(activePlaybackMedia && activePlaybackMedia.mediaId)
     : null;
+  const nextItem = shuffledItem || (els.webPlayer.dataset.autoAdvance === "true"
+    ? activePlaybackMedia && activePlaybackMedia.nextItem
+    : null);
   if (!nextItem || autoAdvanceInFlight) {
     return;
   }

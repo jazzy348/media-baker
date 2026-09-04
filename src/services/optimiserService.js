@@ -941,12 +941,14 @@ class OptimiserService {
 
     streamPlan.audio.forEach((_, index) => args.push("-map", `${index + 1}:a:0`));
     streamPlan.subtitles.forEach(({ stream }) => args.push("-map", `${sourceInputIndex}:${stream.index}`));
+    streamPlan.attachments.forEach((stream) => args.push("-map", `${sourceInputIndex}:${stream.index}`));
 
     args.push(
       "-c:v",
       "copy",
       ...(streamPlan.audio.length > 0 ? ["-c:a", "copy"] : ["-an"]),
-      ...subtitleEncodingArgs(streamPlan.subtitles, outputPath)
+      ...subtitleEncodingArgs(streamPlan.subtitles, outputPath),
+      ...(streamPlan.attachments.length > 0 ? ["-c:t", "copy"] : [])
     );
     if (path.extname(outputPath).toLowerCase() === ".mp4") {
       args.push("-movflags", "+faststart");
@@ -977,6 +979,15 @@ class OptimiserService {
     }
     if (outputSubtitles.length !== streamPlan.subtitles.length) {
       throw new Error(`Optimised output validation failed: expected ${streamPlan.subtitles.length} subtitle track(s), found ${outputSubtitles.length}`);
+    }
+    const outputAttachments = streamsOfType(outputProbe, "attachment");
+    if (outputAttachments.length !== streamPlan.attachments.length || streamPlan.attachments.some((source, index) => {
+      const output = outputAttachments[index];
+      return source.extradata_size !== output.extradata_size
+        || source.tags?.filename !== output.tags?.filename
+        || source.tags?.mimetype !== output.tags?.mimetype;
+    })) {
+      throw new Error("Optimised output validation failed: subtitle attachments were not preserved");
     }
 
     const progress = combinedProgress(streamPlan.audio.length + 1, onProgress);
@@ -1482,8 +1493,8 @@ function downmixSourceScore(stream) {
   return score;
 }
 
-function selectRetainedSubtitles(subtitleStreams) {
-  return subtitleStreams.map((stream) => ({
+function selectRetainedSubtitles(subtitleStreams, preferredLanguage) {
+  return subtitleStreams.filter((stream) => languageMatches(stream, preferredLanguage)).map((stream) => ({
     stream,
     forced: isForcedSubtitle(stream)
   }));
@@ -1502,7 +1513,7 @@ function createOptimiserStreamPlan(probe, settings, audioLanguages) {
     retainedAudio = selectOneAudioPerLanguage(retainedAudio, audioLanguages);
   }
   const retainedSubtitles = settings.preserveSubtitles
-    ? selectRetainedSubtitles(streamsOfType(probe, "subtitle"))
+    ? selectRetainedSubtitles(streamsOfType(probe, "subtitle"), audioLanguages.preferred)
     : [];
 
   return {
@@ -1513,6 +1524,7 @@ function createOptimiserStreamPlan(probe, settings, audioLanguages) {
       preserveHdr
     },
     audio: retainedAudio.map((stream) => plannedStream(stream, probe)),
+    attachments: retainedSubtitles.length > 0 ? streamsOfType(probe, "attachment") : [],
     subtitles: retainedSubtitles.map((subtitle) => ({
       ...subtitle,
       durationSeconds: streamDurationSeconds(subtitle.stream, probe)
@@ -1648,7 +1660,9 @@ function isAlreadyOptimized(filePath, probe, outputPath, settings, audioLanguage
   if (settings.downmixToStereo) {
     retainedAudio = selectOneAudioPerLanguage(retainedAudio, audioLanguages);
   }
-  const retainedSubtitles = settings.preserveSubtitles ? selectRetainedSubtitles(subtitles) : [];
+  const retainedSubtitles = settings.preserveSubtitles
+    ? selectRetainedSubtitles(subtitles, audioLanguages.preferred)
+    : [];
   if (extension === ".mp4" && path.extname(outputPath).toLowerCase() === ".mp4") {
     const videoCodec = String(video && video.codec_name || "").toLowerCase();
     if (
