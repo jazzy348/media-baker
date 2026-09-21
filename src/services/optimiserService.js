@@ -357,6 +357,7 @@ class OptimiserService {
       audioLanguages
     );
     const outputPath = optimizedOutputPath(item.filePath, streamPlan);
+    const outputDiffersFromSource = path.resolve(item.filePath).toLowerCase() !== path.resolve(outputPath).toLowerCase();
     if (isAlreadyOptimized(item.filePath, probe, outputPath, settings, audioLanguages)) {
       logFull(`[optimiser] skipped already-optimised file="${item.filePath}"`);
       return "skipped";
@@ -368,7 +369,19 @@ class OptimiserService {
       return "locked";
     }
 
+    let outputLock = null;
     try {
+      if (outputDiffersFromSource) {
+        outputLock = await claimOptimiserLock(outputPath, this.instanceId, Boolean(options.allowStaleLockReclaim));
+        if (!outputLock) {
+          logFull(`[optimiser] skipped locked destination output="${outputPath}"`);
+          return "locked";
+        }
+        if (await regularFileExists(outputPath)) {
+          throw new Error(`Optimiser destination already exists and will not be overwritten: ${outputPath}`);
+        }
+      }
+      const activeLock = outputLock ? combinedOptimiserLock(lock, outputLock) : lock;
       const lockedSourceSnapshot = await stableSourceSnapshot(item.filePath);
       if (!lockedSourceSnapshot
         || lockedSourceSnapshot.size !== sourceSnapshot.size
@@ -376,7 +389,8 @@ class OptimiserService {
         logFull(`[optimiser] deferred source changed before lock file="${item.filePath}"`);
         return "deferred";
       }
-      const tempPath = path.join(path.dirname(outputPath), `.${path.basename(outputPath)}.media-baker.tmp${path.extname(outputPath)}`);
+      const tempId = crypto.randomBytes(8).toString("hex");
+      const tempPath = path.join(path.dirname(outputPath), `.${path.basename(outputPath)}.${tempId}.media-baker.tmp${path.extname(outputPath)}`);
       const videoTempPath = `${tempPath}.video.mkv`;
       const audioSourceTempPath = `${tempPath}.audio-source.mka`;
       const audioTempPaths = streamPlan.audio.map((_, index) => `${tempPath}.audio-${index}.mka`);
@@ -418,7 +432,7 @@ class OptimiserService {
             outputPath,
             videoTempPath,
             videoArgs,
-            lock,
+            activeLock,
             streamPlan.video.durationSeconds,
             currentJob
           );
@@ -442,7 +456,7 @@ class OptimiserService {
             outputPath,
             videoTempPath,
             videoArgs,
-            lock,
+            activeLock,
             streamPlan.video.durationSeconds,
             currentJob
           );
@@ -475,7 +489,7 @@ class OptimiserService {
               outputPath,
               audioSourceTempPath,
               extractArgs,
-              lock,
+              activeLock,
               Math.max(...streamPlan.audio.map((audio) => audio.durationSeconds)),
               currentJob
             );
@@ -522,7 +536,7 @@ class OptimiserService {
               outputPath,
               audioTempPaths[index],
               audioArgs,
-              lock,
+              activeLock,
               plannedAudio.durationSeconds,
               currentJob
             );
@@ -563,7 +577,7 @@ class OptimiserService {
           outputPath,
           tempPath,
           muxArgs,
-          lock,
+          activeLock,
           mediaDurationSeconds(item, probe),
           currentJob
         );
@@ -593,6 +607,7 @@ class OptimiserService {
       logFull(`[optimiser] complete input="${item.filePath}" output="${outputPath}"`);
       return "processed";
     } finally {
+      if (outputLock) await outputLock.release();
       await lock.release();
     }
   }
@@ -2237,6 +2252,14 @@ function createOptimiserLockHandle(lockPath, lock) {
   };
 }
 
+function combinedOptimiserLock(...locks) {
+  return {
+    async touch() {
+      await Promise.all(locks.map((lock) => lock.touch()));
+    }
+  };
+}
+
 async function readOptimiserLock(lockPath) {
   try {
     return JSON.parse(await fs.readFile(lockPath, "utf8"));
@@ -2283,8 +2306,8 @@ async function replaceOriginal(inputPath, outputPath, tempPath) {
   const samePath = path.resolve(inputPath).toLowerCase() === path.resolve(outputPath).toLowerCase();
   const backupPath = `${inputPath}.media-baker-backup`;
   await fs.rm(backupPath, { force: true });
-  if (!samePath) {
-    await fs.rm(outputPath, { force: true });
+  if (!samePath && await regularFileExists(outputPath)) {
+    throw new Error(`Optimiser destination already exists and will not be overwritten: ${outputPath}`);
   }
   await fs.rename(inputPath, backupPath);
   try {
@@ -2296,6 +2319,15 @@ async function replaceOriginal(inputPath, outputPath, tempPath) {
   }
   if (!samePath) {
     await fs.rm(inputPath, { force: true });
+  }
+}
+
+async function regularFileExists(filePath) {
+  try {
+    return (await fs.stat(filePath)).isFile();
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
   }
 }
 

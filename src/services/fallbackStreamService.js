@@ -20,18 +20,21 @@ class FallbackStreamService {
       return;
     }
 
+    this.ready = await this.ensurePrepared();
+  }
+
+  async ensurePrepared() {
+
     if (!await fileExists(this.config.sourcePath)) {
-      this.ready = false;
-      logger.info(`[fallback] source missing; fallback stream disabled source="${this.config.sourcePath}"`);
-      return;
+      logger.info(`[fallback] source missing source="${this.config.sourcePath}"`);
+      return false;
     }
 
     await fs.mkdir(this.config.cachePath, { recursive: true });
     const sourceStat = await fs.stat(this.config.sourcePath);
     if (await this.isCurrent(sourceStat)) {
-      this.ready = true;
       logger.info(`[fallback] using cached fallback HLS playlist="${this.playlistPath}"`);
-      return;
+      return true;
     }
 
     logger.info(`[fallback] generating fallback HLS source="${this.config.sourcePath}" cache="${this.config.cachePath}"`);
@@ -80,8 +83,8 @@ class FallbackStreamService {
       segmentSeconds: this.config.segmentSeconds,
       generatedAt: new Date().toISOString()
     }, null, 2));
-    this.ready = true;
     logger.info(`[fallback] generated fallback HLS playlist="${this.playlistPath}"`);
+    return true;
   }
 
   async isCurrent(sourceStat) {

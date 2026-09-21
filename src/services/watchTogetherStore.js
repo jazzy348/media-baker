@@ -18,7 +18,9 @@ class WatchTogetherStore {
         `SELECT room_id, invite_hash, host_user_id, host_name, media_type, media_id,
                 media_title, library_title, duration_seconds, stream_options_json,
                 playback_state, position_seconds, state_changed_at,
-                everyone_can_control, created_at, updated_at, expires_at
+                everyone_can_control, everyone_can_queue, queue_json,
+                current_queue_index, queue_revision,
+                created_at, updated_at, expires_at
          FROM watch_together_rooms
          WHERE expires_at > CURRENT_TIMESTAMP(3)`
       );
@@ -36,20 +38,27 @@ class WatchTogetherStore {
           (room_id, invite_hash, host_user_id, host_name, media_type, media_id,
            media_title, library_title, duration_seconds, stream_options_json,
            playback_state, position_seconds, state_changed_at,
-           everyone_can_control, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           everyone_can_control, everyone_can_queue, queue_json,
+           current_queue_index, queue_revision, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           host_name = VALUES(host_name), media_title = VALUES(media_title),
+           host_name = VALUES(host_name), media_type = VALUES(media_type),
+           media_id = VALUES(media_id), media_title = VALUES(media_title),
            library_title = VALUES(library_title), duration_seconds = VALUES(duration_seconds),
            stream_options_json = VALUES(stream_options_json), playback_state = VALUES(playback_state),
            position_seconds = VALUES(position_seconds), state_changed_at = VALUES(state_changed_at),
-           everyone_can_control = VALUES(everyone_can_control), expires_at = VALUES(expires_at),
+           everyone_can_control = VALUES(everyone_can_control),
+           everyone_can_queue = VALUES(everyone_can_queue), queue_json = VALUES(queue_json),
+           current_queue_index = VALUES(current_queue_index), queue_revision = VALUES(queue_revision),
+           expires_at = VALUES(expires_at),
            updated_at = CURRENT_TIMESTAMP(3)`,
         [
           room.id, room.inviteHash, room.hostUserId, room.hostName, room.mediaType, room.mediaId,
           room.mediaTitle, room.libraryTitle, room.durationSeconds, JSON.stringify(room.streamOptions || {}),
           room.playbackState, room.positionSeconds, new Date(room.stateChangedAt),
-          room.everyoneCanControl ? 1 : 0, new Date(room.createdAt), new Date(room.expiresAt)
+          room.everyoneCanControl ? 1 : 0, room.everyoneCanQueue ? 1 : 0,
+          JSON.stringify(room.queue || []), Number(room.currentQueueIndex) || 0,
+          Number(room.queueRevision) || 1, new Date(room.createdAt), new Date(room.expiresAt)
         ]
       );
       return;
@@ -98,6 +107,10 @@ class WatchTogetherStore {
           position_seconds DOUBLE NOT NULL DEFAULT 0,
           state_changed_at DATETIME(3) NOT NULL,
           everyone_can_control TINYINT(1) NOT NULL DEFAULT 0,
+          everyone_can_queue TINYINT(1) NOT NULL DEFAULT 0,
+          queue_json LONGTEXT NOT NULL,
+          current_queue_index INT NOT NULL DEFAULT 0,
+          queue_revision INT NOT NULL DEFAULT 1,
           created_at DATETIME(3) NOT NULL,
           updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
           expires_at DATETIME(3) NOT NULL,
@@ -106,6 +119,10 @@ class WatchTogetherStore {
           INDEX idx_watch_together_expires (expires_at)
         )
       `);
+      await ensureColumn(this.pool, "watch_together_rooms", "everyone_can_queue", "TINYINT(1) NOT NULL DEFAULT 0");
+      await ensureColumn(this.pool, "watch_together_rooms", "queue_json", "LONGTEXT NULL");
+      await ensureColumn(this.pool, "watch_together_rooms", "current_queue_index", "INT NOT NULL DEFAULT 0");
+      await ensureColumn(this.pool, "watch_together_rooms", "queue_revision", "INT NOT NULL DEFAULT 1");
     }
     this.initialized = true;
   }
@@ -167,14 +184,32 @@ function fromMysql(row) {
     positionSeconds: Number(row.position_seconds) || 0,
     stateChangedAt: new Date(row.state_changed_at).toISOString(),
     everyoneCanControl: Boolean(row.everyone_can_control),
+    everyoneCanQueue: Boolean(row.everyone_can_queue),
+    queue: parseJson(row.queue_json, []),
+    currentQueueIndex: Number(row.current_queue_index) || 0,
+    queueRevision: Number(row.queue_revision) || 1,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
     expiresAt: new Date(row.expires_at).toISOString()
   };
 }
 
+function parseJson(value, fallback) {
+  if (value && typeof value === "object") return value;
+  try { return JSON.parse(value || "null") || fallback; } catch (err) { return fallback; }
+}
+
+async function ensureColumn(pool, table, column, definition) {
+  const [rows] = await pool.execute(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column]
+  );
+  if (rows.length === 0) await pool.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
 function serializable(room) {
-  const { participants, chat, bannedKeys, emptyTimer, ...stored } = room;
+  const { participants, chat, bannedKeys, emptyTimer, resumeWhenReady, readinessRevision, transitioning, ...stored } = room;
   return stored;
 }
 

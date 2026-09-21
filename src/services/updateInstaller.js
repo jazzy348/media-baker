@@ -33,6 +33,7 @@ async function installRelease(payload, appendLog) {
     for (const entry of releaseEntries) {
       await fs.cp(path.join(payload.releasePath, entry), path.join(payload.appPath, entry), { recursive: true, force: true });
     }
+    await restoreUserIcons(payload.appPath, payload.releasePath, backupPath);
   } catch (err) {
     await appendLog(`Replacement failed; restoring ${backupPath}`);
     await restoreBackup(payload.appPath, backupPath);
@@ -41,6 +42,45 @@ async function installRelease(payload, appendLog) {
 
   await fs.rm(payload.stagePath, { recursive: true, force: true });
   await appendLog(`Installed Media Baker ${payload.version}`);
+}
+
+async function restoreUserIcons(appPath, releasePath, backupPath) {
+  const previousIcons = path.join(backupPath, "public", "icons");
+  const releaseIcons = path.join(releasePath, "public", "icons");
+  const installedIcons = path.join(appPath, "public", "icons");
+  for (const relativePath of await filesBelow(previousIcons)) {
+    if (await exists(path.join(releaseIcons, relativePath))) continue;
+    const destination = path.join(installedIcons, relativePath);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(path.join(previousIcons, relativePath), destination);
+  }
+}
+
+async function filesBelow(rootPath) {
+  const files = [];
+  const visit = async (currentPath) => {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch((err) => {
+      if (err.code === "ENOENT") return [];
+      throw err;
+    });
+    for (const entry of entries) {
+      const entryPath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) await visit(entryPath);
+      else if (entry.isFile()) files.push(path.relative(rootPath, entryPath));
+    }
+  };
+  await visit(rootPath);
+  return files;
+}
+
+async function exists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (err) {
+    if (err.code === "ENOENT") return false;
+    throw err;
+  }
 }
 
 async function managedEntries(rootPath) {

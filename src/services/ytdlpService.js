@@ -87,6 +87,15 @@ class YtDlpService {
     }
   }
 
+  shutdown() {
+    this.stop();
+    for (const record of this.downloads.values()) {
+      if (!record.child) continue;
+      record.cancelled = true;
+      record.child.kill("SIGTERM");
+    }
+  }
+
   restart() {
     this.validation = null;
     this.validationAt = 0;
@@ -330,6 +339,7 @@ class YtDlpService {
     logger.info(`[yt-dlp] establishing channel baseline id=${subscription.id} channel="${logValue(subscription.title)}"`);
     await execOutput(this.config.binaryPath, [
       "--simulate",
+      ...ytdlpRuntimeArgs(),
       "--force-write-archive",
       "--download-archive", archivePath,
       "--playlist-end", "1",
@@ -1248,10 +1258,39 @@ function rememberDownloadDiagnostics(record, output) {
 }
 
 function ytdlpFailureMessage(record, code) {
-  const useful = record.diagnostics.filter((line) => /(?:error|warning|unavailable|private|sign in|confirm|format|forbidden|unsupported|unable|failed|http\s+\d{3})/i.test(line));
-  const selected = (useful.length > 0 ? useful : record.diagnostics).slice(-8);
-  const detail = selected.join(" | ").replace(/\s+/g, " ").trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
+  const diagnostics = uniqueDiagnostics(record.diagnostics);
+  const errors = diagnostics.filter((line) => /^error\s*:/i.test(line));
+  const warnings = diagnostics.filter((line) => /^warning\s*:/i.test(line));
+  const useful = diagnostics.filter((line) => (
+    !/^warning\s*:/i.test(line)
+    && /(?:error|unavailable|private|sign in|confirm|format|forbidden|unsupported|unable|failed|http\s+\d{3})/i.test(line)
+  ));
+  const primary = errors.length > 0 ? errors : useful.length > 0 ? useful : diagnostics;
+  const sections = [];
+  if (primary.length > 0) {
+    sections.push(primary.slice(-4).join(" | "));
+  }
+  if (warnings.length > 0) {
+    sections.push(`Warnings: ${warnings.slice(-2).map(stripDiagnosticLevel).join(" | ")}`);
+  }
+  const detail = sections.join(" | ").replace(/\s+/g, " ").trim().slice(0, MAX_DIAGNOSTIC_LENGTH);
   return detail ? `yt-dlp exited with code ${code}: ${detail}` : `yt-dlp exited with code ${code}`;
+}
+
+function uniqueDiagnostics(lines) {
+  const seen = new Set();
+  return lines.reduce((result, line) => {
+    const normalized = String(line || "").replace(/\s+/g, " ").trim();
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) return result;
+    seen.add(key);
+    result.push(normalized);
+    return result;
+  }, []);
+}
+
+function stripDiagnosticLevel(line) {
+  return String(line || "").replace(/^warning\s*:\s*/i, "");
 }
 
 function logValue(value) {

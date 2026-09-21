@@ -16,6 +16,9 @@
       const start = url.searchParams.get("start");
       return { name: "live-tv", start: start ? new Date(start) : new Date(), pinnedToNow: !start };
     }
+    if (segments[0] === "stream-queues" && segments.length === 1) {
+      return { name: "stream-queues" };
+    }
     if (segments[0] === "watch" && segments[1] && segments.length === 2) {
       return { name: "watch", inviteToken: segments[1] };
     }
@@ -108,6 +111,10 @@
     return "/watch-ended";
   }
 
+  function streamQueuesPath() {
+    return "/stream-queues";
+  }
+
   function artistPath(libraryKey, artistId) {
     return `${libraryPath(libraryKey)}/artists/${encodeURIComponent(artistId)}`;
   }
@@ -137,6 +144,7 @@
     albumPath,
     liveTvPath,
     watchPath,
-    watchEndedPath
+    watchEndedPath,
+    streamQueuesPath
   });
 })(window);

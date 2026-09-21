@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
 const { resolveMediaFile } = require("./mediaResolver");
+const { createMediaQueueItem, MAX_QUEUE_ITEMS, publicQueueItem } = require("./mediaQueue");
 const logger = require("../utils/logger");
 
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
@@ -18,7 +19,7 @@ class WatchTogetherService {
     this.rooms = new Map();
     this.invites = new Map();
     this.tickets = new Map();
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
     this.stateTimer = null;
     this.heartbeatTimer = null;
   }
@@ -26,7 +27,13 @@ class WatchTogetherService {
   async init() {
     for (const stored of await this.store.list()) {
       const room = runtimeRoom(stored);
-      room.positionSeconds = currentPosition(room);
+      if (!currentQueueItem(room)) {
+        await this.store.remove(room.id);
+        continue;
+      }
+      const storedPosition = currentPosition(room);
+      activateCurrentQueueItem(room);
+      room.positionSeconds = storedPosition;
       room.playbackState = "paused";
       room.stateChangedAt = new Date().toISOString();
       this.rooms.set(room.id, room);
@@ -62,9 +69,23 @@ class WatchTogetherService {
     });
   }
 
-  async create({ user, mediaType, mediaFile, library, streamOptions, durationSeconds, completionStartSeconds }) {
+  async create({ user, mediaType, mediaFile, library, streamOptions, skipMarkers, durationSeconds, completionStartSeconds }) {
     const now = Date.now();
     const inviteToken = randomToken(24);
+    const firstItem = {
+      id: crypto.randomBytes(10).toString("hex"),
+      mediaType,
+      mediaId: mediaFile.id,
+      libraryTitle: library.title,
+      title: mediaFile.title || mediaFile.episodeName || mediaFile.filename,
+      durationSeconds: Number(durationSeconds) || Number(mediaFile.durationSeconds) || 0,
+      streamOptions: { ...streamOptions },
+      skipMarkers: Array.isArray(skipMarkers) ? skipMarkers : [],
+      completionStartSeconds: Number(completionStartSeconds) || null,
+      addedByUserId: user.id,
+      addedByName: user.username,
+      addedAt: new Date(now).toISOString()
+    };
     const room = runtimeRoom({
       id: crypto.randomBytes(12).toString("hex"),
       inviteHash: hash(inviteToken),
@@ -72,14 +93,19 @@ class WatchTogetherService {
       hostName: user.username,
       mediaType,
       mediaId: mediaFile.id,
-      mediaTitle: mediaFile.title || mediaFile.episodeName || mediaFile.filename,
+      mediaTitle: firstItem.title,
       libraryTitle: library.title,
-      durationSeconds: Number(durationSeconds) || Number(mediaFile.durationSeconds) || 0,
-      streamOptions: { ...streamOptions, completionStartSeconds: Number(completionStartSeconds) || null },
+      durationSeconds: firstItem.durationSeconds,
+      streamOptions: { ...streamOptions, completionStartSeconds: firstItem.completionStartSeconds },
+      skipMarkers: firstItem.skipMarkers,
+      queue: [firstItem],
+      currentQueueIndex: 0,
+      queueRevision: 1,
       playbackState: "paused",
       positionSeconds: 0,
       stateChangedAt: new Date(now).toISOString(),
       everyoneCanControl: false,
+      everyoneCanQueue: false,
       createdAt: new Date(now).toISOString(),
       updatedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + ROOM_TTL_MS).toISOString()
@@ -119,6 +145,7 @@ class WatchTogetherService {
         removed: false,
         everConnected: false,
         ws: null,
+        permissions: user ? { ...user.permissions } : null,
         lastProgressAt: 0,
         lastChatAt: 0
       };
@@ -136,27 +163,23 @@ class WatchTogetherService {
     clearTimeout(room.emptyTimer);
     room.emptyTimer = null;
 
-    const options = room.streamOptions || {};
-    const token = this.playbackTokens.createWatchStreamToken(room.id, participant.id, room.mediaType, room.mediaId);
-    const query = new URLSearchParams({
-      audio: options.audio || "",
-      subtitle: options.subtitle || "none",
-      audioChannels: options.audioChannels || "preserve",
-      quality: options.quality || "original",
-      playbackToken: token
-    });
+    const playback = playbackItem(room, participant, this.playbackTokens);
+    if (!playback) throw statusError(409, "This Watch Together queue has finished");
     return {
       room: publicRoom(room),
       participant: publicParticipant(participant),
       ticket,
-      streamUrl: `/api/watch-streams/${encodeURIComponent(room.mediaType)}/${encodeURIComponent(room.mediaId)}/master.m3u8?${query}`
+      ...playback
     };
   }
 
   authorizePlayback(payload) {
     const room = payload && this.rooms.get(payload.roomId);
     const participant = room && room.participants.get(payload.participantId);
-    return Boolean(room && participant && !participant.removed && Date.parse(room.expiresAt) > Date.now());
+    const queued = room && room.queue.some((item) => (
+      item.mediaType === payload.mediaType && item.mediaId === payload.mediaId
+    ));
+    return Boolean(room && participant && queued && !participant.removed && Date.parse(room.expiresAt) > Date.now());
   }
 
   activeRooms() {
@@ -181,13 +204,20 @@ class WatchTogetherService {
     participant.ws = ws;
     participant.connected = true;
     participant.ready = false;
+    if (room.resumeWhenReady) participant.requiredForPlayback = false;
     participant.everConnected = true;
     participant.alive = true;
     clearTimeout(room.emptyTimer);
     room.emptyTimer = null;
 
     ws.on("pong", () => { participant.alive = true; });
-    ws.on("message", (data) => this.onMessage(room, participant, data));
+    ws.on("message", (data) => {
+      try {
+        this.onMessage(room, participant, data);
+      } catch (err) {
+        logger.full(`[watch-together] invalid message room=${room.id} participant=${participant.id} message="${err.message}"`);
+      }
+    });
     ws.on("close", (code) => this.onDisconnect(room, participant, ws, code));
     ws.on("error", (err) => logger.full(`[watch-together] socket error room=${room.id} participant=${participant.id} message="${err.message}"`));
 
@@ -215,6 +245,7 @@ class WatchTogetherService {
         : `${participant.displayName} left.`);
     }
     this.broadcast(room, { type: "participants", participants: participantList(room) });
+    this.resumeWhenBuffered(room).catch((err) => logger.error(`[watch-together] playback resume failed room=${room.id} message="${err.message}"`, err));
     if (![...room.participants.values()].some((entry) => entry.connected)) this.scheduleEmptyCleanup(room);
   }
 
@@ -222,7 +253,10 @@ class WatchTogetherService {
     if (raw.length > 16 * 1024) return;
     let message;
     try { message = JSON.parse(raw.toString("utf8")); } catch (err) { return; }
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
     if (message.type === "ready") {
+      if (Number(message.queueRevision) !== Number(room.queueRevision)) return;
+      if (Number(message.readinessRevision) !== room.readinessRevision) return;
       participant.ready = Boolean(message.ready);
       if (participant.ready && room.playbackStarted && !participant.requiredForPlayback) {
         participant.requiredForPlayback = true;
@@ -236,6 +270,7 @@ class WatchTogetherService {
         this.broadcast(room, { type: "room", room: publicRoom(room) });
       }
       this.broadcast(room, { type: "participants", participants: participantList(room) });
+      this.resumeWhenBuffered(room).catch((err) => logger.error(`[watch-together] playback resume failed room=${room.id} message="${err.message}"`, err));
       return;
     }
     if (message.type === "chat") {
@@ -255,7 +290,34 @@ class WatchTogetherService {
       return;
     }
     if (message.type === "permissions") {
-      this.changePermissions(room, participant, Boolean(message.everyoneCanControl));
+      this.changePermissions(room, participant, message);
+      return;
+    }
+    if (message.type === "queue-add") {
+      this.addQueueItem(room, participant, message).catch((err) => send(participant.ws, { type: "error", message: err.message }));
+      return;
+    }
+    if (message.type === "queue-remove") {
+      this.removeQueueItem(room, participant, String(message.itemId || "")).catch((err) => send(participant.ws, { type: "error", message: err.message }));
+      return;
+    }
+    if (message.type === "queue-order") {
+      this.reorderQueue(room, participant, message.itemIds).catch((err) => send(participant.ws, { type: "error", message: err.message }));
+      return;
+    }
+    if (message.type === "queue-skip") {
+      if (canControl(room, participant)) {
+        this.advanceQueue(room, `${participant.displayName} skipped the current item.`).catch((err) => send(participant.ws, { type: "error", message: err.message }));
+      }
+      return;
+    }
+    if (message.type === "ended") {
+      const current = currentQueueItem(room);
+      const nearEnd = current && current.id === message.itemId
+        && currentPosition(room) >= Math.max(0, room.durationSeconds - 5);
+      if (nearEnd) {
+        this.advanceQueue(room, null).catch((err) => logger.error(`[watch-together] advance failed room=${room.id} message="${err.message}"`, err));
+      }
       return;
     }
     if (message.type === "close-room") {
@@ -269,7 +331,7 @@ class WatchTogetherService {
   }
 
   async control(room, participant, message) {
-    if (!participant.isHost && !room.everyoneCanControl) throw statusError(403, "Only the host can control playback");
+    if (!canControl(room, participant)) throw statusError(403, "Only the host can control playback");
     const action = String(message.action || "");
     const before = currentPosition(room);
     const requested = Number(message.positionSeconds);
@@ -280,29 +342,37 @@ class WatchTogetherService {
         throw statusError(409, `Waiting for ${waiting.length} participant${waiting.length === 1 ? "" : "s"} to buffer`);
       }
       room.playbackStarted = true;
+      room.resumeWhenReady = false;
       room.positionSeconds = position;
       room.playbackState = "playing";
       room.stateChangedAt = new Date().toISOString();
       this.system(room, `${participant.displayName} started playback.`);
     } else if (action === "pause") {
+      room.resumeWhenReady = false;
       room.positionSeconds = position;
       room.playbackState = "paused";
       room.stateChangedAt = new Date().toISOString();
       this.system(room, `${participant.displayName} paused playback.`);
     } else if (action === "seek") {
+      room.resumeWhenReady = room.playbackState === "playing" || room.resumeWhenReady === "seek"
+        ? "seek"
+        : false;
+      room.readinessRevision += 1;
       room.positionSeconds = position;
       room.playbackState = "paused";
       room.stateChangedAt = new Date().toISOString();
       for (const entry of room.participants.values()) {
         if (entry.requiredForPlayback && !entry.removed) entry.ready = false;
       }
-      this.broadcast(room, { type: "participants", participants: participantList(room) });
-      this.system(room, `${participant.displayName} seeked to ${formatTime(position)}. Waiting for everyone to buffer.`);
+      this.system(room, room.resumeWhenReady
+        ? `${participant.displayName} seeked to ${formatTime(position)}. Waiting for everyone to buffer.`
+        : `${participant.displayName} seeked to ${formatTime(position)}.`);
     } else {
       return;
     }
     await this.store.save(room);
     this.broadcast(room, { type: "state", state: stateSnapshot(room), actorId: participant.id, reason: action });
+    if (action === "seek") this.broadcast(room, { type: "participants", participants: participantList(room) });
   }
 
   kick(room, actor, participantId) {
@@ -317,16 +387,151 @@ class WatchTogetherService {
     target.ws?.close(4003, "Removed");
     room.participants.delete(target.id);
     this.broadcast(room, { type: "participants", participants: participantList(room) });
+    this.resumeWhenBuffered(room).catch((err) => logger.error(`[watch-together] playback resume failed room=${room.id} message="${err.message}"`, err));
   }
 
-  changePermissions(room, actor, enabled) {
-    if (!actor.isHost || room.everyoneCanControl === enabled) return;
-    room.everyoneCanControl = enabled;
+  changePermissions(room, actor, message) {
+    if (!actor.isHost) return;
+    const controlEnabled = Boolean(message.everyoneCanControl);
+    const queueEnabled = Boolean(message.everyoneCanQueue);
+    if (room.everyoneCanControl === controlEnabled && room.everyoneCanQueue === queueEnabled) return;
+    const controlChanged = room.everyoneCanControl !== controlEnabled;
+    const queueChanged = room.everyoneCanQueue !== queueEnabled;
+    room.everyoneCanControl = controlEnabled;
+    room.everyoneCanQueue = queueEnabled;
     this.store.save(room).catch((err) => logger.error(`[watch-together] save failed message="${err.message}"`, err));
-    this.system(room, enabled
-      ? `${actor.displayName} allowed everyone to control playback.`
-      : `${actor.displayName} limited playback controls to the host.`);
+    if (controlChanged) {
+      this.system(room, controlEnabled
+        ? `${actor.displayName} allowed everyone to control playback.`
+        : `${actor.displayName} limited playback controls to the host.`);
+    }
+    if (queueChanged) {
+      this.system(room, queueEnabled
+        ? `${actor.displayName} allowed signed-in participants to add to the queue.`
+        : `${actor.displayName} limited queue additions to the host.`);
+    }
     this.broadcast(room, { type: "room", room: publicRoom(room) });
+  }
+
+  async addQueueItem(room, participant, message) {
+    if (!participant.userId) throw statusError(403, "Sign in to add media to the queue");
+    if (!participant.isHost && !room.everyoneCanQueue) throw statusError(403, "Only the host can add to the queue");
+    if (room.queue.length >= MAX_QUEUE_ITEMS) throw statusError(409, `A room queue can contain at most ${MAX_QUEUE_ITEMS} items`);
+    const actor = {
+      id: participant.userId,
+      username: participant.displayName,
+      permissions: participant.permissions || {}
+    };
+    const item = await createMediaQueueItem({
+      mediaIndex: this.mediaIndex,
+      skipDetection: this.skipDetection,
+      actor,
+      mediaType: String(message.mediaType || ""),
+      mediaId: String(message.mediaId || ""),
+      streamOptions: message.streamOptions || {}
+    });
+    const wasFinished = room.currentQueueIndex >= room.queue.length;
+    room.queue.push(item);
+    room.updatedAt = new Date().toISOString();
+    this.system(room, `${participant.displayName} added ${item.title} to the queue.`);
+    if (wasFinished) {
+      room.currentQueueIndex = room.queue.length - 1;
+      room.queueRevision += 1;
+      activateCurrentQueueItem(room);
+      resetParticipantReadiness(room);
+      await this.store.save(room);
+      this.broadcastRoomAndPlayback(room);
+      return;
+    }
+    await this.store.save(room);
+    this.broadcast(room, { type: "room", room: publicRoom(room) });
+  }
+
+  async removeQueueItem(room, participant, itemId) {
+    if (!participant.isHost) throw statusError(403, "Only the host can remove queued media");
+    const index = room.queue.findIndex((item) => item.id === itemId);
+    if (index <= room.currentQueueIndex) throw statusError(409, "The current or completed item cannot be removed");
+    const [removed] = room.queue.splice(index, 1);
+    room.updatedAt = new Date().toISOString();
+    await this.store.save(room);
+    this.system(room, `${participant.displayName} removed ${removed.title} from the queue.`);
+    this.broadcast(room, { type: "room", room: publicRoom(room) });
+  }
+
+  async reorderQueue(room, participant, itemIds) {
+    if (!participant.isHost) throw statusError(403, "Only the host can reorder the queue");
+    const future = room.queue.slice(room.currentQueueIndex + 1);
+    const requested = Array.isArray(itemIds) ? itemIds.map(String) : [];
+    const byId = new Map(future.map((item) => [item.id, item]));
+    if (requested.length !== future.length || new Set(requested).size !== requested.length) {
+      throw statusError(400, "Provide every upcoming item exactly once");
+    }
+    const ordered = requested.map((id) => byId.get(id));
+    if (ordered.some((item) => !item)) throw statusError(400, "Queue order contains an unknown item");
+    room.queue = [...room.queue.slice(0, room.currentQueueIndex + 1), ...ordered];
+    room.updatedAt = new Date().toISOString();
+    await this.store.save(room);
+    this.system(room, `${participant.displayName} reordered the queue.`);
+    this.broadcast(room, { type: "room", room: publicRoom(room) });
+  }
+
+  async advanceQueue(room, announcement) {
+    if (room.transitioning) return;
+    room.transitioning = true;
+    try {
+      const previous = currentQueueItem(room);
+      room.positionSeconds = room.durationSeconds;
+      room.playbackState = "paused";
+      room.stateChangedAt = new Date().toISOString();
+      room.currentQueueIndex += 1;
+      room.queueRevision += 1;
+      room.resumeWhenReady = room.currentQueueIndex < room.queue.length ? "queue" : false;
+      if (announcement) this.system(room, announcement);
+      if (!currentQueueItem(room)) {
+        room.resumeWhenReady = false;
+        await this.store.save(room);
+        this.system(room, previous ? `${previous.title} finished. The queue is empty.` : "The queue is empty.");
+        this.broadcast(room, { type: "room", room: publicRoom(room) });
+        this.broadcast(room, { type: "state", state: stateSnapshot(room), reason: "queue-finished" });
+        return;
+      }
+      activateCurrentQueueItem(room);
+      resetParticipantReadiness(room);
+      await this.store.save(room);
+      this.system(room, `Up next: ${room.mediaTitle}. Waiting for everyone to buffer.`);
+      this.broadcastRoomAndPlayback(room);
+    } finally {
+      room.transitioning = false;
+    }
+  }
+
+  async resumeWhenBuffered(room) {
+    if (!room.resumeWhenReady || participantsWaitingForBuffer(room).length > 0) return;
+    if (![...room.participants.values()].some((participant) => participant.connected && !participant.removed)) return;
+    const reason = room.resumeWhenReady;
+    room.resumeWhenReady = false;
+    room.playbackStarted = true;
+    if (reason === "queue") room.positionSeconds = 0;
+    room.playbackState = "playing";
+    room.stateChangedAt = new Date().toISOString();
+    const resumedAt = room.stateChangedAt;
+    const readinessRevision = room.readinessRevision;
+    await this.store.save(room);
+    if (room.playbackState !== "playing" || room.stateChangedAt !== resumedAt || room.readinessRevision !== readinessRevision) return;
+    this.system(room, reason === "queue" ? `${room.mediaTitle} started.` : `Playback resumed at ${formatTime(room.positionSeconds)}.`);
+    this.broadcast(room, { type: "state", state: stateSnapshot(room), reason: reason === "queue" ? "queue-start" : "seek-resume" });
+  }
+
+  broadcastRoomAndPlayback(room) {
+    this.broadcast(room, { type: "room", room: publicRoom(room) });
+    this.broadcast(room, { type: "participants", participants: participantList(room) });
+    for (const participant of room.participants.values()) {
+      send(participant.ws, {
+        type: "item",
+        room: publicRoom(room),
+        playback: playbackItem(room, participant, this.playbackTokens)
+      });
+    }
   }
 
   chat(room, participant, text) {
@@ -427,7 +632,14 @@ class WatchTogetherService {
 function runtimeRoom(room) {
   return {
     ...room,
+    queue: Array.isArray(room.queue) ? room.queue : [],
+    currentQueueIndex: Math.max(0, Number(room.currentQueueIndex) || 0),
+    queueRevision: Math.max(1, Number(room.queueRevision) || 1),
+    everyoneCanQueue: Boolean(room.everyoneCanQueue),
     playbackStarted: false,
+    resumeWhenReady: false,
+    readinessRevision: 0,
+    transitioning: false,
     participants: new Map(),
     chat: [],
     bannedKeys: new Set(),
@@ -442,10 +654,17 @@ function currentPosition(room) {
 }
 
 function stateSnapshot(room) {
-  return { state: room.playbackState, positionSeconds: currentPosition(room), changedAt: room.stateChangedAt, serverTime: new Date().toISOString() };
+  return {
+    state: room.playbackState,
+    positionSeconds: currentPosition(room),
+    changedAt: room.stateChangedAt,
+    serverTime: new Date().toISOString(),
+    readinessRevision: room.readinessRevision
+  };
 }
 
 function publicRoom(room) {
+  const current = currentQueueItem(room);
   return {
     id: room.id,
     mediaType: room.mediaType,
@@ -456,8 +675,75 @@ function publicRoom(room) {
     hostUserId: room.hostUserId,
     hostName: room.hostName,
     everyoneCanControl: room.everyoneCanControl,
+    everyoneCanQueue: room.everyoneCanQueue,
+    queueRevision: room.queueRevision,
+    currentQueueIndex: room.currentQueueIndex,
+    currentQueueItemId: current && current.id || null,
+    queue: room.queue.map((item, index) => publicQueueItem(item, index, room.currentQueueIndex)),
+    skipMarkers: current && current.skipMarkers || [],
     createdAt: room.createdAt,
     expiresAt: room.expiresAt
+  };
+}
+
+function currentQueueItem(room) {
+  return room.queue[room.currentQueueIndex] || null;
+}
+
+function activateCurrentQueueItem(room) {
+  const item = currentQueueItem(room);
+  if (!item) return false;
+  room.mediaType = item.mediaType;
+  room.mediaId = item.mediaId;
+  room.mediaTitle = item.title;
+  room.libraryTitle = item.libraryTitle || room.libraryTitle;
+  room.durationSeconds = Number(item.durationSeconds) || 0;
+  room.streamOptions = {
+    ...item.streamOptions,
+    completionStartSeconds: Number(item.completionStartSeconds) || null
+  };
+  room.skipMarkers = item.skipMarkers || [];
+  room.positionSeconds = 0;
+  room.playbackState = "paused";
+  room.stateChangedAt = new Date().toISOString();
+  return true;
+}
+
+function resetParticipantReadiness(room) {
+  for (const participant of room.participants.values()) {
+    if (participant.connected && !participant.removed) {
+      participant.ready = false;
+      participant.requiredForPlayback = true;
+    }
+  }
+}
+
+function canControl(room, participant) {
+  return Boolean(participant && (participant.isHost || room.everyoneCanControl));
+}
+
+function playbackItem(room, participant, playbackTokens) {
+  const item = currentQueueItem(room);
+  if (!item) return null;
+  const options = item.streamOptions || {};
+  const token = playbackTokens.createWatchStreamToken(room.id, participant.id, item.mediaType, item.mediaId);
+  const query = new URLSearchParams({
+    audio: options.audio || "",
+    subtitle: options.subtitle || "none",
+    audioChannels: options.audioChannels || "preserve",
+    quality: options.quality || "original",
+    playbackToken: token
+  });
+  return {
+    queueItemId: item.id,
+    queueRevision: room.queueRevision,
+    mediaType: item.mediaType,
+    mediaId: item.mediaId,
+    title: item.title,
+    category: item.libraryTitle || room.libraryTitle,
+    durationSeconds: item.durationSeconds,
+    skipMarkers: item.skipMarkers || [],
+    streamUrl: `/api/watch-streams/${encodeURIComponent(item.mediaType)}/${encodeURIComponent(item.mediaId)}/master.m3u8?${query}`
   };
 }
 

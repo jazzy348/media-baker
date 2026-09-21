@@ -52,14 +52,24 @@ async function stop(reason) {
   const forcedExit = setTimeout(() => process.exit(0), 5000);
   forcedExit.unref();
 
+  const services = application?.locals?.services;
+  services?.indexScanScheduler?.stop();
+  services?.ytdlp?.shutdown();
+  services?.ytdlpRelay?.stop();
+  services?.updates?.stop();
+  services?.backups?.stop();
+  services?.optimizer?.requestStop();
+  services?.hls?.shutdown();
+  services?.skipDetection?.close();
+
   try {
-    await application?.locals?.services?.keyframes?.close();
+    await services?.keyframes?.close();
   } catch (error) {
     logger.error(`[keyframes] shutdown flush failed message="${error.message}"`, error);
   }
 
   try {
-    await application?.locals?.services?.watchTogether?.close();
+    await services?.watchTogether?.close();
   } catch (error) {
     logger.error(`[watch-together] shutdown failed message="${error.message}"`, error);
   }

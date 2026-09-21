@@ -119,7 +119,12 @@ class MediaIndex {
       this.startLibraryScan(library);
       try {
         const previousCollection = await this.previousCollection(library);
-        const collection = await this.scanLibrary(library, previousCollection);
+        let collection = await this.scanLibrary(library, previousCollection);
+        if ((this.scanReadFailures && this.scanReadFailures.get(library.path) || []).length > 0) {
+          const failures = this.scanReadFailures.get(library.path);
+          logger.info(`[index] warning preserving previous library index key=${library.key} unreadableDirectories=${failures.length}`);
+          collection = previousCollection;
+        }
         nextIndex[library.key] = collection;
         changedMedia.push(...changedVideoMedia(collection, previousCollection, library));
         removedMedia.push(...removedVideoMedia(collection, previousCollection, library));
@@ -168,7 +173,12 @@ class MediaIndex {
     this.startLibraryScan(library);
     try {
       const previousCollection = await this.previousCollection(library);
-      const collection = await this.scanLibrary(library, previousCollection);
+      let collection = await this.scanLibrary(library, previousCollection);
+      if ((this.scanReadFailures && this.scanReadFailures.get(library.path) || []).length > 0) {
+        const failures = this.scanReadFailures.get(library.path);
+        logger.info(`[index] warning preserving previous library index key=${library.key} unreadableDirectories=${failures.length}`);
+        collection = previousCollection;
+      }
       const changedMedia = changedVideoMedia(collection, previousCollection, library);
       const removedMedia = removedVideoMedia(collection, previousCollection, library);
       this.updateLibraryScan(library.key, { phase: "Saving library index", filePath: null, detail: null, etaSeconds: null });
@@ -845,10 +855,13 @@ class MediaIndex {
 
   async findMediaFiles(dirPath, predicate, reportProgress = null) {
     const result = [];
+    const readFailures = [];
+    if (!this.scanReadFailures) this.scanReadFailures = new Map();
+    this.scanReadFailures.set(dirPath, readFailures);
     let directories = 0;
     const visit = async (currentPath) => {
       directories += 1;
-      for (const entry of await this.safeReadDir(currentPath, currentPath === dirPath)) {
+      for (const entry of await this.safeReadDir(currentPath, currentPath === dirPath, readFailures)) {
         const entryPath = path.join(currentPath, entry.name);
         if (entry.isDirectory()) {
           await visit(entryPath);
@@ -870,19 +883,13 @@ class MediaIndex {
     return result.sort((a, b) => a.localeCompare(b));
   }
 
-  async safeReadDir(dirPath, isLibraryRoot = false) {
+  async safeReadDir(dirPath, isLibraryRoot = false, readFailures = null) {
     try {
       return await fs.readdir(dirPath, { withFileTypes: true });
     } catch (err) {
-      if (err.code === "ENOENT") {
-        if (!isLibraryRoot) {
-          logger.info(`[index] warning skipped unreadable directory path="${dirPath}" code=${err.code} message="${err.message}"`);
-        }
-        return [];
-      }
-
       if (!isLibraryRoot) {
         logger.info(`[index] warning skipped unreadable directory path="${dirPath}" code=${err.code || "unknown"} message="${err.message}"`);
+        if (readFailures) readFailures.push({ path: dirPath, code: err.code || "unknown" });
         return [];
       }
 

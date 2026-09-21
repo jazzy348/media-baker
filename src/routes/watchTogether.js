@@ -34,6 +34,7 @@ module.exports = function createWatchTogetherRoutes(services) {
         mediaFile,
         library,
         streamOptions,
+        skipMarkers: markers,
         durationSeconds: Number(mediaFile.durationSeconds || mediaFile.duration) || 0,
         completionStartSeconds: credits && credits.startSeconds
       });

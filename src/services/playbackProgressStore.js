@@ -1,6 +1,6 @@
 const fs = require("fs/promises");
-const path = require("path");
 const mysql = require("mysql2/promise");
+const { atomicWriteJson } = require("../utils/atomicFile");
 
 class PlaybackProgressStore {
   constructor(config) {
@@ -8,6 +8,7 @@ class PlaybackProgressStore {
     this.pool = null;
     this.initialized = false;
     this.jsonPath = config.playback.progressPath;
+    this.jsonMutation = Promise.resolve();
   }
 
   async get(userId, mediaType, mediaId) {
@@ -156,15 +157,14 @@ class PlaybackProgressStore {
       return updated;
     }
 
-    const data = await this.readJson();
-    data[recordKey(updated.userId, updated.mediaType, updated.mediaId)] = {
-      ...updated,
-      updatedAt: new Date().toISOString(),
-      createdAt: updated.createdAt || new Date().toISOString()
-    };
-    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
-    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
-    return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
+    return this.mutateJson((data) => {
+      data[recordKey(updated.userId, updated.mediaType, updated.mediaId)] = {
+        ...updated,
+        updatedAt: new Date().toISOString(),
+        createdAt: updated.createdAt || new Date().toISOString()
+      };
+      return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
+    });
   }
 
   async saveImported(record) {
@@ -202,15 +202,14 @@ class PlaybackProgressStore {
       return { ...updated, createdAt, updatedAt };
     }
 
-    const data = await this.readJson();
-    data[recordKey(updated.userId, updated.mediaType, updated.mediaId)] = {
-      ...updated,
-      createdAt,
-      updatedAt
-    };
-    await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
-    await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
-    return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
+    return this.mutateJson((data) => {
+      data[recordKey(updated.userId, updated.mediaType, updated.mediaId)] = {
+        ...updated,
+        createdAt,
+        updatedAt
+      };
+      return data[recordKey(updated.userId, updated.mediaType, updated.mediaId)];
+    });
   }
 
   async removeUser(userId) {
@@ -228,20 +227,15 @@ class PlaybackProgressStore {
       return Number(result.affectedRows) || 0;
     }
 
-    const data = await this.readJson();
-    let removed = 0;
-    for (const [key, record] of Object.entries(data)) {
-      if ((record.userId || "global") !== normalizedUserId) {
-        continue;
+    return this.mutateJson((data) => {
+      let removed = 0;
+      for (const [key, record] of Object.entries(data)) {
+        if ((record.userId || "global") !== normalizedUserId) continue;
+        delete data[key];
+        removed += 1;
       }
-      delete data[key];
-      removed += 1;
-    }
-    if (removed > 0) {
-      await fs.mkdir(path.dirname(this.jsonPath), { recursive: true });
-      await fs.writeFile(this.jsonPath, JSON.stringify(data, null, 2));
-    }
-    return removed;
+      return removed;
+    });
   }
 
   async init() {
@@ -299,6 +293,17 @@ class PlaybackProgressStore {
       }
       throw err;
     }
+  }
+
+  mutateJson(mutator) {
+    const operation = this.jsonMutation.then(async () => {
+      const data = await this.readJson();
+      const result = await mutator(data);
+      await atomicWriteJson(this.jsonPath, data);
+      return result;
+    });
+    this.jsonMutation = operation.catch(() => {});
+    return operation;
   }
 }
 

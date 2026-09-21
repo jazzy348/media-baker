@@ -98,23 +98,32 @@ module.exports = function createOpenMovieRoutes(services) {
             futureUrlCount(req.query.count)
           ));
         case OPERATIONS.MOVIE_POSTER:
-          return serveItemPoster("movie", capability, access, services, req, res, next);
+          await serveItemPoster("movie", capability, access, services, req, res, next);
+          return;
         case OPERATIONS.EPISODE_POSTER:
-          return serveItemPoster("episode", capability, access, services, req, res, next, "episode");
+          await serveItemPoster("episode", capability, access, services, req, res, next, "episode");
+          return;
         case OPERATIONS.SHOW_POSTER:
-          return serveItemPoster("episode", capability, access, services, req, res, next, "show");
+          await serveItemPoster("episode", capability, access, services, req, res, next, "show");
+          return;
         case OPERATIONS.SEASON_POSTER:
-          return serveItemPoster("episode", capability, access, services, req, res, next, "season");
+          await serveItemPoster("episode", capability, access, services, req, res, next, "season");
+          return;
         case OPERATIONS.POSTER_ATLAS:
-          return serveAtlas(capability, access, openMoviePosterAtlases, req, res, next);
+          await serveAtlas(capability, access, openMoviePosterAtlases, req, res, next);
+          return;
         case OPERATIONS.ON_DECK_POSTER_ATLAS:
-          return serveOnDeckAtlas(capability, access, principal.user.id, services, res);
+          await serveOnDeckAtlas(capability, access, principal.user.id, services, res);
+          return;
         case OPERATIONS.MOVIE_PLAYBACK:
-          return redirectPlayback("movie", capability, access, principal.user, openMovie, playbackTokens, res);
+          await redirectPlayback("movie", capability, access, principal.user, openMovie, playbackTokens, res);
+          return;
         case OPERATIONS.EPISODE_PLAYBACK:
-          return redirectPlayback("episode", capability, access, principal.user, openMovie, playbackTokens, res);
+          await redirectPlayback("episode", capability, access, principal.user, openMovie, playbackTokens, res);
+          return;
         case OPERATIONS.VARIANT_PLAYBACK:
-          return redirectVariant(capability, access, principal.user, openMovie, playbackTokens, res);
+          await redirectVariant(capability, access, principal.user, openMovie, playbackTokens, res);
+          return;
         default:
           throw httpError(404, "Not found");
       }

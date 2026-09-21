@@ -1,4 +1,6 @@
 const express = require("express");
+const compression = require("compression");
+const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const packageJson = require("../package.json");
@@ -35,6 +37,8 @@ const { OptimiserService } = require("./services/optimiserService");
 const { TaskService } = require("./services/taskService");
 const { WatchTogetherStore } = require("./services/watchTogetherStore");
 const { WatchTogetherService } = require("./services/watchTogetherService");
+const { CopyQueueStore } = require("./services/copyQueueStore");
+const { CopyQueueService } = require("./services/copyQueueService");
 const { SkipMarkerStore } = require("./services/skipMarkerStore");
 const { SkipDetectionWorkerClient } = require("./services/skipDetectionWorkerClient");
 const { OpenMovieIdStore } = require("./services/openMovieIdStore");
@@ -62,23 +66,28 @@ const createAppInfoRoutes = require("./routes/appInfo");
 const createBrandingRoutes = require("./routes/branding");
 const createOpenMovieRoutes = require("./routes/openMovie");
 const createWatchTogetherRoutes = require("./routes/watchTogether");
+const createCopyQueueRoutes = require("./routes/copyQueues");
 const logger = require("./utils/logger");
 
 async function createApp() {
   const app = express();
   const publicPath = path.resolve(__dirname, "..", "public");
+  const webAppRevision = await createWebAppRevision(publicPath, packageJson.version);
   const webAppHtml = injectWebAppVersion(
     await fs.readFile(path.join(publicPath, "index.html"), "utf8"),
-    packageJson.version
+    packageJson.version,
+    webAppRevision
   );
   const serveWebApp = createWebAppHandler(webAppHtml);
 
+  app.use(compression());
   app.use(express.json());
   app.use("/api", (req, res, next) => {
     res.set("X-Media-Baker-Version", packageJson.version);
+    res.set("X-Media-Baker-Revision", webAppRevision);
     next();
   });
-  app.use("/api/app", createAppInfoRoutes({ version: packageJson.version }));
+  app.use("/api/app", createAppInfoRoutes({ version: packageJson.version, revision: webAppRevision }));
 
   const libraryService = new LibraryService(config);
   config.libraries = await libraryService.list();
@@ -108,8 +117,16 @@ async function createApp() {
   app.use(createBrandingRoutes({ branding }));
   app.use(express.static(publicPath, {
     index: false,
-    setHeaders(res) {
-      res.setHeader("Cache-Control", "no-cache, must-revalidate");
+    setHeaders(res, filePath) {
+      const requestRevision = new URL(res.req.originalUrl, "http://localhost").searchParams.get("v");
+      const versionedAsset = [".css", ".js"].includes(path.extname(filePath).toLowerCase())
+        && requestRevision === webAppRevision;
+      res.setHeader(
+        "Cache-Control",
+        versionedAsset
+          ? "public, max-age=31536000, immutable"
+          : "no-cache, must-revalidate"
+      );
     }
   }));
   app.get("/watch-ended", (req, res, next) => {
@@ -172,6 +189,16 @@ async function createApp() {
   const hardware = new HardwareService();
   const playbackSecret = await loadOrCreatePlaybackSecret(config.auth.playbackSecretPath);
   const playbackTokens = new PlaybackTokenService(playbackSecret, config.hls.ttlSeconds);
+  const copyQueueStore = new CopyQueueStore(config);
+  const copyQueues = new CopyQueueService({
+    store: copyQueueStore,
+    mediaIndex,
+    hls,
+    fallbackStream,
+    progress,
+    skipDetection
+  });
+  await copyQueues.init();
   const watchTogetherStore = new WatchTogetherStore(config);
   const watchTogether = new WatchTogetherService({
     store: watchTogetherStore,
@@ -237,6 +264,8 @@ async function createApp() {
     appSettings,
     hardware,
     playbackTokens,
+    copyQueueStore,
+    copyQueues,
     watchTogetherStore,
     watchTogether,
     ytdlp,
@@ -273,10 +302,11 @@ async function createApp() {
   app.use("/api/streams", createStreamAuthMiddleware(playbackTokens), createStreamRoutes(app.locals.services));
   app.use("/api/relay-streams", createStreamAuthMiddleware(playbackTokens), createYtDlpRelayPlaybackRoutes(app.locals.services));
   app.use("/api/auth", createAuthRoutes(app.locals.services));
+  app.use("/api/copy-queues", createCopyQueueRoutes(app.locals.services));
   app.use("/api/watch-together", createWatchTogetherRoutes(app.locals.services));
   app.use("/api/docs", createDocsRoutes());
   app.get(["/", "/index.html"], serveWebApp);
-  app.get(/^\/(?:search|history|live-tv)(?:\/)?$/, serveWebApp);
+  app.get(/^\/(?:search|history|live-tv|stream-queues)(?:\/)?$/, serveWebApp);
   app.get(/^\/watch\/[^/]+\/?$/, serveWebApp);
   app.get(/^\/libraries\/[^/]+(?:\/(?:shows\/[^/]+(?:\/seasons\/[^/]+)?|artists\/[^/]+(?:\/albums\/[^/]+)?))?\/?$/, serveWebApp);
   app.use(
@@ -355,8 +385,29 @@ function createWebAppHandler(webAppHtml) {
   };
 }
 
-function injectWebAppVersion(html, version) {
-  return String(html).replaceAll("__MEDIA_BAKER_VERSION__", encodeURIComponent(String(version)));
+function injectWebAppVersion(html, version, revision) {
+  return String(html)
+    .replaceAll("__MEDIA_BAKER_VERSION__", encodeURIComponent(String(version)))
+    .replaceAll("__MEDIA_BAKER_REVISION__", encodeURIComponent(String(revision)));
+}
+
+async function createWebAppRevision(publicPath, version) {
+  const assets = [
+    "index.html",
+    "styles.css",
+    "app.js",
+    "js/api-client.js",
+    "js/navigation.js",
+    "js/pwa.js",
+    "vendor/hls.js/hls.min.js"
+  ];
+  const hash = crypto.createHash("sha256");
+  hash.update(`${version}\0`);
+  for (const relativePath of assets) {
+    hash.update(`${relativePath}\0`);
+    hash.update(await fs.readFile(path.join(publicPath, relativePath)));
+  }
+  return `${version}-${hash.digest("hex").slice(0, 12)}`;
 }
 
 function shouldServeFallbackStream(req, fallbackStream) {

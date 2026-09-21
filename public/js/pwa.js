@@ -1,5 +1,6 @@
 (function initialiseMediaBakerPwa(global) {
   const loadedVersion = document.querySelector('meta[name="media-baker-version"]')?.content || "";
+  const loadedRevision = document.querySelector('meta[name="media-baker-revision"]')?.content || loadedVersion;
   const installButton = document.getElementById("installAppButton");
   const installOverlay = document.getElementById("installAppOverlay");
   const installInstructions = document.getElementById("installAppInstructions");
@@ -14,7 +15,8 @@
   let lastVersionCheckAt = 0;
   let versionCheckPromise = null;
   let pendingVersion = "";
-  let dismissedVersion = "";
+  let pendingRevision = "";
+  let dismissedRevision = "";
   let serviceWorkerRegistration = null;
 
   setup();
@@ -43,7 +45,7 @@
       updateInstallButton();
     });
     global.addEventListener("media-baker:server-version", (event) => {
-      observeServerVersion(event.detail && event.detail.version);
+      observeServerVersion(event.detail && event.detail.version, event.detail && event.detail.revision);
     });
     global.addEventListener("pageshow", () => checkVersion());
     document.addEventListener("visibilitychange", () => {
@@ -136,7 +138,7 @@
     })
       .then((response) => response.ok ? response.json() : null)
       .then((status) => {
-        observeServerVersion(status && status.version);
+        observeServerVersion(status && status.version, status && status.revision);
         return status;
       })
       .catch(() => null)
@@ -146,28 +148,33 @@
     return versionCheckPromise;
   }
 
-  function observeServerVersion(version) {
+  function observeServerVersion(version, revision) {
     const serverVersion = String(version || "");
-    if (loadedVersion && serverVersion && serverVersion !== loadedVersion) {
-      showReload(serverVersion);
+    const serverRevision = String(revision || serverVersion);
+    if (loadedRevision && serverRevision && serverRevision !== loadedRevision) {
+      showReload(serverVersion, serverRevision);
     }
   }
 
-  function showReload(serverVersion) {
+  function showReload(serverVersion, serverRevision) {
     pendingVersion = serverVersion;
-    if (dismissedVersion === serverVersion) {
+    pendingRevision = serverRevision;
+    if (dismissedRevision === serverRevision) {
       return;
     }
     const video = document.getElementById("webPlayer");
     const playbackWarning = video && !video.paused && !video.ended
       ? " Reloading will stop current playback."
       : "";
-    reloadMessage.textContent = `Version ${serverVersion} is ready.${playbackWarning}`;
+    const versionMessage = serverVersion && serverVersion !== loadedVersion
+      ? `Version ${serverVersion} is ready.`
+      : "An updated build is ready.";
+    reloadMessage.textContent = `${versionMessage}${playbackWarning}`;
     reloadBanner.classList.remove("hidden");
   }
 
   function dismissReload() {
-    dismissedVersion = pendingVersion;
+    dismissedRevision = pendingRevision || pendingVersion;
     reloadBanner?.classList.add("hidden");
   }
 
@@ -194,6 +201,7 @@
 
   global.MediaBakerPwa = Object.freeze({
     checkVersion,
+    loadedRevision,
     loadedVersion,
     observeServerVersion,
     reloadForUpdate

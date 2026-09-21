@@ -57,6 +57,7 @@ module.exports = {
   openMovieIdPath: appPath(fileConfig.openMovieIdPath, "cache/openmovie-ids.json"),
   skipMarkerStorePath: appPath(fileConfig.skipMarkerStorePath, "cache/skip-markers.json"),
   watchTogetherStorePath: appPath(fileConfig.watchTogetherStorePath, "cache/watch-together.json"),
+  copyQueueStorePath: appPath(fileConfig.copyQueueStorePath, "cache/copy-stream-queues.json"),
   logging: {
     level: normalizeLogLevel(fileConfig.logging && fileConfig.logging.level || fileConfig.logLevel),
     path: appPath(fileConfig.logging && fileConfig.logging.path, "cache/logs", "/logs"),

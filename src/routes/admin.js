@@ -6,7 +6,7 @@ const { httpError } = require("../utils/httpErrors");
 const { DEINTERLACE_MODES } = require("../utils/deinterlace");
 const { syncYtDlpLibrary } = require("../services/ytdlpService");
 
-module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, ffmpeg, fallbackStream, hardware, progress, playbackSync, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks, watchTogether }) {
+module.exports = function createAdminRoutes({ accountService, appSettings, backups, branding, config, copyQueues, ffmpeg, fallbackStream, hardware, progress, playbackSync, mediaIndex, metadata, indexScanScheduler, playbackTokens, ytdlp, ytdlpRelay, iptv, updates, optimizer, skipDetection, tasks, watchTogether }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
@@ -20,8 +20,9 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
   router.get("/accounts", requirePermission("canManageUsers"), async (req, res, next) => {
     try {
       const allowedLibraryKeys = Array.isArray(req.allowedLibraryKeys) ? new Set(req.allowedLibraryKeys) : null;
+      const accounts = await accountService.list();
       res.json({
-        accounts: await accountService.list(),
+        accounts: req.user.permissions.isAdmin ? accounts : accounts.filter((account) => account.id === req.user.id),
         libraries: config.libraries
           .filter((library) => !allowedLibraryKeys || allowedLibraryKeys.has(library.key))
           .map((library) => ({ key: library.key, title: library.title })),
@@ -65,7 +66,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.post("/accounts", requirePermission("canManageUsers"), async (req, res, next) => {
     try {
-      res.status(201).json({ account: await accountService.create(req.body || {}) });
+      res.status(201).json({ account: await accountService.create(req.body || {}, req.user) });
     } catch (err) {
       next(err);
     }
@@ -73,7 +74,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.put("/accounts/:id", requirePermission("canManageUsers"), async (req, res, next) => {
     try {
-      res.json({ account: await accountService.update(req.params.id, req.body || {}) });
+      res.json({ account: await accountService.update(req.params.id, req.body || {}, req.user) });
     } catch (err) {
       next(err);
     }
@@ -85,7 +86,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
         next(httpError(400, "You cannot remove your own account"));
         return;
       }
-      const removed = await accountService.remove(req.params.id);
+      const removed = await accountService.remove(req.params.id, req.user);
       if (!removed) {
         next(httpError(404, "Account not found"));
         return;
@@ -99,9 +100,12 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.get("/api-keys", requirePermission("canManageApiKeys"), async (req, res, next) => {
     try {
+      const isAdmin = req.user.permissions.isAdmin;
+      const requestedUserId = isAdmin ? req.query.userId || null : req.user.id;
+      const accounts = await accountService.list();
       res.json({
-        accounts: await accountService.list(),
-        apiKeys: await accountService.listApiKeys(req.query.userId || null)
+        accounts: isAdmin ? accounts : accounts.filter((account) => account.id === req.user.id),
+        apiKeys: await accountService.listApiKeys(requestedUserId)
       });
     } catch (err) {
       next(err);
@@ -115,7 +119,7 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
         next(httpError(400, "User is required"));
         return;
       }
-      const result = await accountService.createApiKey(userId, req.body || {});
+      const result = await accountService.createApiKey(userId, req.body || {}, req.user);
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -124,6 +128,13 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
 
   router.delete("/api-keys/:id", requirePermission("canManageApiKeys"), async (req, res, next) => {
     try {
+      if (!req.user.permissions.isAdmin) {
+        const owned = (await accountService.listApiKeys(req.user.id)).some((apiKey) => apiKey.id === req.params.id);
+        if (!owned) {
+          next(httpError(404, "API key not found"));
+          return;
+        }
+      }
       const removed = await accountService.revokeApiKey(req.params.id);
       if (!removed) {
         next(httpError(404, "API key not found"));
@@ -602,6 +613,19 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
     }
   });
 
+  router.get("/stream-queues", requireAdmin, (req, res) => {
+    res.json({ queues: copyQueues.list(req.user) });
+  });
+
+  router.delete("/stream-queues/:queueId", requireAdmin, async (req, res, next) => {
+    try {
+      await copyQueues.revoke(req.user, req.params.queueId);
+      res.json({ stopped: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   router.get("/folders", requirePermission("canManageLibraries"), async (req, res, next) => {
     try {
       res.json(await listFolders(req.query.path));
@@ -635,15 +659,15 @@ module.exports = function createAdminRoutes({ accountService, appSettings, backu
     }
   });
 
-  router.post("/backups/:filename/restore", requirePermission("canManageBackups"), async (req, res, next) => {
+  router.post("/backups/:filename/restore", requireAdmin, async (req, res, next) => {
     try {
       if (!req.body || req.body.confirm !== true) {
         next(httpError(400, "Restore confirmation is required"));
         return;
       }
-      const result = await backups.restore(req.params.filename);
+      const result = await backups.requestRestore(req.params.filename);
       res.json({ restore: result, restarting: true });
-      setTimeout(() => process.exit(0), 1500).unref();
+      setTimeout(() => process.emit("SIGTERM"), 1500).unref();
     } catch (err) {
       next(err);
     }

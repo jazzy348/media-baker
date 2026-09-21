@@ -1,8 +1,8 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
-const path = require("path");
 const util = require("util");
 const mysql = require("mysql2/promise");
+const { atomicWriteJson } = require("../utils/atomicFile");
 
 const scryptAsync = util.promisify(crypto.scrypt);
 const TOKEN_BYTES = 32;
@@ -14,6 +14,7 @@ const LIBRARY_VIEW_PREFIX = "lv_";
 const DEFAULT_PERMISSIONS = {
   libraries: [],
   canCopyStreamUrls: false,
+  canManageStreamQueues: false,
   canManageLibraries: false,
   canManageMetadata: false,
   canManageSettings: false,
@@ -44,6 +45,7 @@ class AccountService {
     this.config = config;
     this.pool = null;
     this.initialized = false;
+    this.jsonMutation = Promise.resolve();
   }
 
   async init() {
@@ -146,6 +148,7 @@ class AccountService {
         ...DEFAULT_PERMISSIONS,
         isAdmin: true,
         canCopyStreamUrls: true,
+        canManageStreamQueues: true,
         canManageLibraries: true,
         canManageMetadata: true,
         canManageSettings: true,
@@ -163,7 +166,7 @@ class AccountService {
     });
   }
 
-  async create(input) {
+  async create(input, actor = null) {
     await this.init();
     const username = normalizeUsername(input.username);
     const password = String(input.password || "");
@@ -176,12 +179,14 @@ class AccountService {
     }
 
     const passwordParts = await hashPassword(password);
+    const permissions = normalizePermissions(input.permissions);
+    assertPermissionCeiling(actor, null, permissions);
     const account = {
       id: crypto.randomBytes(8).toString("hex"),
       username,
       passwordHash: passwordParts.hash,
       passwordSalt: passwordParts.salt,
-      permissions: normalizePermissions(input.permissions),
+      permissions,
       preferences: normalizePlaybackPreferences(input.preferences),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -196,13 +201,16 @@ class AccountService {
       return publicAccount(account);
     }
 
-    const data = await this.readJson();
-    data.accounts = [...(data.accounts || []), account];
-    await this.writeJson(data);
-    return publicAccount(account);
+    return this.mutateJson((data) => {
+      if ((data.accounts || []).some((entry) => entry.username.toLowerCase() === account.username.toLowerCase())) {
+        throw httpError(409, "Username already exists");
+      }
+      data.accounts = [...(data.accounts || []), account];
+      return publicAccount(account);
+    });
   }
 
-  async update(id, input) {
+  async update(id, input, actor = null) {
     await this.init();
     const account = await this.findById(id);
     if (!account) {
@@ -232,47 +240,82 @@ class AccountService {
       preferences: input.preferences ? normalizePlaybackPreferences(input.preferences) : normalizePlaybackPreferences(account.preferences),
       updatedAt: new Date().toISOString()
     };
+    assertPermissionCeiling(actor, account, updated.permissions);
 
     if (this.config.mysql.enabled) {
-      await this.pool.execute(
-        `UPDATE user_accounts
-         SET username = ?, password_hash = ?, password_salt = ?, permissions_json = ?, preferences_json = ?
-         WHERE id = ?`,
-        [updated.username, updated.passwordHash, updated.passwordSalt, JSON.stringify(updated.permissions), JSON.stringify(updated.preferences), updated.id]
-      );
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [accounts] = await connection.execute("SELECT id, permissions_json FROM user_accounts FOR UPDATE");
+        assertAdministratorRemains(accounts.map(fromMysqlPermissionRow), account, updated);
+        await connection.execute(
+          `UPDATE user_accounts
+           SET username = ?, password_hash = ?, password_salt = ?, permissions_json = ?, preferences_json = ?
+           WHERE id = ?`,
+          [updated.username, updated.passwordHash, updated.passwordSalt, JSON.stringify(updated.permissions), JSON.stringify(updated.preferences), updated.id]
+        );
+        if (password) await connection.execute("DELETE FROM user_sessions WHERE user_id = ?", [updated.id]);
+        await connection.commit();
+      } catch (err) {
+        await connection.rollback().catch(() => {});
+        throw err;
+      } finally {
+        connection.release();
+      }
       return publicAccount(updated);
     }
 
-    const data = await this.readJson();
-    data.accounts = (data.accounts || []).map((entry) => entry.id === updated.id ? updated : entry);
-    await this.writeJson(data);
-    return publicAccount(updated);
+    return this.mutateJson((data) => {
+      const current = (data.accounts || []).find((entry) => entry.id === updated.id);
+      if (!current) throw httpError(404, "Account not found");
+      if ((data.accounts || []).some((entry) => entry.id !== updated.id && entry.username.toLowerCase() === updated.username.toLowerCase())) {
+        throw httpError(409, "Username already exists");
+      }
+      assertAdministratorRemains(data.accounts || [], current, updated);
+      data.accounts = (data.accounts || []).map((entry) => entry.id === updated.id ? updated : entry);
+      if (password) data.sessions = (data.sessions || []).filter((entry) => entry.accountId !== updated.id);
+      return publicAccount(updated);
+    });
   }
 
-  async remove(id) {
+  async remove(id, actor = null) {
     await this.init();
-    if ((await this.count()) <= 1) {
-      throw httpError(400, "Cannot remove the last account");
-    }
+    const target = await this.findById(id);
+    if (!target) return false;
+    assertPermissionCeiling(actor, target, null);
 
     if (this.config.mysql.enabled) {
-      await this.pool.execute("UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?", [id]);
-      const [result] = await this.pool.execute("DELETE FROM user_accounts WHERE id = ?", [id]);
-      await this.revokeUserSessions(id);
-      return result.affectedRows > 0;
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [rows] = await connection.execute("SELECT id, permissions_json FROM user_accounts FOR UPDATE");
+        if (rows.length <= 1) throw httpError(400, "Cannot remove the last account");
+        assertAdministratorRemains(rows.map(fromMysqlPermissionRow), target, null);
+        await connection.execute("UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ?", [id]);
+        await connection.execute("DELETE FROM user_sessions WHERE user_id = ?", [id]);
+        const [result] = await connection.execute("DELETE FROM user_accounts WHERE id = ?", [id]);
+        await connection.commit();
+        return result.affectedRows > 0;
+      } catch (err) {
+        await connection.rollback().catch(() => {});
+        throw err;
+      } finally {
+        connection.release();
+      }
     }
 
-    const data = await this.readJson();
-    const before = (data.accounts || []).length;
-    data.accounts = (data.accounts || []).filter((account) => account.id !== id);
-    data.apiKeys = (data.apiKeys || []).map((apiKey) => (
-      apiKey.userId === id && !apiKey.revokedAt
+    return this.mutateJson((data) => {
+      const current = (data.accounts || []).find((entry) => entry.id === id);
+      if (!current) return false;
+      if ((data.accounts || []).length <= 1) throw httpError(400, "Cannot remove the last account");
+      assertAdministratorRemains(data.accounts || [], current, null);
+      data.accounts = data.accounts.filter((entry) => entry.id !== id);
+      data.apiKeys = (data.apiKeys || []).map((apiKey) => apiKey.userId === id && !apiKey.revokedAt
         ? { ...apiKey, revokedAt: new Date().toISOString() }
-        : apiKey
-    ));
-    await this.writeJson(data);
-    await this.revokeUserSessions(id);
-    return data.accounts.length !== before;
+        : apiKey);
+      data.sessions = (data.sessions || []).filter((entry) => entry.accountId !== id);
+      return true;
+    });
   }
 
   async list() {
@@ -310,12 +353,13 @@ class AccountService {
     return Boolean(account && await verifyPassword(String(password || ""), account.passwordSalt, account.passwordHash));
   }
 
-  async createApiKey(userId, input = {}) {
+  async createApiKey(userId, input = {}, actor = null) {
     await this.init();
     const account = await this.findById(userId);
     if (!account) {
       throw httpError(404, "Account not found");
     }
+    assertPermissionCeiling(actor, account, account.permissions, { selfOnly: true });
 
     const name = normalizeApiKeyName(input.name);
     const token = `${API_KEY_PREFIX}${crypto.randomBytes(32).toString("base64url")}`;
@@ -335,9 +379,9 @@ class AccountService {
         [apiKey.id, apiKey.userId, apiKey.name, apiKey.keyHash]
       );
     } else {
-      const data = await this.readJson();
-      data.apiKeys = [...(data.apiKeys || []), apiKey];
-      await this.writeJson(data);
+      await this.mutateJson((data) => {
+        data.apiKeys = [...(data.apiKeys || []), apiKey];
+      });
     }
 
     return {
@@ -381,14 +425,12 @@ class AccountService {
       return result.affectedRows > 0;
     }
 
-    const data = await this.readJson();
-    const apiKey = (data.apiKeys || []).find((entry) => entry.id === id && !entry.revokedAt);
-    if (!apiKey) {
-      return false;
-    }
-    apiKey.revokedAt = revokedAt;
-    await this.writeJson(data);
-    return true;
+    return this.mutateJson((data) => {
+      const apiKey = (data.apiKeys || []).find((entry) => entry.id === id && !entry.revokedAt);
+      if (!apiKey) return false;
+      apiKey.revokedAt = revokedAt;
+      return true;
+    });
   }
 
   async verifyApiKey(token) {
@@ -467,9 +509,9 @@ class AccountService {
         [link.id, link.name, link.token, link.tokenHash, JSON.stringify(link.libraryKeys), expiresAt ? new Date(expiresAt) : null]
       );
     } else {
-      const data = await this.readJson();
-      data.libraryViews = [...(data.libraryViews || []), link];
-      await this.writeJson(data);
+      await this.mutateJson((data) => {
+        data.libraryViews = [...(data.libraryViews || []), link];
+      });
     }
 
     return publicLibraryView(link);
@@ -503,14 +545,12 @@ class AccountService {
       return result.affectedRows > 0;
     }
 
-    const data = await this.readJson();
-    const link = (data.libraryViews || []).find((entry) => entry.id === id && !entry.revokedAt);
-    if (!link) {
-      return false;
-    }
-    link.revokedAt = revokedAt;
-    await this.writeJson(data);
-    return true;
+    return this.mutateJson((data) => {
+      const link = (data.libraryViews || []).find((entry) => entry.id === id && !entry.revokedAt);
+      if (!link) return false;
+      link.revokedAt = revokedAt;
+      return true;
+    });
   }
 
   async verifyLibraryViewToken(token) {
@@ -582,18 +622,14 @@ class AccountService {
       return;
     }
 
-    const data = await this.readJson();
-    const session = (data.sessions || []).find((entry) => (
-      entry.tokenHash === tokenHash
-      && entry.accountId === accountId
-      && sessionExpiryMs(entry) >= Date.now()
-    ));
-    if (!session) {
-      return;
-    }
-
-    session.expiresAt = new Date(expiresAtMs).toISOString();
-    await this.writeJson(data);
+    await this.mutateJson((data) => {
+      const session = (data.sessions || []).find((entry) => (
+        entry.tokenHash === tokenHash
+        && entry.accountId === accountId
+        && sessionExpiryMs(entry) >= Date.now()
+      ));
+      if (session) session.expiresAt = new Date(expiresAtMs).toISOString();
+    });
   }
 
   async saveSession(tokenHash, accountId, expiresAtMs) {
@@ -608,18 +644,18 @@ class AccountService {
       return;
     }
 
-    const data = await this.readJson();
     const session = {
       tokenHash,
       accountId,
       expiresAt: new Date(expiresAtMs).toISOString(),
       createdAt: new Date().toISOString()
     };
-    data.sessions = [
-      ...(data.sessions || []).filter((entry) => entry.tokenHash !== tokenHash && sessionExpiryMs(entry) >= Date.now()),
-      session
-    ];
-    await this.writeJson(data);
+    await this.mutateJson((data) => {
+      data.sessions = [
+        ...(data.sessions || []).filter((entry) => entry.tokenHash !== tokenHash && sessionExpiryMs(entry) >= Date.now()),
+        session
+      ];
+    });
   }
 
   async findSession(tokenHash) {
@@ -644,9 +680,9 @@ class AccountService {
       return;
     }
 
-    const data = await this.readJson();
-    data.sessions = (data.sessions || []).filter((entry) => entry.tokenHash !== tokenHash);
-    await this.writeJson(data);
+    await this.mutateJson((data) => {
+      data.sessions = (data.sessions || []).filter((entry) => entry.tokenHash !== tokenHash);
+    });
   }
 
   async revokeUserSessions(accountId) {
@@ -655,9 +691,9 @@ class AccountService {
       return;
     }
 
-    const data = await this.readJson();
-    data.sessions = (data.sessions || []).filter((entry) => entry.accountId !== accountId);
-    await this.writeJson(data);
+    await this.mutateJson((data) => {
+      data.sessions = (data.sessions || []).filter((entry) => entry.accountId !== accountId);
+    });
   }
 
   async cleanupExpiredSessions() {
@@ -666,12 +702,9 @@ class AccountService {
       return;
     }
 
-    const data = await this.readJson();
-    const before = (data.sessions || []).length;
-    data.sessions = (data.sessions || []).filter((entry) => sessionExpiryMs(entry) >= Date.now());
-    if (data.sessions.length !== before) {
-      await this.writeJson(data);
-    }
+    await this.mutateJson((data) => {
+      data.sessions = (data.sessions || []).filter((entry) => sessionExpiryMs(entry) >= Date.now());
+    });
   }
 
   async findByUsername(username) {
@@ -719,13 +752,67 @@ class AccountService {
   }
 
   async writeJson(data) {
-    await fs.mkdir(path.dirname(this.config.accountStorePath), { recursive: true });
-    await fs.writeFile(this.config.accountStorePath, JSON.stringify({
+    await atomicWriteJson(this.config.accountStorePath, {
       accounts: data.accounts || [],
       apiKeys: data.apiKeys || [],
       sessions: data.sessions || [],
       libraryViews: data.libraryViews || []
-    }, null, 2));
+    });
+  }
+
+  mutateJson(mutator) {
+    const operation = this.jsonMutation.then(async () => {
+      const data = await this.readJson();
+      const result = await mutator(data);
+      await this.writeJson(data);
+      return result;
+    });
+    this.jsonMutation = operation.catch(() => {});
+    return operation;
+  }
+
+  async createSession(accountId) {
+    const token = crypto.randomBytes(TOKEN_BYTES).toString("base64url");
+    await this.saveSession(hashToken(token), accountId, Date.now() + SESSION_TTL_MS);
+    return token;
+  }
+
+  async logout(token) {
+    if (!token) return;
+    await this.removeSession(hashToken(token));
+  }
+}
+
+function fromMysqlPermissionRow(row) {
+  return { id: row.id, permissions: parseJson(row.permissions_json, {}) };
+}
+
+function assertAdministratorRemains(accounts, previous, next) {
+  if (!previous || !normalizePermissions(previous.permissions).isAdmin) return;
+  if (next && normalizePermissions(next.permissions).isAdmin) return;
+  const administratorCount = accounts.filter((entry) => normalizePermissions(entry.permissions).isAdmin).length;
+  if (administratorCount <= 1) throw httpError(400, "Cannot remove or demote the last administrator");
+}
+
+function assertPermissionCeiling(actor, target, requestedPermissions, options = {}) {
+  if (!actor || actor.permissions && actor.permissions.isAdmin) return;
+  if (options.selfOnly && (!target || target.id !== actor.id)) {
+    throw httpError(403, "API keys may only be managed for your own account");
+  }
+  const targetPermissions = target && normalizePermissions(target.permissions);
+  if (targetPermissions && targetPermissions.isAdmin) throw httpError(403, "Only an administrator can manage an administrator account");
+  const requested = requestedPermissions && normalizePermissions(requestedPermissions);
+  if (!requested) return;
+  if (requested.isAdmin) throw httpError(403, "Only an administrator can grant administrator access");
+  for (const [name, enabled] of Object.entries(requested)) {
+    if (name === "libraries" || name === "canViewAdmin" || !enabled) continue;
+    if (!actor.permissions || !actor.permissions[name]) {
+      throw httpError(403, `You cannot grant the ${name} permission`);
+    }
+  }
+  const allowedLibraries = new Set(actor.permissions && actor.permissions.libraries || []);
+  if ((requested.libraries || []).some((key) => !allowedLibraries.has(key))) {
+    throw httpError(403, "You cannot grant access to a library you cannot access");
   }
 }
 
@@ -748,6 +835,7 @@ function normalizePermissions(value = {}) {
       ...DEFAULT_PERMISSIONS,
       isAdmin: true,
       canCopyStreamUrls: true,
+      canManageStreamQueues: true,
       canManageLibraries: true,
       canManageMetadata: true,
       canManageSettings: true,
@@ -782,6 +870,7 @@ function normalizePermissions(value = {}) {
     ...DEFAULT_PERMISSIONS,
     libraries: Array.isArray(permissions.libraries) ? permissions.libraries.map(String).filter(Boolean) : [],
     canCopyStreamUrls: Boolean(permissions.canCopyStreamUrls),
+    canManageStreamQueues: Boolean(permissions.canManageStreamQueues),
     canManageLibraries: Boolean(permissions.canManageLibraries),
     canManageMetadata: Boolean(permissions.canManageMetadata),
     canManageSettings: Boolean(permissions.canManageSettings),

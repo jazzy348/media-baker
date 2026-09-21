@@ -11,14 +11,19 @@
     });
 
     const serverVersion = response.headers.get("X-Media-Baker-Version");
+    const serverRevision = response.headers.get("X-Media-Baker-Revision");
     if (serverVersion) {
       global.dispatchEvent(new CustomEvent("media-baker:server-version", {
-        detail: { version: serverVersion }
+        detail: { version: serverVersion, revision: serverRevision || serverVersion }
       }));
     }
 
     if (!response.ok) {
       throw new Error(await responseErrorMessage(response));
+    }
+
+    if (response.status === 204) {
+      return null;
     }
 
     return response.json();

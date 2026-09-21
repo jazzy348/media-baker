@@ -3,6 +3,7 @@ const REDACTED_QUERY_KEYS = new Set([
   "sharetoken",
   "authtoken",
   "apikey",
+  "viewtoken",
   "playbacksecret",
   "playbacktoken"
 ]);
@@ -12,7 +13,9 @@ function safeRequestUrl(req) {
   const queryIndex = original.indexOf("?");
   const rawPath = queryIndex >= 0 ? original.slice(0, queryIndex) : original;
   const rawQuery = queryIndex >= 0 ? original.slice(queryIndex + 1) : "";
-  const safePath = sanitizeLogValue(rawPath || "/");
+  const safePath = sanitizeLogValue(rawPath || "/")
+    .replace(/(\/api\/openmovie\/access\/)[^/?#]+/gi, "$1[redacted]")
+    .replace(/(\/api\/copy-queues\/stream\/)[^/?#]+/gi, "$1[redacted]");
   if (!rawQuery) {
     return safePath;
   }

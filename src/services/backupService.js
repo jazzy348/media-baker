@@ -34,8 +34,15 @@ class BackupService {
     this.restart();
   }
 
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
   restart() {
-    if (this.timer) clearInterval(this.timer);
+    this.stop();
     this.timer = setInterval(() => this.runSchedule(), 30 * 1000);
     this.timer.unref?.();
     this.runSchedule();
@@ -258,26 +265,43 @@ class BackupService {
     return this.restoreInFlight;
   }
 
-  async restoreBackup(filename) {
+  async validateRestore(filename) {
+    const { backupPath } = await this.restoreTarget(filename);
+    await inspectBackup(backupPath, this.config.mysql.enabled ? "mysql" : "json", this.config);
+  }
+
+  async requestRestore(filename) {
+    await this.validateRestore(filename);
+    if (typeof process.send !== "function") {
+      throw new Error("Backup restore requires Media Baker to be started through its supervisor");
+    }
+    await requestSupervisorRestore(filename);
+    return { accepted: true, filename };
+  }
+
+  async restoreTarget(filename) {
     const settings = await this.settings();
     const safeName = path.basename(String(filename || ""));
-    if (safeName !== filename || !BACKUP_PATTERN.test(safeName)) {
-      throw new Error("Invalid backup filename");
-    }
-    const backupPath = path.join(settings.directory, safeName);
+    if (safeName !== filename || !BACKUP_PATTERN.test(safeName)) throw new Error("Invalid backup filename");
+    return { safeName, backupPath: path.join(settings.directory, safeName) };
+  }
+
+  async restoreBackup(filename) {
+    const { safeName, backupPath } = await this.restoreTarget(filename);
     logger.info(`[backup] restore started filename="${safeName}"`);
     const storage = this.config.mysql.enabled ? "mysql" : "json";
     let mysqlConnection = null;
+    let mysqlRestore = null;
     const jsonEntries = new Map();
     try {
       const inspection = await inspectBackup(backupPath, storage, this.config);
       if (this.config.mysql.enabled) {
         mysqlConnection = await mysql.createConnection(mysqlOptions(this.config.mysql));
-        await replaceMysqlSchema(mysqlConnection, inspection.schemas);
+        mysqlRestore = await stageMysqlSchema(mysqlConnection, inspection.schemas);
       }
       for await (const record of backupRecords(backupPath)) {
         if (record.type === "rows") {
-          await insertRows(mysqlConnection, record.table, record.rows);
+          await insertRows(mysqlConnection, mysqlRestore.stagingTables.get(record.table), record.rows);
           continue;
         }
         if (record.type === "file") {
@@ -285,7 +309,8 @@ class BackupService {
         }
       }
       if (this.config.mysql.enabled) {
-        await mysqlConnection.query("SET FOREIGN_KEY_CHECKS = 1");
+        await commitMysqlRestore(mysqlConnection, mysqlRestore);
+        mysqlRestore = null;
       } else {
         await restoreJsonFiles(this.config, jsonEntries);
       }
@@ -293,6 +318,9 @@ class BackupService {
       logger.info(`[backup] restore complete filename="${safeName}"`);
       return this.lastResult;
     } catch (err) {
+      if (mysqlConnection && mysqlRestore && !mysqlRestore.swapped) {
+        await discardMysqlRestore(mysqlConnection, mysqlRestore).catch(() => {});
+      }
       this.lastResult = { ok: false, reason: "restore", filename: safeName, error: err.message, restoredAt: new Date().toISOString() };
       logger.error(`[backup] restore failed filename="${safeName}" message="${err.message}"`, err);
       throw err;
@@ -320,6 +348,26 @@ class BackupService {
     this.lastScheduledKey = key;
     this.create("scheduled").catch(() => {});
   }
+}
+
+function requestSupervisorRestore(filename) {
+  const requestId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error("Backup restore supervisor did not respond")), 10000);
+    const onMessage = (message) => {
+      if (!message || message.type !== "restore-backup-response" || message.requestId !== requestId) return;
+      finish(message.accepted ? null : new Error(message.error || "Backup restore was rejected"));
+    };
+    const finish = (err) => {
+      clearTimeout(timeout);
+      process.off("message", onMessage);
+      if (err) reject(err); else resolve();
+    };
+    process.on("message", onMessage);
+    process.send({ type: "restore-backup", requestId, payload: { filename } }, (err) => {
+      if (err) finish(err);
+    });
+  });
 }
 
 function createBackupWriter(filePath) {
@@ -379,7 +427,10 @@ async function inspectBackup(filePath, storage, config) {
   if (!header) throw new Error("Invalid or empty backup");
   if (storage === "mysql" && schemas.length === 0) throw new Error("MySQL backup contains no table schemas");
   if (storage === "json") {
-    const missing = jsonDataFiles(config).map((entry) => entry.name).filter((name) => !fileNames.has(name));
+    const missing = jsonDataFiles(config)
+      .filter((entry) => !entry.optionalOnRestore)
+      .map((entry) => entry.name)
+      .filter((name) => !fileNames.has(name));
     if (missing.length > 0) throw new Error(`JSON backup is missing entries: ${missing.join(", ")}`);
   }
   return { header, schemas };
@@ -399,15 +450,58 @@ async function* backupRecords(filePath) {
   }
 }
 
-async function replaceMysqlSchema(connection, schemas) {
+async function stageMysqlSchema(connection, schemas) {
+  const nonce = `${process.pid}_${Date.now().toString(36)}`;
+  const stagingTables = new Map();
   await connection.query("SET FOREIGN_KEY_CHECKS = 0");
+  try {
+    for (let index = 0; index < schemas.length; index += 1) {
+      const schema = schemas[index];
+      const stagingName = restoreTableName("stage", nonce, index);
+      stagingTables.set(schema.name, stagingName);
+      await connection.query(rewriteCreateTableName(schema.createSql, stagingName));
+    }
+    return { nonce, schemas, stagingTables };
+  } catch (err) {
+    await discardMysqlRestore(connection, { stagingTables }).catch(() => {});
+    throw err;
+  }
+}
+
+async function commitMysqlRestore(connection, restore) {
   const [rows] = await connection.query("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'");
-  for (const row of rows) {
-    await connection.query(`DROP TABLE IF EXISTS ${identifier(Object.values(row)[0])}`);
+  const stagingNames = new Set(restore.stagingTables.values());
+  const currentTables = rows.map((row) => Object.values(row)[0]).filter((name) => !stagingNames.has(name));
+  const oldTables = new Map(currentTables.map((name, index) => [name, restoreTableName("old", restore.nonce, index)]));
+  const renames = [
+    ...currentTables.map((name) => `${identifier(name)} TO ${identifier(oldTables.get(name))}`),
+    ...restore.schemas.map((schema) => `${identifier(restore.stagingTables.get(schema.name))} TO ${identifier(schema.name)}`)
+  ];
+  await connection.query(`RENAME TABLE ${renames.join(", ")}`);
+  restore.swapped = true;
+  for (const oldName of oldTables.values()) {
+    await connection.query(`DROP TABLE IF EXISTS ${identifier(oldName)}`).catch((err) => {
+      logger.info(`[backup] warning could not remove previous restore table table=${oldName} message="${err.message}"`);
+    });
   }
-  for (const schema of schemas) {
-    await connection.query(schema.createSql);
+  await connection.query("SET FOREIGN_KEY_CHECKS = 1");
+}
+
+async function discardMysqlRestore(connection, restore) {
+  await connection.query("SET FOREIGN_KEY_CHECKS = 0");
+  for (const name of restore.stagingTables.values()) {
+    await connection.query(`DROP TABLE IF EXISTS ${identifier(name)}`);
   }
+  await connection.query("SET FOREIGN_KEY_CHECKS = 1");
+}
+
+function rewriteCreateTableName(createSql, tableName) {
+  if (!/^CREATE TABLE\s+`[^`]+`/i.test(createSql)) throw new Error("Unsupported MySQL table schema");
+  return createSql.replace(/^CREATE TABLE\s+`[^`]+`/i, `CREATE TABLE ${identifier(tableName)}`);
+}
+
+function restoreTableName(kind, nonce, index) {
+  return `__mb_${kind}_${nonce}_${index}`.slice(0, 64);
 }
 
 async function insertRows(connection, table, rows) {
@@ -427,14 +521,40 @@ function reviveValue(value) {
 
 async function restoreJsonFiles(config, entries) {
   const files = jsonDataFiles(config);
-  for (const file of files) {
-    await fsp.rm(file.path, { force: true });
-  }
-  for (const file of files) {
-    const content = entries.get(file.name);
-    if (content === null || content === undefined) continue;
-    await fsp.mkdir(path.dirname(file.path), { recursive: true });
-    await fsp.writeFile(file.path, content);
+  const nonce = `${process.pid}-${Date.now()}`;
+  const staged = [];
+  const moved = [];
+  try {
+    for (const file of files) {
+      const content = entries.get(file.name);
+      if (content !== null && content !== undefined) JSON.parse(content);
+      await fsp.mkdir(path.dirname(file.path), { recursive: true });
+      const temporaryPath = `${file.path}.${nonce}.restore`;
+      if (content !== null && content !== undefined) await fsp.writeFile(temporaryPath, content, "utf8");
+      staged.push({ ...file, temporaryPath, hasContent: content !== null && content !== undefined });
+    }
+    for (const file of staged) {
+      const previousPath = `${file.path}.${nonce}.previous`;
+      try {
+        await fsp.rename(file.path, previousPath);
+        moved.push({ ...file, previousPath, hadPrevious: true });
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+        moved.push({ ...file, previousPath, hadPrevious: false });
+      }
+      if (file.hasContent) await fsp.rename(file.temporaryPath, file.path);
+    }
+    await Promise.all(moved.filter((file) => file.hadPrevious).map((file) => fsp.rm(file.previousPath, { force: true }).catch((err) => {
+      logger.info(`[backup] warning could not remove previous JSON file path="${file.previousPath}" message="${err.message}"`);
+    })));
+  } catch (err) {
+    for (const file of [...moved].reverse()) {
+      await fsp.rm(file.path, { force: true }).catch(() => {});
+      if (file.hadPrevious) await fsp.rename(file.previousPath, file.path).catch(() => {});
+    }
+    throw err;
+  } finally {
+    await Promise.all(staged.map((file) => fsp.rm(file.temporaryPath, { force: true }).catch(() => {})));
   }
 }
 
@@ -449,7 +569,9 @@ function jsonDataFiles(config) {
     { name: "openmovie-poster-atlases", path: path.join(path.dirname(config.openMovieIdPath), "openmovie-poster-atlases.json") },
     { name: "metadata", path: path.join(config.metadata.cachePath, "metadata.json") },
     { name: "playback-progress", path: config.playback.progressPath },
-    { name: "skip-markers", path: config.skipMarkerStorePath }
+    { name: "skip-markers", path: config.skipMarkerStorePath },
+    { name: "copy-stream-queues", path: config.copyQueueStorePath, optionalOnRestore: true },
+    { name: "watch-together-rooms", path: config.watchTogetherStorePath, optionalOnRestore: true }
   ];
 }
 

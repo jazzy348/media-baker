@@ -8,6 +8,7 @@ const sourceAppPath = path.resolve(__dirname, "..");
 const installedAppPath = dockerMode() ? "/cache/app/current" : sourceAppPath;
 let child = null;
 let pendingUpdate = null;
+let pendingRestore = null;
 let shuttingDown = false;
 let childStartedAt = 0;
 let consecutiveCrashes = 0;
@@ -33,9 +34,18 @@ function startServer() {
 }
 
 function handleServerMessage(message) {
-  if (!message || message.type !== "install-update") {
+  if (!message) return;
+  if (message.type === "restore-backup") {
+    try {
+      validateRestorePayload(message.payload);
+      pendingRestore = message.payload;
+      replyToServer({ type: "restore-backup-response", requestId: message.requestId, accepted: true });
+    } catch (err) {
+      replyToServer({ type: "restore-backup-response", requestId: message.requestId, accepted: false, error: err.message });
+    }
     return;
   }
+  if (message.type !== "install-update") return;
   try {
     validateUpdatePayload(message.payload);
     pendingUpdate = message.payload;
@@ -61,6 +71,17 @@ async function handleServerExit(code, signal) {
     process.exit(code || 0);
     return;
   }
+  if (pendingRestore) {
+    const payload = pendingRestore;
+    pendingRestore = null;
+    try {
+      await runRestore(selectedAppPath(), payload.filename);
+    } catch (err) {
+      console.error(`[supervisor] backup restore failed message="${err.message}"`);
+    }
+    startServer();
+    return;
+  }
   if (!pendingUpdate) {
     const uptimeMs = Math.max(0, Date.now() - childStartedAt);
     consecutiveCrashes = uptimeMs >= STABLE_UPTIME_MS ? 0 : consecutiveCrashes + 1;
@@ -79,6 +100,21 @@ async function handleServerExit(code, signal) {
     console.error(`[supervisor] update failed message="${err.message}"`);
   }
   startServer();
+}
+
+function runRestore(appPath, filename) {
+  return new Promise((resolve, reject) => {
+    const worker = fork(path.join(appPath, "src", "restoreWorker.js"), [filename], {
+      cwd: appPath,
+      env: process.env,
+      stdio: ["inherit", "inherit", "inherit", "ipc"]
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Restore worker exited with code ${code} signal ${signal || "none"}`));
+    });
+  });
 }
 
 function scheduleServerRestart(delayMs) {
@@ -132,6 +168,7 @@ function compareVersions(left, right) {
 }
 
 function validateUpdatePayload(payload) {
+  if (pendingRestore || pendingUpdate) throw new Error("Another maintenance operation is already pending");
   if (!payload || !payload.version || path.resolve(payload.appPath || "") !== path.resolve(installedAppPath)) {
     throw new Error("Invalid update target");
   }
@@ -141,6 +178,13 @@ function validateUpdatePayload(payload) {
     || !isWithin(payload.workPath, payload.logPath)) {
     throw new Error("Invalid update source");
   }
+}
+
+function validateRestorePayload(payload) {
+  if (!payload || !/^media-baker-\d{8}-\d{6}\.mbbackup\.gz$/.test(String(payload.filename || ""))) {
+    throw new Error("Invalid backup restore request");
+  }
+  if (pendingUpdate || pendingRestore) throw new Error("Another maintenance operation is already pending");
 }
 
 function isWithin(rootPath, candidatePath) {

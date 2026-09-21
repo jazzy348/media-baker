@@ -80,11 +80,10 @@ class IndexScanScheduler {
     this.status.lastStartedAt = new Date().toISOString();
     this.status.lastError = null;
 
-    const before = await this.mediaIndex.counts();
-    before.total = totalCounts(before);
-    logger.info(`[index-scan] started reason=${reason} total=${before.total}`);
-
     try {
+      const before = await this.mediaIndex.counts();
+      before.total = totalCounts(before);
+      logger.info(`[index-scan] started reason=${reason} total=${before.total}`);
       await this.mediaIndex.reindex();
       const after = await this.mediaIndex.counts();
       after.total = totalCounts(after);

@@ -11,10 +11,12 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
     ? { analyzeduration: "1M", probesize: "1M", timeoutMs: INTERACTIVE_PROBE_TIMEOUT_MS }
     : { useDefaultProbeLimits: true, timeoutMs: INTERACTIVE_PROBE_TIMEOUT_MS });
   const streams = probe.streams || [];
-  const audioOnly = isAudioFile(mediaFile.filePath) || !streams.some((stream) => (
+  const videoStreams = streams.filter((stream) => (
     stream.codec_type === "video"
     && Number(stream.disposition && stream.disposition.attached_pic) !== 1
   ));
+  const audioStreams = streams.filter((stream) => stream.codec_type === "audio");
+  const audioOnly = isAudioFile(mediaFile.filePath) || videoStreams.length === 0;
   const subtitlesEnabled = !audioOnly && (!options.library || !options.library.noSubtitles);
   const fetchedSubtitles = subtitlesEnabled && options.subtitles
     ? await options.subtitles.cachedOptions(options.mediaType, mediaFile.id)
@@ -23,14 +25,14 @@ async function getMediaPlaybackOptions(mediaFile, ffmpeg, options = {}) {
   return {
     filePath: mediaFile.filePath,
     audioOnly,
+    videoTrackCount: videoStreams.length,
     proTv3d: detectProTv3d(mediaFile, options.library),
     subtitleSearch: {
       enabled: Boolean(subtitlesEnabled && options.subtitles && options.subtitles.config.enabled),
       provider: options.subtitles ? options.subtitles.config.provider : null
     },
     quality: audioOnly ? [{ id: "original", label: "Original audio" }] : qualityOptionsForProbe(probe),
-    audio: streams
-      .filter((stream) => stream.codec_type === "audio")
+    audio: audioStreams
       .map((stream) => ({
         id: `stream:${stream.index}`,
         index: stream.index,

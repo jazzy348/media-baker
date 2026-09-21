@@ -8,14 +8,44 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Media Baker">
     <meta name="media-baker-version" content="__MEDIA_BAKER_VERSION__">
+    <meta name="media-baker-revision" content="__MEDIA_BAKER_REVISION__">
     <title>Media Baker</title>
-    <style>html.auth-pending body { visibility: hidden; }</style>
-    <link rel="manifest" href="/manifest.webmanifest?v=__MEDIA_BAKER_VERSION__">
+    <style>
+      .app-boot { display: none; }
+      html.auth-pending body > :not(.app-boot) { visibility: hidden; }
+      html.auth-pending .app-boot {
+        align-items: center;
+        background: #061014;
+        color: #dffbff;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        inset: 0;
+        justify-content: center;
+        position: fixed;
+        z-index: 10000;
+      }
+      .app-boot-mark {
+        animation: app-boot-pulse 1.2s ease-in-out infinite;
+        background: #00d9ff;
+        border-radius: 50%;
+        box-shadow: 0 0 26px rgba(0, 217, 255, 0.55);
+        height: 18px;
+        width: 18px;
+      }
+      .app-boot strong { font: 600 16px/1.2 system-ui, sans-serif; letter-spacing: 0.03em; }
+      @keyframes app-boot-pulse { 50% { opacity: 0.35; transform: scale(0.72); } }
+    </style>
+    <link rel="manifest" href="/manifest.webmanifest?v=__MEDIA_BAKER_REVISION__">
     <link rel="icon" href="/app-icon/192.png" type="image/png">
     <link rel="apple-touch-icon" href="/app-icon/180.png">
-    <link rel="stylesheet" href="/styles.css?v=__MEDIA_BAKER_VERSION__">
+    <link rel="stylesheet" href="/styles.css?v=__MEDIA_BAKER_REVISION__">
   </head>
   <body>
+    <div id="appBoot" class="app-boot" role="status" aria-live="polite">
+      <span class="app-boot-mark" aria-hidden="true"></span>
+      <strong>Loading Media Baker...</strong>
+    </div>
     <div class="backdrop" aria-hidden="true"></div>
 
     <header class="topbar">
@@ -36,6 +66,7 @@
         <button id="installAppButton" class="icon-button hidden" type="button" title="Install Media Baker">Install</button>
         <button id="liveTvButton" class="icon-button hidden" type="button" title="Live TV">Live TV</button>
         <button id="downloadButton" class="icon-button hidden" type="button" title="Download URL">Download</button>
+        <button id="streamQueuesButton" class="icon-button hidden" type="button" title="Streams">Streams</button>
         <button id="accountButton" class="icon-button hidden" type="button" title="Account settings">Account</button>
         <button id="adminPanelButton" class="icon-button" type="button" title="Admin panel">Admin</button>
         <button id="historyButton" class="icon-button" type="button" title="History">History</button>
@@ -119,6 +150,74 @@
             <input id="liveTvFilter" type="search" placeholder="Channel name, number, or group" autocomplete="off">
           </label>
           <div id="liveTvGuide" class="live-tv-guide" aria-live="polite"></div>
+        </section>
+        <section id="streamQueuesView" class="stream-queues-view hidden">
+          <div class="stream-queues-page-heading">
+            <div><p class="eyebrow">External playback</p><h2>Streams</h2></div>
+            <button id="newStreamQueue" class="primary-button compact-button" type="button">New stream</button>
+          </div>
+          <div class="stream-queues-workspace">
+            <aside class="stream-queue-sidebar" aria-label="Streams">
+              <div class="stream-queue-sidebar-heading"><strong>Streams</strong><span id="copyQueueCount">0</span></div>
+              <div id="copyQueueList" class="stream-queue-selector"></div>
+            </aside>
+            <div class="stream-queue-editor">
+              <div id="streamQueueEmpty" class="stream-queue-empty"><strong>Select a stream or create a new one</strong></div>
+              <section id="streamQueueDraft" class="stream-queue-draft hidden">
+                <div class="stream-queue-editor-heading">
+                  <div><p class="eyebrow">New stream</p><h3>Create a continuous playback URL</h3></div>
+                  <button id="cancelStreamQueueDraft" class="secondary-button compact-button" type="button">Cancel</button>
+                </div>
+                <div class="stream-queue-create-form">
+                  <label>Stream name<input id="copyQueueName" type="text" maxlength="255" placeholder="Movie night"></label>
+                  <label>Link expires<select id="copyQueueExpiry"><option value="3600">1 hour</option><option value="86400" selected>1 day</option><option value="604800">1 week</option><option value="2592000">1 month</option><option value="unlimited">Unlimited</option></select></label>
+                </div>
+              </section>
+              <section id="streamQueueCurrent" class="stream-queue-current hidden">
+                <div class="stream-queue-editor-heading">
+                  <div><p id="streamQueueOwner" class="eyebrow"></p><h3 id="streamQueueTitle"></h3><span id="streamQueueMeta" class="field-note"></span></div>
+                  <div class="stream-queue-editor-actions">
+                    <button id="copyCurrentStreamUrl" class="secondary-button compact-button hidden" type="button">Copy URL</button>
+                    <button id="playCurrentStream" class="primary-button compact-button" type="button">Play stream</button>
+                    <button id="skipCurrentStreamItem" class="secondary-button compact-button" type="button">Skip current</button>
+                    <button id="stopCurrentStream" class="danger-button compact-button" type="button">Stop stream</button>
+                  </div>
+                </div>
+                <div id="copyQueueCreatedUrl" class="stream-queue-created-url hidden">
+                  <label>Playback URL<input id="copyQueueUrl" type="text" readonly></label>
+                  <button id="copyCopyQueueUrl" class="secondary-button compact-button" type="button">Copy URL</button>
+                </div>
+                <div id="streamQueueItems" class="stream-queue-items"></div>
+              </section>
+              <section id="streamQueueMediaPicker" class="stream-queue-media-picker hidden">
+                <div class="stream-queue-picker-heading">
+                  <div class="catalog-browser-title">
+                    <button id="streamQueueMediaBrowserBack" class="music-icon-button hidden" type="button" title="Back" aria-label="Back">&#8592;</button>
+                    <div><span id="streamQueueMediaBrowserContext" class="eyebrow">Stream</span><strong id="streamQueueSearchTitle">Add media</strong></div>
+                  </div>
+                  <span id="streamQueueSelectionHint" class="field-note"></span>
+                </div>
+                <form id="streamQueueSearchForm" class="stream-queue-search-form">
+                  <input id="streamQueueSearchInput" type="search" maxlength="120" placeholder="Search movies, episodes, or music" aria-label="Search media">
+                  <button class="secondary-button compact-button" type="submit">Search</button>
+                </form>
+                <div id="streamQueueSearchResults" class="stream-queue-search-results"></div>
+                <div id="copyQueueSelected" class="stream-queue-selected hidden">
+                  <div class="stream-queue-selected-heading"><span>Selected media</span><strong id="copyQueueSelectedTitle"></strong></div>
+                  <div class="stream-queue-track-options">
+                    <label>Audio language / track<select id="streamQueueAudioSelect"></select></label>
+                    <label>Subtitles<select id="streamQueueSubtitleSelect"></select></label>
+                  </div>
+                  <p class="field-note">The selected audio and subtitles are baked into this item for external playback.</p>
+                </div>
+                <div class="stream-queue-selection-actions">
+                  <button id="addStreamQueueMedia" class="primary-button hidden" type="button">Add to stream</button>
+                  <button id="createStreamQueue" class="primary-button hidden" type="button">Create stream</button>
+                </div>
+              </section>
+              <p id="copyQueueStatus" class="status"></p>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -310,7 +409,12 @@
             <button id="closePlayer" class="close-button player-close" type="button" title="Close">x</button>
           </div>
         </div>
-          <div id="videoPlayerSlot" class="video-player-slot">
+        <div id="videoPlayerSlot" class="video-player-slot">
+          <button id="watchTogetherPreviewDrag" class="watch-together-preview-drag" type="button" title="Move video preview" aria-label="Move video preview">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 2v20M2 12h20M8 6l4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4" />
+            </svg>
+          </button>
           <div id="videoPlaybackSurface" class="video-playback-surface">
             <video id="webPlayer" class="web-player" playsinline></video>
             <div id="videoSkipPrompt" class="video-skip-prompt hidden">
@@ -343,26 +447,63 @@
           </div>
         </div>
         <p id="playerStatus" class="status hidden"></p>
+        <section id="watchTogetherMediaBrowser" class="watch-together-media-browser hidden" aria-label="Add media to Watch Together">
+          <div class="watch-together-browser-heading">
+            <div class="catalog-browser-title">
+              <button id="watchTogetherMediaBrowserBack" class="music-icon-button hidden" type="button" title="Back" aria-label="Back">&#8592;</button>
+              <div>
+                <p id="watchTogetherMediaBrowserContext" class="eyebrow">Watch Together</p>
+                <h3 id="watchTogetherMediaBrowserTitle">Add media</h3>
+              </div>
+            </div>
+            <button id="closeWatchTogetherMediaBrowser" class="music-icon-button" type="button" title="Close media search" aria-label="Close media search">x</button>
+          </div>
+          <form id="watchTogetherQueueSearchForm" class="watch-together-media-search">
+            <input id="watchTogetherQueueSearch" type="search" maxlength="120" placeholder="Search movies, episodes, or music" aria-label="Find media to add">
+            <button class="primary-button compact-button" type="submit">Search</button>
+          </form>
+          <div id="watchTogetherQueueSearchResults" class="watch-together-media-results"></div>
+        </section>
         <aside id="watchTogetherPanel" class="watch-together-panel hidden" aria-label="Watch Together participants and chat">
           <div class="watch-together-panel-heading">
             <div><p class="eyebrow">Watch Together</p><strong id="watchTogetherRoomStatus">Waiting for the host</strong></div>
-            <button id="closeWatchTogetherPanel" class="music-icon-button" type="button" title="Close panel" aria-label="Close panel">x</button>
+            <div class="watch-together-panel-actions">
+              <button id="openWatchTogetherMediaBrowser" class="music-icon-button hidden" type="button" title="Add media" aria-label="Add media">+</button>
+              <button class="music-icon-button" type="button" title="Open queue" aria-label="Open queue" data-watch-panel-view="queue">&#9776;</button>
+              <button class="music-icon-button" type="button" title="View participants" aria-label="View participants" data-watch-panel-view="people">&#9783;</button>
+              <button id="watchTogetherRoomTab" class="music-icon-button hidden" type="button" title="Room settings" aria-label="Room settings" data-watch-panel-view="room">&#9881;</button>
+              <button id="closeWatchTogetherPanel" class="music-icon-button" type="button" title="Close panel" aria-label="Close panel">x</button>
+            </div>
           </div>
-          <div id="watchTogetherHostControls" class="watch-together-host-controls hidden">
-            <label class="checkbox-row"><input id="watchTogetherEveryoneControls" type="checkbox"> Everyone can control playback</label>
-            <button id="copyWatchTogetherInvite" class="secondary-button compact-button" type="button">Copy invite link</button>
-            <input id="watchTogetherInviteFallback" class="hidden" type="text" readonly aria-label="Watch Together invite URL">
-            <button id="closeWatchTogetherRoom" class="secondary-button compact-button" type="button">Close room</button>
-          </div>
-          <div class="watch-together-participants-section">
-            <p class="eyebrow">Participants</p>
+          <section class="watch-together-chat-view">
+            <div id="watchTogetherChat" class="watch-together-chat" aria-live="polite"></div>
+            <form id="watchTogetherChatForm" class="watch-together-chat-form">
+              <input id="watchTogetherChatInput" type="text" maxlength="500" autocomplete="off" placeholder="Message the room">
+              <button class="primary-button compact-button" type="submit">Send</button>
+            </form>
+          </section>
+          <section class="watch-together-sheet watch-together-queue-section hidden" data-watch-panel-content="queue">
+            <div class="watch-together-section-heading">
+              <strong>Queue</strong>
+              <button class="music-icon-button" type="button" title="Close queue" aria-label="Close queue" data-watch-panel-close>x</button>
+            </div>
+            <div id="watchTogetherQueue" class="watch-together-queue"></div>
+            <button id="watchTogetherSkipQueueItem" class="secondary-button compact-button hidden" type="button">Skip current</button>
+          </section>
+          <section class="watch-together-sheet watch-together-participants-section hidden" data-watch-panel-content="people">
+            <div class="watch-together-section-heading"><strong>Participants</strong><button class="music-icon-button" type="button" title="Close participants" aria-label="Close participants" data-watch-panel-close>x</button></div>
             <div id="watchTogetherParticipants" class="watch-together-participants"></div>
-          </div>
-          <div id="watchTogetherChat" class="watch-together-chat" aria-live="polite"></div>
-          <form id="watchTogetherChatForm" class="watch-together-chat-form">
-            <input id="watchTogetherChatInput" type="text" maxlength="500" autocomplete="off" placeholder="Message the room">
-            <button class="primary-button compact-button" type="submit">Send</button>
-          </form>
+          </section>
+          <section class="watch-together-sheet watch-together-room-view hidden" data-watch-panel-content="room">
+            <div class="watch-together-section-heading"><strong>Room settings</strong><button class="music-icon-button" type="button" title="Close settings" aria-label="Close settings" data-watch-panel-close>x</button></div>
+            <div id="watchTogetherHostControls" class="watch-together-host-controls hidden">
+              <label class="checkbox-row"><input id="watchTogetherEveryoneControls" type="checkbox"> Everyone can control playback</label>
+              <label class="checkbox-row"><input id="watchTogetherEveryoneQueues" type="checkbox"> Signed-in users can add to queue</label>
+              <button id="copyWatchTogetherInvite" class="secondary-button compact-button" type="button">Copy invite link</button>
+              <input id="watchTogetherInviteFallback" class="hidden" type="text" readonly aria-label="Watch Together invite URL">
+              <button id="closeWatchTogetherRoom" class="danger-button compact-button" type="button">Close room</button>
+            </div>
+          </section>
         </aside>
       </div>
     </div>
@@ -610,6 +751,7 @@
               <div class="permission-grid">
                 <label><input id="accountIsAdmin" type="checkbox"> Admin</label>
                 <label><input id="accountCanCopyUrls" type="checkbox"> Copy playback URLs</label>
+                <label><input id="accountCanStreamQueues" type="checkbox"> Manage streams</label>
                 <label><input id="accountCanLibraries" type="checkbox"> Manage libraries</label>
                 <label><input id="accountCanMetadata" type="checkbox"> Manage metadata</label>
                 <label><input id="accountCanSettings" type="checkbox"> Manage settings</label>
@@ -1025,6 +1167,7 @@
                   <div class="action-row ytdlp-settings-actions">
                     <button id="settingsYtDlpUpdate" class="secondary-button settings-action-button" type="button">Update YT-DLP</button>
                     <button id="settingsYtDlpUploadCookies" class="secondary-button settings-action-button" type="button">Upload cookies.txt</button>
+                    <button id="settingsYtDlpCookieHelp" class="secondary-button settings-action-button ytdlp-cookie-help-button" type="button"><span class="ytdlp-cookie-help-icon" aria-hidden="true">i</span> How to get yt-dlp cookies</button>
                     <button id="settingsYtDlpRemoveCookies" class="secondary-button settings-action-button" type="button">Remove cookies</button>
                     <input id="settingsYtDlpCookieFile" class="hidden" type="file" accept=".txt,text/plain">
                   </div>
@@ -1184,9 +1327,11 @@
             <div class="segmented-control admin-activity-tabs">
               <button id="currentlyPlayingPlaybackTab" class="active" type="button">Playback</button>
               <button id="currentlyPlayingRoomsTab" type="button">Watch Together</button>
+              <button id="currentlyPlayingStreamsTab" type="button">Streams</button>
             </div>
             <div id="currentlyPlayingList" class="library-manager-list"></div>
             <div id="watchTogetherAdminList" class="library-manager-list hidden"></div>
+            <div id="streamQueuesAdminList" class="library-manager-list hidden"></div>
           </section>
           <section id="adminHistoryPage" class="admin-page hidden">
             <div class="admin-page-heading">
@@ -1223,6 +1368,51 @@
             <button id="loadMoreUserHistory" class="secondary-button history-load-more hidden" type="button">Load more</button>
           </section>
         </main>
+      </div>
+    </div>
+
+    <div id="ytdlpCookieGuideOverlay" class="choice-overlay ytdlp-cookie-guide-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ytdlpCookieGuideTitle" aria-hidden="true">
+      <div class="choice-modal ytdlp-cookie-guide-modal">
+        <div class="ytdlp-cookie-guide-heading">
+          <div>
+            <p class="eyebrow">YouTube authentication</p>
+            <h2 id="ytdlpCookieGuideTitle">Get YouTube cookies for yt-dlp</h2>
+          </div>
+          <button id="closeYtDlpCookieGuideIcon" class="music-icon-button" type="button" title="Close cookie guide" aria-label="Close cookie guide">&times;</button>
+        </div>
+        <p>Cookies let yt-dlp use your signed-in YouTube session for content that requires an account, such as private playlists, age-restricted videos, and members-only content.</p>
+        <ol class="ytdlp-cookie-guide-steps">
+          <li>
+            <strong>Install a cookies.txt exporter and allow it in private windows.</strong>
+            Use <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer">Get cookies.txt LOCALLY for Chromium</a> or <a href="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/" target="_blank" rel="noopener noreferrer">cookies.txt for Firefox</a>. Do this before opening the private window.
+            <span class="ytdlp-cookie-browser-help"><b>Chrome:</b> Extensions &rarr; Manage extensions &rarr; find the exporter &rarr; Details &rarr; turn on Allow in Incognito. <b>Firefox:</b> Add-ons and themes &rarr; Extensions &rarr; select the exporter &rarr; set Run in Private Windows to Allow.</span>
+          </li>
+          <li>
+            <strong>Open a new private or incognito window.</strong>
+            Keep exactly one private tab open and sign in to YouTube. Consider using a separate account rather than your main account.
+          </li>
+          <li>
+            <strong>In that same tab, open <code>https://www.youtube.com/robots.txt</code>.</strong>
+            Do not open another YouTube tab after this.
+          </li>
+          <li>
+            <strong>Use the browser extension to export the YouTube cookies.</strong>
+            Choose Netscape format if the extension asks. It will download a cookie file, usually named <code>cookies.txt</code>. Then close the private window and do not reopen that session.
+          </li>
+          <li>
+            <strong>Upload the file here.</strong>
+            Media Baker keeps only YouTube cookie records and supplies them only to YouTube requests made by yt-dlp.
+          </li>
+        </ol>
+        <div class="ytdlp-cookie-guide-warning">
+          <strong>Treat cookies.txt like a password.</strong>
+          <span>Anyone with the file may be able to use your signed-in session. Do not share it, and only use account cookies when needed. Using an account with yt-dlp may put that account at risk.</span>
+        </div>
+        <div class="action-row ytdlp-cookie-guide-actions">
+          <button id="selectYtDlpCookiesFromGuide" class="primary-button" type="button">Choose cookies.txt</button>
+          <a class="secondary-button ytdlp-cookie-guide-link" href="https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies" target="_blank" rel="noopener noreferrer">Official yt-dlp guide</a>
+          <button id="closeYtDlpCookieGuide" class="secondary-button" type="button">Close</button>
+        </div>
       </div>
     </div>
 
@@ -1263,10 +1453,9 @@
       <option value="Hungarian"></option>
     </datalist>
 
-    <script src="/vendor/hls.js/hls.min.js?v=__MEDIA_BAKER_VERSION__"></script>
-    <script src="/js/api-client.js?v=__MEDIA_BAKER_VERSION__"></script>
-    <script src="/js/navigation.js?v=__MEDIA_BAKER_VERSION__"></script>
-    <script src="/js/pwa.js?v=__MEDIA_BAKER_VERSION__"></script>
-    <script src="/app.js?v=__MEDIA_BAKER_VERSION__"></script>
+    <script src="/js/api-client.js?v=__MEDIA_BAKER_REVISION__"></script>
+    <script src="/js/navigation.js?v=__MEDIA_BAKER_REVISION__"></script>
+    <script src="/js/pwa.js?v=__MEDIA_BAKER_REVISION__"></script>
+    <script src="/app.js?v=__MEDIA_BAKER_REVISION__"></script>
   </body>
 </html>

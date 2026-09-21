@@ -8,8 +8,14 @@ module.exports = function createAuthRoutes({ accountService, config }) {
 
   router.get("/status", async (req, res, next) => {
     try {
+      const needsSetup = await accountService.needsSetup();
+      const token = extractSessionToken(req);
+      const user = !needsSetup && token ? await accountService.verifySession(token) : null;
+      res.set("Cache-Control", "private, no-store");
       res.json({
-        needsSetup: await accountService.needsSetup(),
+        needsSetup,
+        user,
+        authMode: user && user.permissions.isAdmin ? "admin" : user ? "user" : null,
         features: publicFeatures(config)
       });
     } catch (err) {
@@ -69,7 +75,8 @@ module.exports = function createAuthRoutes({ accountService, config }) {
         username: body.username === undefined ? user.username : body.username,
         password: body.password || undefined
       });
-      res.json({ user: updated });
+      const replacementToken = body.password ? await accountService.createSession(user.id) : null;
+      res.json({ user: updated, token: replacementToken });
     } catch (err) {
       next(err);
     }
@@ -92,9 +99,14 @@ module.exports = function createAuthRoutes({ accountService, config }) {
     }
   });
 
-  router.post("/logout", (req, res) => {
-    clearWebStreamAuthCookies(req, res);
-    res.json({ ok: true });
+  router.post("/logout", async (req, res, next) => {
+    try {
+      await accountService.logout(extractSessionToken(req));
+      clearWebStreamAuthCookies(req, res);
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
   });
 
   return router;

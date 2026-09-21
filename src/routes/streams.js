@@ -228,15 +228,26 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, ffmpeg, 
         mediaType: req.params.mediaType
       });
       const selectedSubtitle = playbackOptions && playbackOptions.subtitles.find((item) => item.id === req.query.subtitle);
-      const useMultitrackWeb = Boolean(playbackOptions && !playbackOptions.audioOnly && playbackOptions.audio.length > 0);
+      const useSeparateAudio = Boolean(
+        playbackOptions
+        && !playbackOptions.audioOnly
+        && playbackOptions.audio.length > 0
+        && !(playbackOptions.videoTrackCount === 1 && playbackOptions.audio.length === 1)
+      );
+      const includeSwitchableSubtitles = Boolean(
+        playbackOptions
+        && (!selectedSubtitle || selectedSubtitle.id === "none" || selectedSubtitle.webSwitchable)
+        && playbackOptions.subtitles.some((item) => item.id !== "none" && item.webSwitchable)
+      );
+      const useAdaptiveMaster = useSeparateAudio || includeSwitchableSubtitles;
       const stream = await hls.prepare(mediaFile, {
         mediaType: req.params.mediaType,
         mediaId: req.params.id,
         audio: req.query.audio,
-        subtitle: useMultitrackWeb && (!selectedSubtitle || selectedSubtitle.webSwitchable) ? "none" : req.query.subtitle,
+        subtitle: includeSwitchableSubtitles ? "none" : req.query.subtitle,
         audioChannels: req.query.audioChannels || req.query.audioMode || req.query.channelMode,
         quality: req.query.quality,
-        rendition: useMultitrackWeb ? "video" : "muxed"
+        rendition: useSeparateAudio ? "video" : "muxed"
       });
       logger.info(`[stream] serving playlist cacheKey=${stream.cacheKey} playlist="${stream.playlistPath}"`);
       const playlist = await hls.getPlaylist(stream.cacheKey);
@@ -257,16 +268,17 @@ module.exports = function createStreamRoutes({ mediaIndex, hls, images, ffmpeg, 
         completionStartSeconds
       );
       res.type(contentTypeFor("master.m3u8"));
-      if (useMultitrackWeb) {
-        res.send(buildMultitrackMaster({
+      if (useAdaptiveMaster) {
+        res.send(buildAdaptiveMaster({
           req,
           surface: streamSurface,
           playbackOptions,
+          includeAudioRenditions: useSeparateAudio,
           selectedAudioId: req.query.audio,
           selectedSubtitleId: req.query.subtitle,
-          includeSwitchableSubtitles: !selectedSubtitle || selectedSubtitle.id === "none" || selectedSubtitle.webSwitchable,
+          includeSwitchableSubtitles,
           audioChannels: req.query.audioChannels || req.query.audioMode || req.query.channelMode,
-          videoPlaylistUrl: appendAuthQuery(
+          mediaPlaylistUrl: appendAuthQuery(
             `${streamBasePath(streamSurface)}/hls/${stream.cacheKey}/master.m3u8`,
             { playbackToken: hlsToken },
             streamAuthQuery(req, streamSurface)
@@ -372,21 +384,23 @@ function createHlsToken(playbackTokens, surface, cacheKey, payload, mediaType, m
   );
 }
 
-function buildMultitrackMaster({ req, surface, playbackOptions, selectedAudioId, selectedSubtitleId, includeSwitchableSubtitles, audioChannels, videoPlaylistUrl }) {
-  const selectedAudio = playbackOptions.audio.find((item) => item.id === selectedAudioId) || playbackOptions.audio[0];
+function buildAdaptiveMaster({ req, surface, playbackOptions, includeAudioRenditions, selectedAudioId, selectedSubtitleId, includeSwitchableSubtitles, audioChannels, mediaPlaylistUrl }) {
   const switchableSubtitles = includeSwitchableSubtitles
     ? playbackOptions.subtitles.filter((item) => item.id !== "none" && item.webSwitchable)
     : [];
   const lines = ["#EXTM3U", "#EXT-X-VERSION:6", "#EXT-X-INDEPENDENT-SEGMENTS"];
 
-  playbackOptions.audio.forEach((track, index) => {
-    const uri = mediaRenditionUrl(req, surface, "audio.m3u8", {
-      track: track.id,
-      audioChannels: audioChannels || "preserve",
-      playbackToken: req.playbackToken
+  if (includeAudioRenditions) {
+    const selectedAudio = playbackOptions.audio.find((item) => item.id === selectedAudioId) || playbackOptions.audio[0];
+    playbackOptions.audio.forEach((track, index) => {
+      const uri = mediaRenditionUrl(req, surface, "audio.m3u8", {
+        track: track.id,
+        audioChannels: audioChannels || "preserve",
+        playbackToken: req.playbackToken
+      });
+      lines.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="${hlsAttribute(track.label)}",LANGUAGE="${hlsAttribute(track.language)}",DEFAULT=${track.id === selectedAudio.id ? "YES" : "NO"},AUTOSELECT=${index === 0 || track.id === selectedAudio.id ? "YES" : "NO"},URI="${hlsAttribute(uri)}"`);
     });
-    lines.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="${hlsAttribute(track.label)}",LANGUAGE="${hlsAttribute(track.language)}",DEFAULT=${track.id === selectedAudio.id ? "YES" : "NO"},AUTOSELECT=${index === 0 || track.id === selectedAudio.id ? "YES" : "NO"},URI="${hlsAttribute(uri)}"`);
-  });
+  }
   switchableSubtitles.forEach((track) => {
     const uri = mediaRenditionUrl(req, surface, "subtitles.m3u8", {
       track: track.id,
@@ -394,9 +408,10 @@ function buildMultitrackMaster({ req, surface, playbackOptions, selectedAudioId,
     });
     lines.push(`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="${hlsAttribute(track.label)}",LANGUAGE="${hlsAttribute(track.language)}",DEFAULT=${track.id === selectedSubtitleId ? "YES" : "NO"},AUTOSELECT=YES,FORCED=${track.forced ? "YES" : "NO"},URI="${hlsAttribute(uri)}"`);
   });
+  const audioGroup = includeAudioRenditions ? ',AUDIO="audio"' : "";
   const subtitleGroup = switchableSubtitles.length > 0 ? ',SUBTITLES="subtitles"' : "";
-  lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=12000000,AUDIO="audio"${subtitleGroup}`);
-  lines.push(videoPlaylistUrl);
+  lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=12000000${audioGroup}${subtitleGroup}`);
+  lines.push(mediaPlaylistUrl);
   return lines.join("\n");
 }
 

@@ -29,6 +29,7 @@ function openApiSpec() {
       { name: "Auth" },
       { name: "Admin" },
       { name: "Catalog" },
+      { name: "Streams" },
       { name: "Libraries" },
       { name: "OpenMovie" },
       { name: "Playback Progress" },
@@ -261,10 +262,10 @@ function openApiSpec() {
     security: standardSecurity(),
     paths: {
       "/api/app/version": {
-        get: operation("App", "Get the running application version", "Public endpoint used by web clients to detect a completed server update.", false)
+        get: operation("App", "Get the running application version", "Returns the release version and content-derived web revision used by clients to detect completed server updates.", false)
       },
       "/api/auth/status": {
-        get: operation("Auth", "Check first-run setup status", "Returns whether an admin account must be created.", false)
+        get: operation("Auth", "Get web bootstrap status", "Returns first-run state and, when a session token is supplied, the current account needed to bootstrap the web client.", false)
       },
       "/api/auth/setup": {
         post: operation("Auth", "Create first admin account", "Only works when no accounts exist.", false, {
@@ -489,6 +490,14 @@ function openApiSpec() {
       "/api/admin/watch-together/{roomId}": {
         delete: operation("Admin", "Close Watch Together room", "Closes an active room for every participant. Requires a full admin account.", true, {
           parameters: [pathParam("roomId")]
+        })
+      },
+      "/api/admin/stream-queues": {
+        get: operation("Admin", "Active streams", "Lists continuous external streams from every account. Requires a full admin account.")
+      },
+      "/api/admin/stream-queues/{queueId}": {
+        delete: operation("Admin", "Stop stream", "Stops an active continuous stream and revokes its playback URL. Requires a full admin account.", true, {
+          parameters: [pathParam("queueId")]
         })
       },
       "/api/admin/history": {
@@ -869,6 +878,78 @@ function openApiSpec() {
           parameters: [pathParam("cacheKey"), pathParam("filename")]
         })
       },
+      "/api/copy-queues": {
+        get: operation("Streams", "List streams", "Returns active continuous streams available to an account with stream management permission. Administrators receive streams from every owner. The opaque playback URL is returned only when a stream is created.", true),
+        post: operation("Streams", "Create stream", "Creates a continuous HLS stream from one media item. The account must have Manage streams permission and access to the selected library.", true, {
+          requestBody: jsonBody(objectSchema({
+            name: { type: "string", maxLength: 255 },
+            mediaType: { type: "string" },
+            mediaId: { type: "string" },
+            audio: { type: "string" },
+            subtitle: { type: "string" },
+            audioChannels: { type: "string", enum: ["preserve", "stereo", "surround51", "stabby51"] },
+            quality: { type: "string", enum: ["original", "medium", "low"] },
+            expiresInSeconds: { type: "integer", nullable: true }
+          }, ["mediaType", "mediaId"]))
+        })
+      },
+      "/api/copy-queues/{queueId}/items": {
+        post: operation("Streams", "Add stream item", "Appends a media item to a stream the account can manage.", true, {
+          parameters: [pathParam("queueId")],
+          requestBody: jsonBody(objectSchema({
+            mediaType: { type: "string" },
+            mediaId: { type: "string" },
+            audio: { type: "string" },
+            subtitle: { type: "string" },
+            audioChannels: { type: "string", enum: ["preserve", "stereo", "surround51", "stabby51"] },
+            quality: { type: "string", enum: ["original", "medium", "low"] }
+          }, ["mediaType", "mediaId"]))
+        })
+      },
+      "/api/copy-queues/{queueId}/order": {
+        put: operation("Streams", "Reorder upcoming items", "Replaces the order of all editable upcoming items.", true, {
+          parameters: [pathParam("queueId")],
+          requestBody: jsonBody(objectSchema({
+            itemIds: { type: "array", items: { type: "string" } }
+          }, ["itemIds"]))
+        })
+      },
+      "/api/copy-queues/{queueId}/items/{itemId}": {
+        delete: operation("Streams", "Remove upcoming item", "Removes an upcoming item from a stream the account can manage.", true, {
+          parameters: [pathParam("queueId"), pathParam("itemId")]
+        })
+      },
+      "/api/copy-queues/{queueId}/skip": {
+        post: operation("Streams", "Skip current item", "Moves a stream the account can manage to its next item.", true, {
+          parameters: [pathParam("queueId")]
+        })
+      },
+      "/api/copy-queues/{queueId}/play": {
+        post: operation("Streams", "Start stream", "Switches a waiting stream from its fallback loop to the first ready media item.", true, {
+          parameters: [pathParam("queueId")]
+        })
+      },
+      "/api/copy-queues/{queueId}": {
+        delete: operation("Streams", "Stop stream", "Revokes the opaque playback URL and deletes the stream.", true, {
+          parameters: [pathParam("queueId")]
+        })
+      },
+      "/api/copy-queues/stream/{token}/master.m3u8": {
+        get: operation("Streams", "Serve continuous stream", "Serves the rolling HLS playlist identified by its opaque stream token. The token is the credential and no account header is required.", false, {
+          parameters: [pathParam("token")],
+          responses: {
+            200: {
+              description: "Rolling HLS playlist",
+              content: { "application/vnd.apple.mpegurl": { schema: { type: "string" } } }
+            }
+          }
+        })
+      },
+      "/api/copy-queues/stream/{token}/segments/{sequence}.ts": {
+        get: operation("Streams", "Serve stream segment", "Serves a segment from the rolling stream window using the opaque stream token.", false, {
+          parameters: [pathParam("token"), pathParam("sequence", "integer")]
+        })
+      },
       "/api/web-streams/{libraryKey}/{itemId}/master.m3u8": {
         get: operation("Streams", "Serve authenticated web playback", "Requires a web-scoped playback token plus an authenticated account session or API key. Read-only library view links cannot create or use playback sessions. The built-in player uses an HTTP-only cookie so account credentials are absent from its URL.", true, {
           parameters: [pathParam("libraryKey"), pathParam("itemId"), queryParam("playbackToken")]
@@ -880,7 +961,7 @@ function openApiSpec() {
         })
       },
       "/api/watch-together/rooms": {
-        post: operation("Watch Together", "Create room", "Creates a synchronized room for one media item. The account must have Copy URL permission and access to the selected library.", true, {
+        post: operation("Watch Together", "Create room", "Creates a synchronized room and queue beginning with one media item. The account must have Copy URL permission and access to the selected library. Queue changes and transitions are sent through the room WebSocket.", true, {
           requestBody: jsonBody(objectSchema({
             mediaType: { type: "string" },
             mediaId: { type: "string" },

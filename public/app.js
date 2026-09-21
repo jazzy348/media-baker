@@ -1,6 +1,8 @@
 const initialLibraryViewToken = new URLSearchParams(window.location.search).get("viewToken") || "";
 const navigation = window.MediaBakerNavigation;
 const apiClient = window.MediaBakerApi;
+const appRevision = document.querySelector('meta[name="media-baker-revision"]')?.content || "";
+const hlsScriptUrl = `/vendor/hls.js/hls.min.js${appRevision ? `?v=${encodeURIComponent(appRevision)}` : ""}`;
 const PLAYBACK_PREFERENCES_KEY = "mediaBakerPlaybackPreferences";
 const LIBRARY_SIDEBAR_PREFERENCE_KEY = "mediaBakerLibrarySidebarExpanded";
 const HOME_ROW_PAGE_SIZE = 18;
@@ -91,6 +93,7 @@ const els = {
   adminPanelButton: document.getElementById("adminPanelButton"),
   liveTvButton: document.getElementById("liveTvButton"),
   downloadButton: document.getElementById("downloadButton"),
+  streamQueuesButton: document.getElementById("streamQueuesButton"),
   systemBanner: document.getElementById("systemBanner"),
   updateBanner: document.getElementById("updateBanner"),
   updateBannerTitle: document.getElementById("updateBannerTitle"),
@@ -115,6 +118,33 @@ const els = {
   liveTvEarlier: document.getElementById("liveTvEarlier"),
   liveTvNow: document.getElementById("liveTvNow"),
   liveTvLater: document.getElementById("liveTvLater"),
+  streamQueuesView: document.getElementById("streamQueuesView"),
+  newStreamQueue: document.getElementById("newStreamQueue"),
+  streamQueueEmpty: document.getElementById("streamQueueEmpty"),
+  streamQueueDraft: document.getElementById("streamQueueDraft"),
+  cancelStreamQueueDraft: document.getElementById("cancelStreamQueueDraft"),
+  copyQueueSelected: document.getElementById("copyQueueSelected"),
+  streamQueueCurrent: document.getElementById("streamQueueCurrent"),
+  streamQueueOwner: document.getElementById("streamQueueOwner"),
+  streamQueueTitle: document.getElementById("streamQueueTitle"),
+  streamQueueMeta: document.getElementById("streamQueueMeta"),
+  copyCurrentStreamUrl: document.getElementById("copyCurrentStreamUrl"),
+  playCurrentStream: document.getElementById("playCurrentStream"),
+  skipCurrentStreamItem: document.getElementById("skipCurrentStreamItem"),
+  stopCurrentStream: document.getElementById("stopCurrentStream"),
+  streamQueueItems: document.getElementById("streamQueueItems"),
+  streamQueueMediaPicker: document.getElementById("streamQueueMediaPicker"),
+  streamQueueMediaBrowserBack: document.getElementById("streamQueueMediaBrowserBack"),
+  streamQueueMediaBrowserContext: document.getElementById("streamQueueMediaBrowserContext"),
+  streamQueueSearchTitle: document.getElementById("streamQueueSearchTitle"),
+  streamQueueSelectionHint: document.getElementById("streamQueueSelectionHint"),
+  streamQueueSearchForm: document.getElementById("streamQueueSearchForm"),
+  streamQueueSearchInput: document.getElementById("streamQueueSearchInput"),
+  streamQueueSearchResults: document.getElementById("streamQueueSearchResults"),
+  streamQueueAudioSelect: document.getElementById("streamQueueAudioSelect"),
+  streamQueueSubtitleSelect: document.getElementById("streamQueueSubtitleSelect"),
+  addStreamQueueMedia: document.getElementById("addStreamQueueMedia"),
+  createStreamQueue: document.getElementById("createStreamQueue"),
   imageViewer: document.getElementById("imageViewer"),
   imageViewerImage: document.getElementById("imageViewerImage"),
   closeImageViewer: document.getElementById("closeImageViewer"),
@@ -191,6 +221,7 @@ const els = {
   closePlayer: document.getElementById("closePlayer"),
   minimizeVideoPlayer: document.getElementById("minimizeVideoPlayer"),
   videoPlayerSlot: document.getElementById("videoPlayerSlot"),
+  watchTogetherPreviewDrag: document.getElementById("watchTogetherPreviewDrag"),
   videoPlaybackSurface: document.getElementById("videoPlaybackSurface"),
   videoSkipPrompt: document.getElementById("videoSkipPrompt"),
   videoSkipPromptText: document.getElementById("videoSkipPromptText"),
@@ -218,14 +249,27 @@ const els = {
   playerStatus: document.getElementById("playerStatus"),
   toggleWatchTogetherPanel: document.getElementById("toggleWatchTogetherPanel"),
   watchTogetherPanel: document.getElementById("watchTogetherPanel"),
+  watchTogetherRoomTab: document.getElementById("watchTogetherRoomTab"),
+  openWatchTogetherMediaBrowser: document.getElementById("openWatchTogetherMediaBrowser"),
+  closeWatchTogetherMediaBrowser: document.getElementById("closeWatchTogetherMediaBrowser"),
+  watchTogetherMediaBrowser: document.getElementById("watchTogetherMediaBrowser"),
+  watchTogetherMediaBrowserBack: document.getElementById("watchTogetherMediaBrowserBack"),
+  watchTogetherMediaBrowserContext: document.getElementById("watchTogetherMediaBrowserContext"),
+  watchTogetherMediaBrowserTitle: document.getElementById("watchTogetherMediaBrowserTitle"),
   closeWatchTogetherPanel: document.getElementById("closeWatchTogetherPanel"),
   watchTogetherRoomStatus: document.getElementById("watchTogetherRoomStatus"),
   watchTogetherHostControls: document.getElementById("watchTogetherHostControls"),
   watchTogetherEveryoneControls: document.getElementById("watchTogetherEveryoneControls"),
+  watchTogetherEveryoneQueues: document.getElementById("watchTogetherEveryoneQueues"),
   copyWatchTogetherInvite: document.getElementById("copyWatchTogetherInvite"),
   watchTogetherInviteFallback: document.getElementById("watchTogetherInviteFallback"),
   closeWatchTogetherRoom: document.getElementById("closeWatchTogetherRoom"),
   watchTogetherParticipants: document.getElementById("watchTogetherParticipants"),
+  watchTogetherQueue: document.getElementById("watchTogetherQueue"),
+  watchTogetherSkipQueueItem: document.getElementById("watchTogetherSkipQueueItem"),
+  watchTogetherQueueSearchForm: document.getElementById("watchTogetherQueueSearchForm"),
+  watchTogetherQueueSearch: document.getElementById("watchTogetherQueueSearch"),
+  watchTogetherQueueSearchResults: document.getElementById("watchTogetherQueueSearchResults"),
   watchTogetherChat: document.getElementById("watchTogetherChat"),
   watchTogetherChatForm: document.getElementById("watchTogetherChatForm"),
   watchTogetherChatInput: document.getElementById("watchTogetherChatInput"),
@@ -234,6 +278,15 @@ const els = {
   watchTogetherJoinPrompt: document.getElementById("watchTogetherJoinPrompt"),
   watchTogetherGuestName: document.getElementById("watchTogetherGuestName"),
   watchTogetherJoinStatus: document.getElementById("watchTogetherJoinStatus"),
+  copyQueueSelectedTitle: document.getElementById("copyQueueSelectedTitle"),
+  copyQueueName: document.getElementById("copyQueueName"),
+  copyQueueExpiry: document.getElementById("copyQueueExpiry"),
+  copyQueueCreatedUrl: document.getElementById("copyQueueCreatedUrl"),
+  copyQueueUrl: document.getElementById("copyQueueUrl"),
+  copyCopyQueueUrl: document.getElementById("copyCopyQueueUrl"),
+  copyQueueStatus: document.getElementById("copyQueueStatus"),
+  copyQueueCount: document.getElementById("copyQueueCount"),
+  copyQueueList: document.getElementById("copyQueueList"),
   videoMiniPlayer: document.getElementById("videoMiniPlayer"),
   videoMiniPlayerDrag: document.getElementById("videoMiniPlayerDrag"),
   videoMiniPlayerSlot: document.getElementById("videoMiniPlayerSlot"),
@@ -409,7 +462,9 @@ const els = {
   adminCurrentlyPlayingPage: document.getElementById("adminCurrentlyPlayingPage"),
   currentlyPlayingPlaybackTab: document.getElementById("currentlyPlayingPlaybackTab"),
   currentlyPlayingRoomsTab: document.getElementById("currentlyPlayingRoomsTab"),
+  currentlyPlayingStreamsTab: document.getElementById("currentlyPlayingStreamsTab"),
   watchTogetherAdminList: document.getElementById("watchTogetherAdminList"),
+  streamQueuesAdminList: document.getElementById("streamQueuesAdminList"),
   adminLogsPage: document.getElementById("adminLogsPage"),
   adminHistoryPage: document.getElementById("adminHistoryPage"),
   accountForm: document.getElementById("accountForm"),
@@ -419,6 +474,7 @@ const els = {
   accountLibrariesSelect: document.getElementById("accountLibrariesSelect"),
   accountIsAdmin: document.getElementById("accountIsAdmin"),
   accountCanCopyUrls: document.getElementById("accountCanCopyUrls"),
+  accountCanStreamQueues: document.getElementById("accountCanStreamQueues"),
   accountCanLibraries: document.getElementById("accountCanLibraries"),
   accountCanMetadata: document.getElementById("accountCanMetadata"),
   accountCanSettings: document.getElementById("accountCanSettings"),
@@ -520,8 +576,13 @@ const els = {
   settingsYtDlpSubscriptionHours: document.getElementById("settingsYtDlpSubscriptionHours"),
   settingsYtDlpUpdate: document.getElementById("settingsYtDlpUpdate"),
   settingsYtDlpUploadCookies: document.getElementById("settingsYtDlpUploadCookies"),
+  settingsYtDlpCookieHelp: document.getElementById("settingsYtDlpCookieHelp"),
   settingsYtDlpRemoveCookies: document.getElementById("settingsYtDlpRemoveCookies"),
   settingsYtDlpCookieFile: document.getElementById("settingsYtDlpCookieFile"),
+  ytdlpCookieGuideOverlay: document.getElementById("ytdlpCookieGuideOverlay"),
+  closeYtDlpCookieGuideIcon: document.getElementById("closeYtDlpCookieGuideIcon"),
+  selectYtDlpCookiesFromGuide: document.getElementById("selectYtDlpCookiesFromGuide"),
+  closeYtDlpCookieGuide: document.getElementById("closeYtDlpCookieGuide"),
   settingsYtDlpStatus: document.getElementById("settingsYtDlpStatus"),
   settingsYtDlpSubscriptionUrl: document.getElementById("settingsYtDlpSubscriptionUrl"),
   settingsYtDlpAddSubscription: document.getElementById("settingsYtDlpAddSubscription"),
@@ -649,9 +710,19 @@ let watchTogetherSession = null;
 let pendingWatchTogetherInvite = null;
 let pendingWatchTogetherState = null;
 let watchTogetherSuppressControlsUntil = 0;
+let watchTogetherPanelView = "chat";
+let watchTogetherPreviewDragState = null;
+let watchTogetherMediaBrowserTrail = [];
+let watchTogetherMediaBrowserRequestId = 0;
+let copyQueueSelectedItem = null;
+let copyQueues = [];
+let selectedCopyQueueId = null;
+let streamQueueMediaBrowserTrail = [];
+let streamQueueMediaBrowserRequestId = 0;
 let currentlyPlayingAdminView = "playback";
 const downloadStatuses = new Map();
 let librarySidebarGesture = null;
+let hlsLibraryPromise = null;
 
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -678,8 +749,10 @@ els.loginForm.addEventListener("submit", async (event) => {
     localStorage.setItem("streamToken", state.token);
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
-    await loadLibrarySidebar(true);
-    await renderRoute(navigation.readRoute());
+    await Promise.all([
+      loadLibrarySidebar(true),
+      renderRoute(navigation.readRoute())
+    ]);
     refreshIptvAvailability();
     refreshSystemHealthInBackground();
     refreshUpdateStatusInBackground();
@@ -714,7 +787,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 els.lockButton.addEventListener("click", () => {
-  publicApi("/api/auth/logout", { method: "POST" }).catch(() => {});
+  api("/api/auth/logout", state.token, { method: "POST" }).catch(() => {});
   hideLiveTvView();
   closeAccountPanel();
   closePlayer();
@@ -748,6 +821,7 @@ els.accountOverlay.addEventListener("click", (event) => {
 });
 els.downloadButton.addEventListener("click", openDownloadPanel);
 els.liveTvButton.addEventListener("click", () => openLiveTv(new Date(), true));
+els.streamQueuesButton.addEventListener("click", () => openStreamQueuesView());
 els.liveTvEarlier.addEventListener("click", () => shiftLiveTvGuide(-1));
 els.liveTvNow.addEventListener("click", () => openLiveTv(new Date(), true));
 els.liveTvLater.addEventListener("click", () => shiftLiveTvGuide(1));
@@ -816,6 +890,18 @@ els.settingsCheckUpdates.addEventListener("click", forceCheckForUpdates);
 els.settingsInstallUpdate.addEventListener("click", installAvailableUpdate);
 els.settingsYtDlpUpdate.addEventListener("click", forceYtDlpUpdate);
 els.settingsYtDlpUploadCookies.addEventListener("click", () => els.settingsYtDlpCookieFile.click());
+els.settingsYtDlpCookieHelp.addEventListener("click", openYtDlpCookieGuide);
+els.closeYtDlpCookieGuideIcon.addEventListener("click", closeYtDlpCookieGuide);
+els.closeYtDlpCookieGuide.addEventListener("click", closeYtDlpCookieGuide);
+els.selectYtDlpCookiesFromGuide.addEventListener("click", () => {
+  closeYtDlpCookieGuide();
+  els.settingsYtDlpCookieFile.click();
+});
+els.ytdlpCookieGuideOverlay.addEventListener("click", (event) => {
+  if (event.target === els.ytdlpCookieGuideOverlay) {
+    closeYtDlpCookieGuide();
+  }
+});
 els.settingsYtDlpCookieFile.addEventListener("change", uploadYtDlpCookies);
 els.settingsYtDlpRemoveCookies.addEventListener("click", removeYtDlpCookies);
 els.settingsYtDlpAddSubscription.addEventListener("click", addYtDlpSubscription);
@@ -931,15 +1017,43 @@ els.toggleWatchTogetherPanel.addEventListener("click", () => {
   setWatchTogetherPanelOpen(els.watchTogetherPanel.classList.contains("hidden"));
 });
 els.closeWatchTogetherPanel.addEventListener("click", () => setWatchTogetherPanelOpen(false));
+els.watchTogetherPanel.addEventListener("click", selectWatchTogetherPanelView);
+els.openWatchTogetherMediaBrowser.addEventListener("click", openWatchTogetherMediaBrowser);
+els.closeWatchTogetherMediaBrowser.addEventListener("click", closeWatchTogetherMediaBrowser);
+els.watchTogetherMediaBrowserBack.addEventListener("click", navigateBackWatchTogetherMediaBrowser);
+els.watchTogetherPreviewDrag.addEventListener("pointerdown", beginWatchTogetherPreviewDrag);
+window.addEventListener("pointermove", moveWatchTogetherPreview);
+window.addEventListener("pointerup", endWatchTogetherPreviewDrag);
+window.addEventListener("pointercancel", endWatchTogetherPreviewDrag);
+window.addEventListener("resize", resetWatchTogetherPreviewPosition);
 els.watchTogetherJoinForm.addEventListener("submit", submitWatchTogetherGuestName);
 els.watchTogetherChatForm.addEventListener("submit", sendWatchTogetherChat);
 els.watchTogetherEveryoneControls.addEventListener("change", changeWatchTogetherControls);
+els.watchTogetherEveryoneQueues.addEventListener("change", changeWatchTogetherControls);
 els.copyWatchTogetherInvite.addEventListener("click", copyWatchTogetherInvite);
 els.closeWatchTogetherRoom.addEventListener("click", closeWatchTogetherRoom);
 els.watchTogetherParticipants.addEventListener("click", kickWatchTogetherParticipant);
+els.watchTogetherQueue.addEventListener("click", handleWatchTogetherQueueAction);
+els.watchTogetherSkipQueueItem.addEventListener("click", () => sendWatchTogether({ type: "queue-skip" }));
+els.watchTogetherQueueSearchForm.addEventListener("submit", searchWatchTogetherQueueMedia);
+els.newStreamQueue.addEventListener("click", () => beginStreamQueueDraft());
+els.cancelStreamQueueDraft.addEventListener("click", cancelStreamQueueDraft);
+els.streamQueueMediaBrowserBack.addEventListener("click", navigateBackStreamQueueMediaBrowser);
+els.streamQueueSearchForm.addEventListener("submit", searchStreamQueueMedia);
+els.addStreamQueueMedia.addEventListener("click", addSelectedStreamQueueMedia);
+els.createStreamQueue.addEventListener("click", createCopyStreamQueue);
+els.copyCopyQueueUrl.addEventListener("click", copyCreatedQueueUrl);
+els.copyQueueList.addEventListener("click", handleCopyQueueAction);
+els.streamQueueItems.addEventListener("click", handleCopyQueueAction);
+els.copyCurrentStreamUrl.addEventListener("click", copyCurrentStreamUrl);
+els.playCurrentStream.addEventListener("click", () => updateSelectedCopyQueue("play"));
+els.skipCurrentStreamItem.addEventListener("click", () => updateSelectedCopyQueue("skip"));
+els.stopCurrentStream.addEventListener("click", stopSelectedCopyQueue);
 els.currentlyPlayingPlaybackTab.addEventListener("click", () => setCurrentlyPlayingAdminView("playback"));
 els.currentlyPlayingRoomsTab.addEventListener("click", () => setCurrentlyPlayingAdminView("rooms"));
+els.currentlyPlayingStreamsTab.addEventListener("click", () => setCurrentlyPlayingAdminView("streams"));
 els.watchTogetherAdminList.addEventListener("click", closeAdminWatchTogetherRoom);
+els.streamQueuesAdminList.addEventListener("click", stopAdminStreamQueue);
 els.minimizeVideoPlayer.addEventListener("click", minimizeVideoPlayback);
 els.restoreVideoPlayer.addEventListener("click", restoreVideoPlayback);
 els.closeVideoMiniPlayer.addEventListener("click", closePlayer);
@@ -1083,6 +1197,10 @@ document.addEventListener("keydown", (event) => {
     els.videoTrackSettings.focus({ preventScroll: true });
     return;
   }
+  if (!els.ytdlpCookieGuideOverlay.classList.contains("hidden")) {
+    closeYtDlpCookieGuide();
+    return;
+  }
   if (!els.iptvMatchOverlay.classList.contains("hidden")) {
     closeIptvMatcher();
     return;
@@ -1132,7 +1250,7 @@ async function boot() {
   const initialRoute = navigation.readRoute();
   let status;
   try {
-    status = await publicApi("/api/auth/status");
+    status = await api("/api/auth/status");
   } catch (err) {
     els.loginError.textContent = err.message || "Media Baker could not contact the server.";
     els.loginOverlay.classList.remove("hidden");
@@ -1157,17 +1275,20 @@ async function boot() {
 
   try {
     if (state.token) {
-      const me = await api("/api/auth/me");
-      state.user = me.user;
-      setPlaybackPreferences(me.user && me.user.preferences);
-      applyFeatures(me.features);
+      if (!status.user) {
+        throw new Error("The saved session is no longer valid.");
+      }
+      state.user = status.user;
+      setPlaybackPreferences(status.user.preferences);
     }
     els.loginOverlay.classList.add("hidden");
     updateAdminControls();
+    revealApp();
+    const initialLoads = [renderRoute(initialRoute)];
     if (initialRoute.name !== "watch" || state.token || state.libraryViewToken) {
-      await loadLibrarySidebar(true);
+      initialLoads.push(loadLibrarySidebar(true));
     }
-    await renderRoute(initialRoute);
+    await Promise.all(initialLoads);
     refreshIptvAvailability();
     if (!state.libraryViewToken) {
       refreshSystemHealthInBackground();
@@ -1231,6 +1352,13 @@ async function renderRoute(route) {
     if (route.name === "live-tv" && !state.libraryViewToken) {
       if (state.iptvEnabled && canAccessLiveTv()) {
         await openLiveTv(route.start, route.pinnedToNow);
+        return;
+      }
+      navigation.navigate("/", { replace: true });
+    }
+    if (route.name === "stream-queues" && !state.libraryViewToken) {
+      if (hasPermission("canManageStreamQueues")) {
+        await openStreamQueuesView({ record: false });
         return;
       }
       navigation.navigate("/", { replace: true });
@@ -1533,6 +1661,7 @@ async function loadHome(mode = state.homeMode) {
 }
 
 function prepareHomeView() {
+  hideStreamQueuesView();
   state.currentView = "home";
   els.searchInput.value = "";
   els.searchResults.classList.add("hidden");
@@ -1870,6 +1999,7 @@ function updateHomeModeControls() {
 async function search() {
   stopLibraryLoading();
   hideLiveTvView();
+  hideStreamQueuesView();
   const query = els.searchInput.value.trim();
   const requestId = ++searchRequestId;
   if (searchAbortController) {
@@ -1947,6 +2077,7 @@ function card(item, options = {}) {
     : item;
   const button = document.createElement("button");
   button.className = "card";
+  if (options.browserCard) button.classList.add("media-browser-card");
   button.type = "button";
   button.dataset.mediaKey = mediaKey(item);
   if (isShowCard(item)) {
@@ -1998,7 +2129,17 @@ function card(item, options = {}) {
   if (item.itemType === "season") {
     setSeasonProgressMarker(poster, item.watchedEpisodeIds.length, item.seasonEpisodeIds.length);
   }
+  if (options.actionLabel) {
+    const action = document.createElement("span");
+    action.className = "media-browser-card-action";
+    action.textContent = options.actionLabel;
+    poster.appendChild(action);
+  }
   button.addEventListener("click", () => {
+    if (typeof options.onActivate === "function") {
+      options.onActivate(item, button);
+      return;
+    }
     if (item.itemType === "season") {
       openSeasonView(item.mediaType, item.showId, item.season);
       return;
@@ -2510,6 +2651,7 @@ async function openRandomCollectionItem(mediaType, folder, button = null) {
 function showContentView({ title, subtitle, actions, content }) {
   stopHomeRowLoading();
   hideLiveTvView();
+  hideStreamQueuesView();
   els.searchInput.value = "";
   els.searchResults.classList.add("hidden");
   els.homeToolbar.classList.add("hidden");
@@ -2715,6 +2857,7 @@ async function openLiveTv(start = new Date(), pinnedToNow = true) {
   stopLibraryLoading();
   stopHomeRowLoading();
   closeDetails();
+  hideStreamQueuesView();
   state.iptvGuideStart = roundedGuideStart(new Date(start));
   state.iptvGuidePinnedToNow = pinnedToNow;
   recordRoute(navigation.liveTvPath(state.iptvGuideStart, pinnedToNow));
@@ -3069,7 +3212,7 @@ function showAdminPage(page) {
     refreshHardware();
     adminRefreshTimer = setInterval(refreshHardware, 2000);
   } else if (page === "currentlyPlaying") {
-    refreshCurrentlyPlaying();
+    setCurrentlyPlayingAdminView(currentlyPlayingAdminView);
     adminRefreshTimer = setInterval(refreshCurrentlyPlaying, 5000);
   } else if (page === "logs") {
     refreshLogs();
@@ -3373,6 +3516,7 @@ function editAccount(account) {
   const permissions = account.permissions || {};
   els.accountIsAdmin.checked = Boolean(permissions.isAdmin);
   els.accountCanCopyUrls.checked = Boolean(permissions.canCopyStreamUrls);
+  els.accountCanStreamQueues.checked = Boolean(permissions.canManageStreamQueues);
   els.accountCanLibraries.checked = Boolean(permissions.canManageLibraries);
   els.accountCanMetadata.checked = Boolean(permissions.canManageMetadata);
   els.accountCanSettings.checked = Boolean(permissions.canManageSettings);
@@ -3400,6 +3544,7 @@ function resetAccountForm() {
   els.accountPasswordInput.placeholder = "Required for new accounts";
   els.accountIsAdmin.checked = false;
   els.accountCanCopyUrls.checked = false;
+  els.accountCanStreamQueues.checked = false;
   els.accountCanLibraries.checked = false;
   els.accountCanMetadata.checked = false;
   els.accountCanSettings.checked = false;
@@ -3526,6 +3671,7 @@ function accountPermissionsFromForm() {
   return {
     isAdmin: els.accountIsAdmin.checked,
     canCopyStreamUrls: els.accountCanCopyUrls.checked,
+    canManageStreamQueues: els.accountCanStreamQueues.checked,
     canManageLibraries: els.accountCanLibraries.checked,
     canManageMetadata: els.accountCanMetadata.checked,
     canManageSettings: els.accountCanSettings.checked,
@@ -4659,7 +4805,7 @@ async function restoreBackup(backup) {
       method: "POST",
       body: JSON.stringify({ confirm: true })
     });
-    els.backupStatus.textContent = "Restore complete. Media Baker is restarting...";
+    els.backupStatus.textContent = "Backup validated. Media Baker is restarting to restore it...";
     setTimeout(() => window.location.reload(), 3500);
   } catch (err) {
     els.backupStatus.textContent = err.message || "Restore failed.";
@@ -4965,6 +5111,18 @@ async function forceYtDlpUpdate() {
     els.settingsYtDlpStatus.textContent = err.message || "YT-DLP update failed.";
     els.settingsYtDlpUpdate.disabled = false;
   }
+}
+
+function openYtDlpCookieGuide() {
+  els.ytdlpCookieGuideOverlay.classList.remove("hidden");
+  els.ytdlpCookieGuideOverlay.setAttribute("aria-hidden", "false");
+  els.closeYtDlpCookieGuideIcon.focus({ preventScroll: true });
+}
+
+function closeYtDlpCookieGuide() {
+  els.ytdlpCookieGuideOverlay.classList.add("hidden");
+  els.ytdlpCookieGuideOverlay.setAttribute("aria-hidden", "true");
+  els.settingsYtDlpCookieHelp.focus({ preventScroll: true });
 }
 
 async function uploadYtDlpCookies(event) {
@@ -5540,6 +5698,10 @@ async function saveSelfAccount(event) {
         body: JSON.stringify({ username, currentPassword, password })
       });
       state.user = result.user;
+      if (result.token) {
+        state.token = result.token;
+        localStorage.setItem("streamToken", result.token);
+      }
     }
 
     const preferences = normalizePlaybackPreferences({
@@ -6140,6 +6302,10 @@ async function refreshCurrentlyPlaying() {
     await refreshWatchTogetherRooms();
     return;
   }
+  if (currentlyPlayingAdminView === "streams") {
+    await refreshAdminStreamQueues();
+    return;
+  }
   try {
     const data = await api("/api/admin/currently-playing");
     const items = data.items || [];
@@ -6180,13 +6346,52 @@ async function refreshCurrentlyPlaying() {
 }
 
 function setCurrentlyPlayingAdminView(view) {
-  currentlyPlayingAdminView = view === "rooms" ? "rooms" : "playback";
+  currentlyPlayingAdminView = view === "rooms" ? "rooms" : view === "streams" && isAdminMode() ? "streams" : "playback";
   const rooms = currentlyPlayingAdminView === "rooms";
-  els.currentlyPlayingPlaybackTab.classList.toggle("active", !rooms);
+  const streams = currentlyPlayingAdminView === "streams";
+  els.currentlyPlayingPlaybackTab.classList.toggle("active", !rooms && !streams);
   els.currentlyPlayingRoomsTab.classList.toggle("active", rooms);
-  els.currentlyPlayingList.classList.toggle("hidden", rooms);
+  els.currentlyPlayingStreamsTab.classList.toggle("hidden", !isAdminMode());
+  els.currentlyPlayingStreamsTab.classList.toggle("active", streams);
+  els.currentlyPlayingList.classList.toggle("hidden", rooms || streams);
   els.watchTogetherAdminList.classList.toggle("hidden", !rooms);
+  els.streamQueuesAdminList.classList.toggle("hidden", !streams);
   refreshCurrentlyPlaying();
+}
+
+async function refreshAdminStreamQueues() {
+  if (!isAdminMode()) return;
+  try {
+    const data = await api("/api/admin/stream-queues");
+    const queues = data.queues || [];
+    els.streamQueuesAdminList.replaceChildren();
+    if (queues.length === 0) {
+      els.streamQueuesAdminList.innerHTML = '<p class="status">No streams are active.</p>';
+      return;
+    }
+    for (const queue of queues) {
+      const card = document.createElement("section");
+      card.className = "library-manager-card currently-playing-card";
+      const current = queue.items && queue.items.find((item) => item.status === "current" || item.status === "ready");
+      card.innerHTML = `<div class="currently-playing-heading"><div><strong>${escapeHtml(queue.name)}</strong><span>Owned by ${escapeHtml(queue.ownerName || "Unknown")}</span></div><button class="danger-button compact-button" data-admin-stream-queue-id="${escapeHtml(queue.id)}" type="button">Stop stream</button></div><div class="currently-playing-meta"><span>${escapeHtml(current ? current.title : "Waiting for media")}</span><span>${queue.itemCount} item${queue.itemCount === 1 ? "" : "s"}</span><span>${escapeHtml(streamQueueStateLabel(queue))}</span></div>`;
+      els.streamQueuesAdminList.appendChild(card);
+    }
+  } catch (err) {
+    els.streamQueuesAdminList.innerHTML = '<p class="status">Failed to load streams.</p>';
+  }
+}
+
+async function stopAdminStreamQueue(event) {
+  const button = event.target.closest("[data-admin-stream-queue-id]");
+  if (!button || !isAdminMode() || !window.confirm("Stop this stream? Its playback URL will stop working.")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/admin/stream-queues/${encodeURIComponent(button.dataset.adminStreamQueueId)}`, state.token, { method: "DELETE" });
+    await refreshAdminStreamQueues();
+  } catch (err) {
+    button.disabled = false;
+    window.alert(err.message || "Could not stop the stream.");
+  }
 }
 
 async function refreshWatchTogetherRooms() {
@@ -6206,6 +6411,8 @@ async function refreshWatchTogetherRooms() {
       const duration = Number(room.durationSeconds) || 0;
       const percent = duration > 0 ? Math.min(100, position / duration * 100) : 0;
       const participantNames = (room.participants || []).map((participant) => participant.name).join(", ") || "No one connected";
+      const queueCount = Array.isArray(room.queue) ? room.queue.length : 0;
+      const queuePosition = queueCount > 0 ? Math.min(Number(room.currentQueueIndex) + 1, queueCount) : 0;
       card.innerHTML = `
         <div class="currently-playing-heading">
           <div>
@@ -6218,6 +6425,7 @@ async function refreshWatchTogetherRooms() {
         <div class="currently-playing-meta">
           <span>${escapeHtml(room.libraryTitle || room.mediaType || "")}</span>
           <span>${escapeHtml(`${room.connected || 0} connected`)}</span>
+          <span>${escapeHtml(`Queue ${queuePosition} of ${queueCount}`)}</span>
           <span>${escapeHtml(`${roomState.state === "playing" ? "Playing" : "Paused"} at ${formatDuration(position)}`)}</span>
           <span>${escapeHtml(participantNames)}</span>
         </div>
@@ -7471,11 +7679,34 @@ function setPosterImage(element, url) {
     return;
   }
 
+  posterImageSources.set(element, imageUrl);
+  if (posterImageObserver) {
+    posterImageObserver.observe(element);
+    return;
+  }
+  loadPosterImage(element, imageUrl);
+}
+
+const posterImageSources = new WeakMap();
+const posterImageObserver = typeof window.IntersectionObserver === "function"
+  ? new window.IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      posterImageObserver.unobserve(entry.target);
+      const imageUrl = posterImageSources.get(entry.target);
+      if (imageUrl) loadPosterImage(entry.target, imageUrl);
+    }
+  }, { rootMargin: "500px" })
+  : null;
+
+function loadPosterImage(element, imageUrl) {
   const requestId = `${Date.now()}-${Math.random()}`;
   element.dataset.posterRequest = requestId;
   const image = new Image();
+  image.decoding = "async";
+  image.fetchPriority = "low";
   image.addEventListener("load", () => {
-    if (element.dataset.posterRequest !== requestId) {
+    if (element.dataset.posterRequest !== requestId || posterImageSources.get(element) !== imageUrl) {
       return;
     }
     [...element.childNodes]
@@ -7493,6 +7724,8 @@ function setPosterImage(element, url) {
 }
 
 function clearPosterImage(element) {
+  posterImageObserver?.unobserve(element);
+  posterImageSources.delete(element);
   delete element.dataset.posterRequest;
   element.classList.remove("with-image");
   element.style.removeProperty("--poster-image");
@@ -7757,6 +7990,7 @@ function updateAdminControls() {
   els.downloadButton.classList.toggle("hidden", !state.token || Boolean(state.libraryViewToken) || !state.features.ytdlp);
   els.downloadButton.disabled = ytdlpUnavailable;
   els.downloadButton.title = ytdlpUnavailable ? "YT-DLP is enabled but not available on the server." : "Download URL";
+  els.streamQueuesButton.classList.toggle("hidden", !hasPermission("canManageStreamQueues"));
   renderUpdateBanner();
 }
 
@@ -8310,6 +8544,455 @@ async function writeClipboard(value) {
   await navigator.clipboard.writeText(value);
 }
 
+async function openStreamQueuesView(options = {}) {
+  if (!hasPermission("canManageStreamQueues")) return;
+  stopLibraryLoading();
+  stopHomeRowLoading();
+  hideLiveTvView();
+  closeDetails();
+  if (options.record !== false) recordRoute(navigation.streamQueuesPath());
+  state.currentView = "stream-queues";
+  els.searchInput.value = "";
+  els.searchResults.classList.add("hidden");
+  els.homeToolbar.classList.add("hidden");
+  els.homeRows.classList.add("hidden");
+  els.streamQueuesView.classList.remove("hidden");
+  els.copyQueueStatus.textContent = "Loading streams...";
+  await loadCopyQueues();
+  if (selectedCopyQueueId && copyQueues.some((queue) => queue.id === selectedCopyQueueId)) {
+    selectCopyQueue(selectedCopyQueueId);
+  } else if (copyQueues.length > 0) {
+    selectCopyQueue(copyQueues[0].id);
+  } else {
+    beginStreamQueueDraft();
+  }
+}
+
+function hideStreamQueuesView() {
+  streamQueueMediaBrowserRequestId += 1;
+  els.streamQueuesView.classList.add("hidden");
+}
+
+async function loadCopyQueues() {
+  try {
+    const result = await api("/api/copy-queues", state.token);
+    copyQueues = result.queues || [];
+    renderCopyQueues();
+    els.copyQueueStatus.textContent = "";
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "Could not load streams.";
+  }
+}
+
+function beginStreamQueueDraft() {
+  selectedCopyQueueId = null;
+  clearStreamQueueMediaSelection();
+  els.streamQueueEmpty.classList.add("hidden");
+  els.streamQueueCurrent.classList.add("hidden");
+  els.streamQueueDraft.classList.remove("hidden");
+  els.streamQueueMediaPicker.classList.remove("hidden");
+  els.copyQueueName.value = "";
+  resetStreamQueueMediaBrowser("New stream", "Choose the first item");
+  renderCopyQueues();
+}
+
+function cancelStreamQueueDraft() {
+  copyQueueSelectedItem = null;
+  if (copyQueues.length > 0) selectCopyQueue(copyQueues[0].id);
+  else showEmptyStreamQueueEditor();
+}
+
+function showEmptyStreamQueueEditor() {
+  selectedCopyQueueId = null;
+  clearStreamQueueMediaSelection();
+  streamQueueMediaBrowserRequestId += 1;
+  streamQueueMediaBrowserTrail = [];
+  els.streamQueueEmpty.classList.remove("hidden");
+  els.streamQueueDraft.classList.add("hidden");
+  els.streamQueueCurrent.classList.add("hidden");
+  els.streamQueueMediaPicker.classList.add("hidden");
+  renderCopyQueues();
+}
+
+async function createCopyStreamQueue() {
+  if (!copyQueueSelectedItem) return;
+  els.copyQueueStatus.textContent = "Creating stream...";
+  try {
+    const expiry = els.copyQueueExpiry.value;
+    const result = await api("/api/copy-queues", state.token, {
+      method: "POST",
+      body: JSON.stringify({
+        ...selectedStreamQueueMediaPayload(),
+        name: els.copyQueueName.value.trim(),
+        expiresInSeconds: expiry === "unlimited" ? null : Number(expiry)
+      })
+    });
+    rememberCopyQueueUrl(result.queue.id, result.playbackUrl);
+    els.copyQueueUrl.value = result.playbackUrl;
+    copyQueues.unshift(result.queue);
+    copyQueueSelectedItem = null;
+    selectCopyQueue(result.queue.id, { revealUrl: result.playbackUrl });
+    els.copyQueueStatus.textContent = "Stream created and waiting. Open the URL, then press Play stream when ready.";
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "Could not create the stream.";
+  }
+}
+
+async function copyCreatedQueueUrl() {
+  if (!els.copyQueueUrl.value) return;
+  try {
+    await writeClipboard(els.copyQueueUrl.value);
+    els.copyQueueStatus.textContent = "Stream URL copied.";
+  } catch (err) {
+    els.copyQueueUrl.focus();
+    els.copyQueueUrl.select();
+    els.copyQueueStatus.textContent = "Select the URL to copy it manually.";
+  }
+}
+
+function renderCopyQueues() {
+  els.copyQueueList.replaceChildren();
+  els.copyQueueCount.textContent = String(copyQueues.length);
+  for (const queue of copyQueues) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `stream-queue-selector-item${queue.id === selectedCopyQueueId ? " active" : ""}`;
+    button.dataset.copyQueueAction = "select";
+    button.dataset.queueId = queue.id;
+    const owner = isAdminMode() ? `<small>${escapeHtml(queue.ownerName || "Unknown owner")}</small>` : "";
+    button.innerHTML = `<strong>${escapeHtml(queue.name)}</strong><span>${escapeHtml(streamQueueStateLabel(queue))} - ${queue.itemCount} item${queue.itemCount === 1 ? "" : "s"}</span>${owner}`;
+    els.copyQueueList.appendChild(button);
+  }
+}
+
+function selectCopyQueue(queueId, options = {}) {
+  const queue = copyQueues.find((entry) => entry.id === queueId);
+  if (!queue) return;
+  selectedCopyQueueId = queue.id;
+  clearStreamQueueMediaSelection();
+  els.streamQueueEmpty.classList.add("hidden");
+  els.streamQueueDraft.classList.add("hidden");
+  els.streamQueueCurrent.classList.remove("hidden");
+  els.streamQueueMediaPicker.classList.remove("hidden");
+  els.streamQueueTitle.textContent = queue.name;
+  els.streamQueueOwner.textContent = isAdminMode() ? `Owned by ${queue.ownerName || "Unknown"}` : "Your stream";
+  const expiry = queue.expiresAt ? `Expires ${new Date(queue.expiresAt).toLocaleString()}` : "No expiration";
+  els.streamQueueMeta.textContent = `${streamQueueStateLabel(queue)} - ${expiry} - ${queue.itemCount} item${queue.itemCount === 1 ? "" : "s"}`;
+  if (!options.preservePicker) resetStreamQueueMediaBrowser(queue.name, "Add media");
+  const knownUrl = options.revealUrl || rememberedCopyQueueUrls()[queue.id] || "";
+  els.copyQueueUrl.value = knownUrl;
+  els.copyQueueCreatedUrl.classList.toggle("hidden", !options.revealUrl);
+  els.copyCurrentStreamUrl.classList.toggle("hidden", !knownUrl);
+  const readyItem = queue.items.some((item) => item.status === "ready");
+  els.playCurrentStream.classList.toggle("hidden", queue.state === "playing" || !readyItem);
+  els.skipCurrentStreamItem.classList.toggle("hidden", queue.state !== "playing");
+  renderStreamQueueItems(queue);
+  renderCopyQueues();
+}
+
+function renderStreamQueueItems(queue) {
+  els.streamQueueItems.replaceChildren();
+  const future = queue.items.filter((item) => item.status === "ready" || item.status === "queued");
+  queue.items.forEach((item, itemIndex) => {
+    const row = document.createElement("div");
+    row.className = `copy-queue-item ${item.status}`;
+    const futureIndex = future.findIndex((entry) => entry.id === item.id);
+    const status = item.status === "current" ? "Playing now" : item.status === "ready" ? "Ready to play" : item.status === "queued" ? "Up next" : "Played";
+    const editable = item.status === "ready" || item.status === "queued";
+    row.innerHTML = `<div class="copy-queue-item-label"><span>${itemIndex + 1}</span><div><strong title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</strong><small>${status}</small></div></div>${editable ? `<div class="copy-queue-actions"><button class="music-icon-button" type="button" title="Move up" data-copy-queue-action="up" data-queue-id="${escapeHtml(queue.id)}" data-item-id="${escapeHtml(item.id)}" ${futureIndex <= 0 ? "disabled" : ""}>&#8593;</button><button class="music-icon-button" type="button" title="Move down" data-copy-queue-action="down" data-queue-id="${escapeHtml(queue.id)}" data-item-id="${escapeHtml(item.id)}" ${futureIndex >= future.length - 1 ? "disabled" : ""}>&#8595;</button><button class="music-icon-button" type="button" title="Remove" data-copy-queue-action="remove" data-queue-id="${escapeHtml(queue.id)}" data-item-id="${escapeHtml(item.id)}">x</button></div>` : ""}`;
+    els.streamQueueItems.appendChild(row);
+  });
+}
+
+function streamQueueStateLabel(queue) {
+  if (queue.state === "playing") return "Playing";
+  if (queue.items && queue.items.some((item) => item.status === "ready")) return "Waiting to start";
+  return "Waiting for media";
+}
+
+async function searchStreamQueueMedia(event) {
+  event.preventDefault();
+  const query = els.streamQueueSearchInput.value.trim();
+  if (!query) return;
+  const requestId = ++streamQueueMediaBrowserRequestId;
+  els.streamQueueMediaBrowserContext.textContent = selectedCopyQueueId ? "Stream" : "New stream";
+  els.streamQueueSearchTitle.textContent = `Search: ${query}`;
+  els.streamQueueMediaBrowserBack.classList.add("hidden");
+  els.streamQueueSearchResults.innerHTML = '<p class="status">Searching...</p>';
+  try {
+    const result = await api(`/api/catalog/search?q=${encodeURIComponent(query)}`, state.token);
+    if (requestId !== streamQueueMediaBrowserRequestId || els.streamQueuesView.classList.contains("hidden")) return;
+    showStreamQueueMediaBrowserScreen({
+      context: "Search results",
+      title: query,
+      items: catalogBrowserSearchResults(result.results)
+    }, { replace: true });
+  } catch (err) {
+    if (requestId !== streamQueueMediaBrowserRequestId) return;
+    els.streamQueueSearchResults.innerHTML = `<p class="status error">${escapeHtml(err.message || "Search failed.")}</p>`;
+  }
+}
+
+function resetStreamQueueMediaBrowser(context, title) {
+  streamQueueMediaBrowserRequestId += 1;
+  streamQueueMediaBrowserTrail = [];
+  els.streamQueueMediaBrowserBack.classList.add("hidden");
+  els.streamQueueMediaBrowserContext.textContent = context;
+  els.streamQueueSearchTitle.textContent = title;
+  els.streamQueueSearchResults.replaceChildren();
+  els.streamQueueSearchInput.value = "";
+}
+
+function showStreamQueueMediaBrowserScreen(screen, options = {}) {
+  clearStreamQueueMediaSelection();
+  streamQueueMediaBrowserTrail = options.replace
+    ? [screen]
+    : [...streamQueueMediaBrowserTrail, screen];
+  renderStreamQueueMediaBrowserScreen(screen);
+}
+
+function renderStreamQueueMediaBrowserScreen(screen) {
+  els.streamQueueMediaBrowserContext.textContent = screen.context || "Stream";
+  els.streamQueueSearchTitle.textContent = screen.title || "Add media";
+  els.streamQueueMediaBrowserBack.classList.toggle("hidden", streamQueueMediaBrowserTrail.length < 2);
+  els.streamQueueSearchResults.replaceChildren();
+  if (!screen.items || screen.items.length === 0) {
+    els.streamQueueSearchResults.innerHTML = '<p class="status">No media found.</p>';
+    return;
+  }
+  for (const item of screen.items) {
+    const navigable = catalogBrowserItemIsNavigable(item);
+    els.streamQueueSearchResults.appendChild(card(item, {
+      browserCard: true,
+      episodeArtwork: "thumbnail",
+      actionLabel: navigable ? "Open" : "Choose",
+      onActivate: activateStreamQueueMediaBrowserItem
+    }));
+  }
+}
+
+function navigateBackStreamQueueMediaBrowser() {
+  if (streamQueueMediaBrowserTrail.length < 2) return;
+  streamQueueMediaBrowserRequestId += 1;
+  clearStreamQueueMediaSelection();
+  streamQueueMediaBrowserTrail.pop();
+  renderStreamQueueMediaBrowserScreen(streamQueueMediaBrowserTrail[streamQueueMediaBrowserTrail.length - 1]);
+}
+
+async function activateStreamQueueMediaBrowserItem(item, button) {
+  if (button.disabled) return;
+  if (!catalogBrowserItemIsNavigable(item)) {
+    await selectStreamQueueMediaItem(item, button);
+    return;
+  }
+
+  button.disabled = true;
+  const requestId = ++streamQueueMediaBrowserRequestId;
+  els.streamQueueSearchResults.innerHTML = '<p class="status">Loading...</p>';
+  try {
+    const screen = await catalogBrowserScreenForItem(item);
+    if (requestId !== streamQueueMediaBrowserRequestId || els.streamQueuesView.classList.contains("hidden")) return;
+    showStreamQueueMediaBrowserScreen(screen);
+  } catch (err) {
+    if (requestId !== streamQueueMediaBrowserRequestId) return;
+    renderStreamQueueMediaBrowserScreen(streamQueueMediaBrowserTrail[streamQueueMediaBrowserTrail.length - 1]);
+    const error = document.createElement("p");
+    error.className = "status error catalog-browser-error";
+    error.textContent = err.message || "The collection could not be opened.";
+    els.streamQueueSearchResults.prepend(error);
+  }
+}
+
+async function selectStreamQueueMediaItem(item, button) {
+  button.disabled = true;
+  const requestId = ++streamQueueMediaBrowserRequestId;
+  els.copyQueueStatus.textContent = "Loading audio and subtitle options...";
+  try {
+    const mediaId = item.mediaId || item.id;
+    const options = await api(`/api/catalog/${encodeURIComponent(item.mediaType)}/${encodeURIComponent(mediaId)}/options`, state.token);
+    if (requestId !== streamQueueMediaBrowserRequestId || els.streamQueuesView.classList.contains("hidden")) return;
+    const audio = Array.isArray(options.audio) && options.audio.length > 0
+      ? options.audio
+      : [{ id: "none", label: "No audio" }];
+    const subtitles = Array.isArray(options.subtitles) && options.subtitles.length > 0
+      ? options.subtitles
+      : [{ id: "none", label: "No subtitles" }];
+    copyQueueSelectedItem = {
+      mediaType: item.mediaType,
+      mediaId,
+      title: item.title || "Media",
+      artworkUrl: item.artworkUrl || imageUrlForItem(item),
+      audioChannels: state.playbackPreferences.audioChannels,
+      quality: state.playbackPreferences.quality
+    };
+    fillSelect(els.streamQueueAudioSelect, audio);
+    fillSelect(els.streamQueueSubtitleSelect, subtitles);
+    selectPreferredOption(els.streamQueueAudioSelect, preferredAudioValue(audio, state.playbackPreferences.audioLanguage));
+    selectPreferredOption(els.streamQueueSubtitleSelect, preferredSubtitleValue(subtitles, state.playbackPreferences));
+    els.copyQueueSelected.classList.remove("hidden");
+    els.copyQueueSelectedTitle.textContent = copyQueueSelectedItem.title;
+    if (!selectedCopyQueueId && !els.copyQueueName.value.trim()) {
+      els.copyQueueName.value = `${copyQueueSelectedItem.title} stream`;
+    }
+    els.streamQueueSelectionHint.textContent = "Choose the tracks to bake into this item";
+    els.addStreamQueueMedia.classList.toggle("hidden", !selectedCopyQueueId);
+    els.createStreamQueue.classList.toggle("hidden", Boolean(selectedCopyQueueId));
+    els.copyQueueStatus.textContent = "";
+    setCatalogBrowserCardFeedback(button, "Selected");
+  } catch (err) {
+    if (requestId !== streamQueueMediaBrowserRequestId) return;
+    els.copyQueueStatus.textContent = err.message || "Could not load audio and subtitle options.";
+  } finally {
+    if (button.isConnected) button.disabled = false;
+  }
+}
+
+function selectedStreamQueueMediaPayload() {
+  return copyQueueSelectedItem && {
+    ...copyQueueSelectedItem,
+    audio: els.streamQueueAudioSelect.value,
+    subtitle: els.streamQueueSubtitleSelect.value
+  };
+}
+
+function clearStreamQueueMediaSelection() {
+  copyQueueSelectedItem = null;
+  els.copyQueueSelected.classList.add("hidden");
+  els.copyQueueSelectedTitle.textContent = "";
+  els.streamQueueAudioSelect.replaceChildren();
+  els.streamQueueSubtitleSelect.replaceChildren();
+  els.streamQueueSelectionHint.textContent = "";
+  els.addStreamQueueMedia.classList.add("hidden");
+  els.createStreamQueue.classList.add("hidden");
+}
+
+async function addSelectedStreamQueueMedia() {
+  if (!selectedCopyQueueId || !copyQueueSelectedItem) return;
+  els.addStreamQueueMedia.disabled = true;
+  try {
+    await addItemToCopyQueue(selectedCopyQueueId, selectedStreamQueueMediaPayload());
+  } finally {
+    els.addStreamQueueMedia.disabled = false;
+  }
+}
+
+async function addItemToCopyQueue(queueId, payload) {
+  els.copyQueueStatus.textContent = "Adding media...";
+  try {
+    const result = await api(`/api/copy-queues/${encodeURIComponent(queueId)}/items`, state.token, { method: "POST", body: JSON.stringify(payload) });
+    replaceCopyQueue(result.queue);
+    selectCopyQueue(queueId, { preservePicker: true });
+    els.copyQueueStatus.textContent = "Added to the stream.";
+    return true;
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "The media could not be added.";
+    return false;
+  }
+}
+
+function setCatalogBrowserCardFeedback(button, label) {
+  const action = button.querySelector(".media-browser-card-action");
+  if (action) action.textContent = label;
+  button.classList.add("media-browser-card-added");
+  window.setTimeout(() => {
+    if (!button.isConnected) return;
+    if (action) action.textContent = "Choose";
+    button.classList.remove("media-browser-card-added");
+  }, 1600);
+}
+
+async function handleCopyQueueAction(event) {
+  const button = event.target.closest("[data-copy-queue-action]");
+  if (!button) return;
+  const queue = copyQueues.find((entry) => entry.id === button.dataset.queueId);
+  if (!queue) return;
+  const action = button.dataset.copyQueueAction;
+  if (action === "select") {
+    selectCopyQueue(queue.id);
+    return;
+  }
+  try {
+    let result;
+    if (action === "remove") {
+      result = await api(`/api/copy-queues/${encodeURIComponent(queue.id)}/items/${encodeURIComponent(button.dataset.itemId)}`, state.token, { method: "DELETE" });
+    } else if (action === "up" || action === "down") {
+      const future = queue.items.filter((item) => item.status === "ready" || item.status === "queued");
+      const index = future.findIndex((item) => item.id === button.dataset.itemId);
+      const target = action === "up" ? index - 1 : index + 1;
+      if (index < 0 || target < 0 || target >= future.length) return;
+      [future[index], future[target]] = [future[target], future[index]];
+      result = await api(`/api/copy-queues/${encodeURIComponent(queue.id)}/order`, state.token, {
+        method: "PUT",
+        body: JSON.stringify({ itemIds: future.map((item) => item.id) })
+      });
+    }
+    if (result && result.queue) {
+      replaceCopyQueue(result.queue);
+      selectCopyQueue(result.queue.id);
+    }
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "The stream could not be updated.";
+  }
+}
+
+function replaceCopyQueue(queue) {
+  copyQueues = copyQueues.map((entry) => entry.id === queue.id ? queue : entry);
+}
+
+async function updateSelectedCopyQueue(action) {
+  const queue = copyQueues.find((entry) => entry.id === selectedCopyQueueId);
+  if (!queue) return;
+  try {
+    const result = await api(`/api/copy-queues/${encodeURIComponent(queue.id)}/${action}`, state.token, { method: "POST" });
+    replaceCopyQueue(result.queue);
+    selectCopyQueue(result.queue.id);
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "The stream could not be updated.";
+  }
+}
+
+async function stopSelectedCopyQueue() {
+  const queue = copyQueues.find((entry) => entry.id === selectedCopyQueueId);
+  if (!queue || !window.confirm(`Stop ${queue.name}? Its playback URL will stop working.`)) return;
+  try {
+    await api(`/api/copy-queues/${encodeURIComponent(queue.id)}`, state.token, { method: "DELETE" });
+    forgetCopyQueueUrl(queue.id);
+    copyQueues = copyQueues.filter((entry) => entry.id !== queue.id);
+    if (copyQueues.length > 0) selectCopyQueue(copyQueues[0].id);
+    else showEmptyStreamQueueEditor();
+  } catch (err) {
+    els.copyQueueStatus.textContent = err.message || "The stream could not be stopped.";
+  }
+}
+
+async function copyCurrentStreamUrl() {
+  const url = rememberedCopyQueueUrls()[selectedCopyQueueId];
+  if (!url) return;
+  try {
+    await writeClipboard(url);
+    els.copyQueueStatus.textContent = "Playback URL copied.";
+  } catch (err) {
+    els.copyQueueUrl.value = url;
+    els.copyQueueCreatedUrl.classList.remove("hidden");
+  }
+}
+
+function rememberedCopyQueueUrls() {
+  try { return JSON.parse(localStorage.getItem("mediaBakerCopyQueueUrls") || "{}"); } catch (err) { return {}; }
+}
+
+function rememberCopyQueueUrl(queueId, url) {
+  const urls = rememberedCopyQueueUrls();
+  urls[queueId] = url;
+  localStorage.setItem("mediaBakerCopyQueueUrls", JSON.stringify(urls));
+}
+
+function forgetCopyQueueUrl(queueId) {
+  const urls = rememberedCopyQueueUrls();
+  delete urls[queueId];
+  localStorage.setItem("mediaBakerCopyQueueUrls", JSON.stringify(urls));
+}
+
 async function startWatchTogether() {
   if (!state.selected || !hasPermission("canCopyStreamUrls")) return;
   els.startWatchTogether.disabled = true;
@@ -8375,10 +9058,11 @@ async function joinWatchTogether(inviteToken, name = "") {
   pendingWatchTogetherInvite = null;
 
   await openWebPlayer(new URL(joined.streamUrl, window.location.origin), {
-    category: joined.room.libraryTitle,
-    title: joined.room.mediaTitle,
+    category: joined.category || joined.room.libraryTitle,
+    title: joined.title || joined.room.mediaTitle,
     autoplay: false,
     autoAdvance: false,
+    skipMarkers: joined.skipMarkers || joined.room.skipMarkers,
     errorMessage: "The Watch Together stream could not be played.",
     hlsOptions: { lowLatencyMode: false, backBufferLength: 90 }
   });
@@ -8394,6 +9078,7 @@ async function joinWatchTogether(inviteToken, name = "") {
     participants: [],
     bufferReady: null
   };
+  watchTogetherPanelView = "chat";
   els.playerOverlay.classList.add("watch-together-player");
   els.toggleWatchTogetherPanel.classList.remove("hidden");
   els.minimizeVideoPlayer.classList.add("hidden");
@@ -8407,6 +9092,114 @@ function setWatchTogetherPanelOpen(open) {
   els.watchTogetherPanel.classList.toggle("hidden", !isOpen);
   els.playerOverlay.classList.toggle("watch-together-panel-open", isOpen);
   els.toggleWatchTogetherPanel.setAttribute("aria-expanded", String(isOpen));
+  if (isOpen) updateWatchTogetherPanelView();
+}
+
+function selectWatchTogetherPanelView(event) {
+  if (event.target.closest("[data-watch-panel-close]")) {
+    watchTogetherPanelView = "chat";
+    updateWatchTogetherPanelView();
+    return;
+  }
+  const button = event.target.closest("[data-watch-panel-view]");
+  if (!button || button.classList.contains("hidden")) return;
+  watchTogetherPanelView = watchTogetherPanelView === button.dataset.watchPanelView
+    ? "chat"
+    : button.dataset.watchPanelView;
+  updateWatchTogetherPanelView();
+}
+
+function updateWatchTogetherPanelView() {
+  const session = watchTogetherSession;
+  const isHost = Boolean(session && session.participant && session.participant.isHost);
+  if (watchTogetherPanelView === "room" && !isHost) watchTogetherPanelView = "chat";
+  for (const button of els.watchTogetherPanel.querySelectorAll("[data-watch-panel-view]")) {
+    const active = button.dataset.watchPanelView === watchTogetherPanelView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  for (const section of els.watchTogetherPanel.querySelectorAll("[data-watch-panel-content]")) {
+    section.classList.toggle("hidden", section.dataset.watchPanelContent !== watchTogetherPanelView);
+  }
+}
+
+function openWatchTogetherMediaBrowser() {
+  if (!watchTogetherSession || els.openWatchTogetherMediaBrowser.classList.contains("hidden")) return;
+  resetWatchTogetherPreviewPosition();
+  resetWatchTogetherMediaBrowser();
+  watchTogetherPanelView = "chat";
+  updateWatchTogetherPanelView();
+  els.watchTogetherMediaBrowser.classList.remove("hidden");
+  els.playerOverlay.classList.add("watch-together-search-open");
+  window.setTimeout(() => els.watchTogetherQueueSearch.focus(), 0);
+}
+
+function closeWatchTogetherMediaBrowser() {
+  resetWatchTogetherPreviewPosition();
+  watchTogetherMediaBrowserRequestId += 1;
+  watchTogetherMediaBrowserTrail = [];
+  els.watchTogetherMediaBrowser.classList.add("hidden");
+  els.playerOverlay.classList.remove("watch-together-search-open");
+  els.watchTogetherQueueSearchResults.replaceChildren();
+  els.watchTogetherQueueSearch.value = "";
+}
+
+function resetWatchTogetherMediaBrowser() {
+  watchTogetherMediaBrowserRequestId += 1;
+  watchTogetherMediaBrowserTrail = [];
+  els.watchTogetherMediaBrowserBack.classList.add("hidden");
+  els.watchTogetherMediaBrowserContext.textContent = "Watch Together";
+  els.watchTogetherMediaBrowserTitle.textContent = "Add media";
+  els.watchTogetherQueueSearchResults.replaceChildren();
+  els.watchTogetherQueueSearch.value = "";
+}
+
+function beginWatchTogetherPreviewDrag(event) {
+  if (event.button !== 0 || !els.playerOverlay.classList.contains("watch-together-search-open")) return;
+  const previewRect = els.videoPlayerSlot.getBoundingClientRect();
+  watchTogetherPreviewDragState = {
+    pointerId: event.pointerId,
+    offsetX: event.clientX - previewRect.left,
+    offsetY: event.clientY - previewRect.top
+  };
+  els.watchTogetherPreviewDrag.setPointerCapture?.(event.pointerId);
+  els.videoPlayerSlot.classList.add("dragging");
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function moveWatchTogetherPreview(event) {
+  const drag = watchTogetherPreviewDragState;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  const shell = els.videoPlayerSlot.closest(".player-shell");
+  if (!shell) return;
+  const shellRect = shell.getBoundingClientRect();
+  const maxLeft = Math.max(0, shellRect.width - els.videoPlayerSlot.offsetWidth);
+  const maxTop = Math.max(0, shellRect.height - els.videoPlayerSlot.offsetHeight);
+  const left = Math.min(maxLeft, Math.max(0, event.clientX - shellRect.left - drag.offsetX));
+  const top = Math.min(maxTop, Math.max(0, event.clientY - shellRect.top - drag.offsetY));
+  els.videoPlayerSlot.style.left = `${Math.round(left)}px`;
+  els.videoPlayerSlot.style.top = `${Math.round(top)}px`;
+  els.videoPlayerSlot.style.right = "auto";
+  event.preventDefault();
+}
+
+function endWatchTogetherPreviewDrag(event) {
+  const drag = watchTogetherPreviewDragState;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (els.watchTogetherPreviewDrag.hasPointerCapture?.(event.pointerId)) {
+    els.watchTogetherPreviewDrag.releasePointerCapture(event.pointerId);
+  }
+  watchTogetherPreviewDragState = null;
+  els.videoPlayerSlot.classList.remove("dragging");
+}
+
+function resetWatchTogetherPreviewPosition() {
+  watchTogetherPreviewDragState = null;
+  els.videoPlayerSlot.classList.remove("dragging");
+  els.videoPlayerSlot.style.removeProperty("left");
+  els.videoPlayerSlot.style.removeProperty("top");
+  els.videoPlayerSlot.style.removeProperty("right");
 }
 
 function watchTogetherClientId() {
@@ -8446,6 +9239,7 @@ function handleWatchTogetherMessage(raw) {
     session.room = message.room;
     session.participant = message.self;
     session.participants = message.participants || [];
+    session.bufferReady = null;
     renderWatchTogetherRoom(message.room);
     renderWatchTogetherParticipants(message.participants || []);
     els.watchTogetherChat.innerHTML = "";
@@ -8470,6 +9264,12 @@ function handleWatchTogetherMessage(raw) {
     renderWatchTogetherRoom(message.room);
     return;
   }
+  if (message.type === "item") {
+    switchWatchTogetherPlayback(message.playback, message.room).catch(() => {
+      setPlayerStatus("The next queued item could not be loaded.");
+    });
+    return;
+  }
   if (message.type === "chat") {
     renderWatchTogetherMessage(message.message);
     return;
@@ -8492,13 +9292,275 @@ function showWatchTogetherEndedPage() {
   window.location.replace(navigation.watchEndedPath());
 }
 
+async function switchWatchTogetherPlayback(playback, room) {
+  const session = watchTogetherSession;
+  if (!session || !playback || !playback.streamUrl) return;
+  if (session.queueItemId === playback.queueItemId
+    && Number(session.queueRevision) === Number(playback.queueRevision)) return;
+  reportWatchTogetherProgress(true);
+  session.queueItemId = playback.queueItemId;
+  session.queueRevision = playback.queueRevision;
+  session.bufferReady = null;
+  session.trackSwitching = false;
+  session.room = room || session.room;
+  session.state = {
+    state: "paused",
+    positionSeconds: 0,
+    changedAt: new Date().toISOString(),
+    serverTime: new Date().toISOString()
+  };
+  pendingWatchTogetherState = session.state;
+  renderWatchTogetherRoom(session.room);
+  await openWebPlayer(new URL(playback.streamUrl, window.location.origin), {
+    preserveWatchTogether: true,
+    category: playback.category || session.room.libraryTitle,
+    title: playback.title || session.room.mediaTitle,
+    autoplay: false,
+    autoAdvance: false,
+    skipMarkers: playback.skipMarkers || [],
+    errorMessage: "The queued Watch Together item could not be played.",
+    hlsOptions: { lowLatencyMode: false, backBufferLength: 90 }
+  });
+}
+
 function renderWatchTogetherRoom(room) {
   if (!watchTogetherSession) return;
   watchTogetherSession.room = room;
   const isHost = Boolean(watchTogetherSession.participant && watchTogetherSession.participant.isHost);
   els.watchTogetherHostControls.classList.toggle("hidden", !isHost);
+  els.watchTogetherRoomTab.classList.toggle("hidden", !isHost);
   els.watchTogetherEveryoneControls.checked = Boolean(room.everyoneCanControl);
+  els.watchTogetherEveryoneQueues.checked = Boolean(room.everyoneCanQueue);
+  const canAdd = Boolean(state.user && (isHost || room.everyoneCanQueue));
+  els.openWatchTogetherMediaBrowser.classList.toggle("hidden", !canAdd);
+  if (!canAdd) closeWatchTogetherMediaBrowser();
+  updateWatchTogetherPanelView();
+  renderWatchTogetherQueue(room);
+  updateSkipMarkerControl();
   updateWatchTogetherRoomStatus();
+}
+
+function renderWatchTogetherQueue(room) {
+  const session = watchTogetherSession;
+  if (!session) return;
+  const isHost = Boolean(session.participant && session.participant.isHost);
+  const canControl = watchTogetherCanControl();
+  els.watchTogetherSkipQueueItem.classList.toggle("hidden", !canControl || !room.currentQueueItemId);
+  els.watchTogetherQueue.innerHTML = "";
+  const future = (room.queue || []).filter((item) => item.status === "queued");
+  for (const item of room.queue || []) {
+    const row = document.createElement("div");
+    row.className = `watch-together-queue-item ${item.status}`;
+    const futureIndex = future.findIndex((entry) => entry.id === item.id);
+    const stateLabel = item.status === "current" ? "Playing now" : item.status === "queued" ? "Up next" : "Played";
+    row.innerHTML = `
+      <div class="watch-together-queue-label" title="${escapeHtml(item.title)}">
+        <strong>${escapeHtml(item.title)}</strong>
+        <small>${escapeHtml(item.libraryTitle || stateLabel)} - ${stateLabel}</small>
+      </div>
+      ${isHost && item.status === "queued" ? `<div class="watch-together-queue-actions">
+        <button class="music-icon-button" type="button" title="Move up" data-watch-queue-action="up" data-item-id="${escapeHtml(item.id)}" ${futureIndex <= 0 ? "disabled" : ""}>&#8593;</button>
+        <button class="music-icon-button" type="button" title="Move down" data-watch-queue-action="down" data-item-id="${escapeHtml(item.id)}" ${futureIndex >= future.length - 1 ? "disabled" : ""}>&#8595;</button>
+        <button class="music-icon-button" type="button" title="Remove" data-watch-queue-action="remove" data-item-id="${escapeHtml(item.id)}">x</button>
+      </div>` : ""}`;
+    els.watchTogetherQueue.appendChild(row);
+  }
+}
+
+function handleWatchTogetherQueueAction(event) {
+  const button = event.target.closest("[data-watch-queue-action]");
+  const session = watchTogetherSession;
+  if (!button || !session || !session.participant || !session.participant.isHost) return;
+  const action = button.dataset.watchQueueAction;
+  if (action === "remove") {
+    sendWatchTogether({ type: "queue-remove", itemId: button.dataset.itemId });
+    return;
+  }
+  const future = (session.room.queue || []).filter((item) => item.status === "queued");
+  const index = future.findIndex((item) => item.id === button.dataset.itemId);
+  const target = action === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= future.length) return;
+  [future[index], future[target]] = [future[target], future[index]];
+  sendWatchTogether({ type: "queue-order", itemIds: future.map((item) => item.id) });
+}
+
+async function searchWatchTogetherQueueMedia(event) {
+  event.preventDefault();
+  const query = els.watchTogetherQueueSearch.value.trim();
+  if (!query || !watchTogetherSession || !state.user) return;
+  const requestId = ++watchTogetherMediaBrowserRequestId;
+  els.watchTogetherMediaBrowserContext.textContent = "Watch Together";
+  els.watchTogetherMediaBrowserTitle.textContent = `Search: ${query}`;
+  els.watchTogetherMediaBrowserBack.classList.add("hidden");
+  els.watchTogetherQueueSearchResults.innerHTML = '<p class="status">Searching...</p>';
+  try {
+    const result = await api(`/api/catalog/search?q=${encodeURIComponent(query)}`, state.token);
+    if (requestId !== watchTogetherMediaBrowserRequestId || els.watchTogetherMediaBrowser.classList.contains("hidden")) return;
+    const items = catalogBrowserSearchResults(result.results);
+    showWatchTogetherMediaBrowserScreen({
+      context: "Search results",
+      title: query,
+      items
+    }, { replace: true });
+  } catch (err) {
+    if (requestId !== watchTogetherMediaBrowserRequestId) return;
+    els.watchTogetherQueueSearchResults.innerHTML = `<p class="status error">${escapeHtml(err.message || "Search failed.")}</p>`;
+  }
+}
+
+function catalogBrowserSearchResults(results) {
+  return (results || []).filter((item) => item && item.id && item.mediaType
+    && !["image", "image-folder", "media-folder", "playlist"].includes(item.itemType)).slice(0, 60);
+}
+
+function showWatchTogetherMediaBrowserScreen(screen, options = {}) {
+  watchTogetherMediaBrowserTrail = options.replace
+    ? [screen]
+    : [...watchTogetherMediaBrowserTrail, screen];
+  renderWatchTogetherMediaBrowserScreen(screen);
+}
+
+function renderWatchTogetherMediaBrowserScreen(screen) {
+  els.watchTogetherMediaBrowserContext.textContent = screen.context || "Watch Together";
+  els.watchTogetherMediaBrowserTitle.textContent = screen.title || "Add media";
+  els.watchTogetherMediaBrowserBack.classList.toggle("hidden", watchTogetherMediaBrowserTrail.length < 2);
+  els.watchTogetherQueueSearchResults.replaceChildren();
+  if (!screen.items || screen.items.length === 0) {
+    els.watchTogetherQueueSearchResults.innerHTML = '<p class="status">No media found.</p>';
+    return;
+  }
+  for (const item of screen.items) {
+    const navigable = catalogBrowserItemIsNavigable(item);
+    els.watchTogetherQueueSearchResults.appendChild(card(item, {
+      browserCard: true,
+      episodeArtwork: "thumbnail",
+      actionLabel: navigable ? "Open" : "Add",
+      onActivate: activateWatchTogetherMediaBrowserItem
+    }));
+  }
+}
+
+function navigateBackWatchTogetherMediaBrowser() {
+  if (watchTogetherMediaBrowserTrail.length < 2) return;
+  watchTogetherMediaBrowserRequestId += 1;
+  watchTogetherMediaBrowserTrail.pop();
+  renderWatchTogetherMediaBrowserScreen(watchTogetherMediaBrowserTrail[watchTogetherMediaBrowserTrail.length - 1]);
+}
+
+function catalogBrowserItemIsNavigable(item) {
+  return isShowCard(item)
+    || (item.itemType === "season" && item.showId)
+    || isArtistCard(item)
+    || (isAlbumCard(item) && item.artistId);
+}
+
+async function activateWatchTogetherMediaBrowserItem(item, button) {
+  if (!watchTogetherSession || button.disabled) return;
+  if (!catalogBrowserItemIsNavigable(item)) {
+    addWatchTogetherMediaBrowserItem(item, button);
+    return;
+  }
+
+  button.disabled = true;
+  const requestId = ++watchTogetherMediaBrowserRequestId;
+  els.watchTogetherQueueSearchResults.innerHTML = '<p class="status">Loading...</p>';
+  try {
+    const screen = await catalogBrowserScreenForItem(item);
+    if (requestId !== watchTogetherMediaBrowserRequestId || els.watchTogetherMediaBrowser.classList.contains("hidden")) return;
+    showWatchTogetherMediaBrowserScreen(screen);
+  } catch (err) {
+    if (requestId !== watchTogetherMediaBrowserRequestId) return;
+    renderWatchTogetherMediaBrowserScreen(watchTogetherMediaBrowserTrail[watchTogetherMediaBrowserTrail.length - 1]);
+    const error = document.createElement("p");
+    error.className = "status error watch-together-browser-error";
+    error.textContent = err.message || "The collection could not be opened.";
+    els.watchTogetherQueueSearchResults.prepend(error);
+  }
+}
+
+async function catalogBrowserScreenForItem(item) {
+  if (isShowCard(item)) return catalogShowBrowserScreen(item);
+  if (item.itemType === "season") return catalogSeasonBrowserScreen(item);
+  if (isArtistCard(item)) return catalogArtistBrowserScreen(item);
+  return catalogAlbumBrowserScreen(item);
+}
+
+async function catalogShowBrowserScreen(item) {
+  const show = await api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(item.showId || item.id)}`, state.token);
+  return {
+    context: "Show",
+    title: show.name || item.title,
+    items: (show.seasons || []).map((season) => seasonItem(item.mediaType, show, season))
+  };
+}
+
+async function catalogSeasonBrowserScreen(item) {
+  const showId = item.showId;
+  const [show, seasonResponse] = await Promise.all([
+    api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(showId)}`, state.token),
+    api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(showId)}/seasons/${encodeURIComponent(item.season)}`, state.token)
+  ]);
+  const seasonMetadata = (show.seasons || []).find((entry) => Number(entry.season) === Number(item.season)) || {};
+  const season = { ...seasonMetadata, ...seasonResponse };
+  return {
+    context: show.name || "Show",
+    title: season.name || defaultSeasonTitle(season.season),
+    items: (season.episodes || []).map((episode) => episodeItem(item.mediaType, show, episode))
+  };
+}
+
+async function catalogArtistBrowserScreen(item) {
+  const artist = await api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(item.artistId || item.id)}`, state.token);
+  return {
+    context: "Artist",
+    title: artist.name || item.title,
+    items: (artist.albums || []).map((album) => ({
+      id: album.id,
+      itemType: "album",
+      mediaType: item.mediaType,
+      artistId: artist.id,
+      title: album.name || "Album",
+      subtitle: `${(album.tracks || []).length} tracks`,
+      posterUrl: album.posterUrl || artist.posterUrl || null
+    }))
+  };
+}
+
+async function catalogAlbumBrowserScreen(item) {
+  const [artist, album] = await Promise.all([
+    api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(item.artistId)}`, state.token),
+    api(`${tvBasePath(item.mediaType)}/${encodeURIComponent(item.artistId)}/albums/${encodeURIComponent(item.albumId || item.id)}`, state.token)
+  ]);
+  return {
+    context: artist.name || "Artist",
+    title: album.name || item.title,
+    items: (album.tracks || []).map((track) => trackItem(item.mediaType, artist, album, track))
+  };
+}
+
+function addWatchTogetherMediaBrowserItem(item, button) {
+  const sent = sendWatchTogether({
+    type: "queue-add",
+    mediaType: item.mediaType,
+    mediaId: item.mediaId || item.id,
+    streamOptions: {
+      audioChannels: state.playbackPreferences.audioChannels,
+      quality: state.playbackPreferences.quality,
+      subtitle: "none"
+    }
+  });
+  const action = button.querySelector(".media-browser-card-action");
+  if (!sent) {
+    if (action) action.textContent = "Try again";
+    return;
+  }
+  if (action) action.textContent = "Added";
+  button.classList.add("media-browser-card-added");
+  window.setTimeout(() => {
+    if (!button.isConnected) return;
+    if (action) action.textContent = "Add";
+    button.classList.remove("media-browser-card-added");
+  }, 1600);
 }
 
 function renderWatchTogetherParticipants(participants) {
@@ -8541,11 +9603,14 @@ function watchTogetherCanStart() {
 function updateWatchTogetherRoomStatus() {
   const session = watchTogetherSession;
   if (!session || !session.room) return;
+  const waiting = watchTogetherWaitingParticipants();
+  if (waiting.length === 0 && els.playerStatus.textContent === "Waiting for everyone to buffer.") {
+    setPlayerStatus("");
+  }
   if (session.state && session.state.state === "playing") {
     els.watchTogetherRoomStatus.textContent = "Playing";
     return;
   }
-  const waiting = watchTogetherWaitingParticipants();
   if (waiting.length > 0) {
     els.watchTogetherRoomStatus.textContent = `Waiting for ${waiting.length} participant${waiting.length === 1 ? "" : "s"} to buffer`;
     return;
@@ -8581,7 +9646,11 @@ function kickWatchTogetherParticipant(event) {
 }
 
 function changeWatchTogetherControls() {
-  sendWatchTogether({ type: "permissions", everyoneCanControl: els.watchTogetherEveryoneControls.checked });
+  sendWatchTogether({
+    type: "permissions",
+    everyoneCanControl: els.watchTogetherEveryoneControls.checked,
+    everyoneCanQueue: els.watchTogetherEveryoneQueues.checked
+  });
 }
 
 async function copyWatchTogetherInvite() {
@@ -8625,6 +9694,8 @@ function sendWatchTogetherLocalState(action) {
     }
     return;
   }
+  const roomPlaying = watchTogetherSession.state && watchTogetherSession.state.state === "playing";
+  if ((action === "play" && roomPlaying) || (action === "pause" && !roomPlaying)) return;
   if (action === "play" && !watchTogetherCanStart()) {
     watchTogetherSuppressControlsUntil = Date.now() + 1000;
     els.webPlayer.pause();
@@ -8637,6 +9708,9 @@ function sendWatchTogetherLocalState(action) {
 function applyWatchTogetherState(roomState, force = false) {
   if (!watchTogetherSession || !roomState) return;
   watchTogetherSession.state = roomState;
+  watchTogetherSession.readinessRevision = Number(roomState.readinessRevision) || 0;
+  updateWatchTogetherRoomStatus();
+  updateVideoPlayerControls();
   if (!Number.isFinite(Number(els.webPlayer.duration)) || Number(els.webPlayer.duration) <= 0) {
     pendingWatchTogetherState = roomState;
     return;
@@ -8683,11 +9757,17 @@ function notifyWatchTogetherReady() {
   const requiredSeconds = Math.min(18, remainingSeconds);
   const bufferedSeconds = bufferedAheadSeconds(els.webPlayer, positionSeconds);
   const ready = durationSeconds > 0
-    && requiredSeconds > 0
-    && bufferedSeconds >= Math.max(0.5, requiredSeconds - 0.25);
+    && (remainingSeconds <= 0.25 || bufferedSeconds >= Math.max(0, requiredSeconds - 0.25));
   if (watchTogetherSession.bufferReady !== ready) {
     watchTogetherSession.bufferReady = ready;
-    sendWatchTogether({ type: "ready", ready, durationSeconds, bufferedSeconds });
+    sendWatchTogether({
+      type: "ready",
+      ready,
+      durationSeconds,
+      bufferedSeconds,
+      queueRevision: watchTogetherSession.queueRevision,
+      readinessRevision: watchTogetherSession.readinessRevision
+    });
   }
   if (pendingWatchTogetherState) applyWatchTogetherState(pendingWatchTogetherState, true);
 }
@@ -8723,6 +9803,8 @@ function leaveWatchTogether(options = {}) {
   session.socket?.close(1000, "Left room");
   watchTogetherSession = null;
   pendingWatchTogetherState = null;
+  watchTogetherPanelView = "chat";
+  closeWatchTogetherMediaBrowser();
   els.playerOverlay.classList.remove("watch-together-player");
   setWatchTogetherPanelOpen(false);
   els.toggleWatchTogetherPanel.classList.add("hidden");
@@ -8795,7 +9877,11 @@ async function playStream() {
 }
 
 async function openWebPlayer(url, options = {}) {
-  closePlayer({ navigate: false });
+  if (options.preserveWatchTogether) {
+    resetWebPlaybackSourceForTransition();
+  } else {
+    closePlayer({ navigate: false });
+  }
   webPlaybackNeedsRenewal = false;
   activeWebPlaybackRequest = options.mediaType && options.mediaId && !options.live
     ? {
@@ -8866,8 +9952,7 @@ async function openWebPlayer(url, options = {}) {
   };
 
   try {
-    const hlsJsSupported = Boolean(window.Hls && window.Hls.isSupported());
-    if (!hlsJsSupported && video.canPlayType("application/vnd.apple.mpegurl")) {
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
       nativePlayerErrorHandler = () => {
         if (!fallbackStarted) {
           options.onPlaybackError?.({
@@ -8897,6 +9982,11 @@ async function openWebPlayer(url, options = {}) {
       return;
     }
 
+    if (!window.Hls) {
+      setPlayerStatus("Loading player...");
+      await loadHlsLibrary();
+    }
+    const hlsJsSupported = Boolean(window.Hls && window.Hls.isSupported());
     if (!hlsJsSupported) {
       setPlayerStatus("This browser cannot play HLS.");
       return;
@@ -9018,6 +10108,56 @@ async function openWebPlayer(url, options = {}) {
       setPlayerStatus(options.errorMessage || "Playback failed to start.");
     }
   }
+}
+
+function loadHlsLibrary() {
+  if (window.Hls) {
+    return Promise.resolve(window.Hls);
+  }
+  if (hlsLibraryPromise) {
+    return hlsLibraryPromise;
+  }
+
+  hlsLibraryPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.async = true;
+    script.dataset.mediaBakerHls = "true";
+    script.src = hlsScriptUrl;
+    script.addEventListener("load", () => {
+      if (window.Hls) {
+        resolve(window.Hls);
+      } else {
+        reject(new Error("HLS player loaded without exposing its API"));
+      }
+    }, { once: true });
+    script.addEventListener("error", () => reject(new Error("HLS player failed to load")), { once: true });
+    document.head.appendChild(script);
+  }).catch((error) => {
+    hlsLibraryPromise = null;
+    throw error;
+  });
+  return hlsLibraryPromise;
+}
+
+function resetWebPlaybackSourceForTransition() {
+  webPlaybackSessionId += 1;
+  webPlaybackRestartPromise = null;
+  watchTogetherSuppressControlsUntil = Date.now() + 2000;
+  if (hlsPlayer) {
+    cancelPendingHlsAudioSwitch();
+    hlsPlayer.destroy();
+    hlsPlayer = null;
+  }
+  if (nativePlayerErrorHandler) {
+    els.webPlayer.removeEventListener("error", nativePlayerErrorHandler);
+    nativePlayerErrorHandler = null;
+  }
+  els.webPlayer.pause();
+  els.webPlayer.removeAttribute("src");
+  els.webPlayer.load();
+  activeSkipMarkers = [];
+  dismissedSkipMarkers = new Set();
+  resetVideoTrackControls();
 }
 
 function closePlayer(options = {}) {
@@ -9195,19 +10335,20 @@ function toggleVideoPlayback() {
     return;
   }
   if (watchTogetherSession) {
+    const roomPlaying = watchTogetherSession.state && watchTogetherSession.state.state === "playing";
     if (watchTogetherCanControl()) {
-      if (els.webPlayer.paused && !watchTogetherCanStart()) {
+      if (!roomPlaying && !watchTogetherCanStart()) {
         setTemporaryPlayerStatus("Waiting for everyone to buffer.");
         return;
       }
       sendWatchTogether({
         type: "control",
-        action: els.webPlayer.paused ? "play" : "pause",
+        action: roomPlaying ? "pause" : "play",
         positionSeconds: Number(els.webPlayer.currentTime) || 0
       });
       return;
     }
-    if (watchTogetherSession.state && watchTogetherSession.state.state === "playing" && els.webPlayer.paused) {
+    if (roomPlaying && els.webPlayer.paused) {
       watchTogetherSuppressControlsUntil = Date.now() + 1000;
       els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be started in this browser."));
     } else {
@@ -9759,7 +10900,14 @@ function positionVideoSubtitleCue(cue, line) {
 function markWatchTogetherTrackBuffering() {
   if (!watchTogetherSession || watchTogetherSession.bufferReady === false) return;
   watchTogetherSession.bufferReady = false;
-  sendWatchTogether({ type: "ready", ready: false, durationSeconds: Number(els.webPlayer.duration) || 0, bufferedSeconds: 0 });
+  sendWatchTogether({
+    type: "ready",
+    ready: false,
+    durationSeconds: Number(els.webPlayer.duration) || 0,
+    bufferedSeconds: 0,
+    queueRevision: watchTogetherSession.queueRevision,
+    readinessRevision: watchTogetherSession.readinessRevision
+  });
 }
 
 function toggleVideoMute() {
@@ -9769,14 +10917,15 @@ function toggleVideoMute() {
 function updateVideoPlayerControls() {
   const duration = Number(els.webPlayer.duration);
   const currentTime = Number(els.webPlayer.currentTime) || 0;
-  const paused = els.webPlayer.paused;
+  const paused = watchTogetherSession && watchTogetherSession.state
+    ? watchTogetherSession.state.state !== "playing"
+    : els.webPlayer.paused;
   const muted = els.webPlayer.muted || els.webPlayer.volume === 0;
   els.videoPlayPause.innerHTML = paused ? "&#9654;" : "&#10074;&#10074;";
   els.videoPlayPause.title = paused ? "Play" : "Pause";
   els.videoPlayPause.setAttribute("aria-label", paused ? "Play" : "Pause");
   const waitingToStart = Boolean(watchTogetherSession
     && paused
-    && watchTogetherCanControl()
     && !watchTogetherCanStart());
   els.videoPlayPause.disabled = waitingToStart;
   if (waitingToStart) {
@@ -9912,7 +11061,8 @@ function updateSkipMarkerControl() {
     return;
   }
   const marker = currentSkipMarker();
-  const visible = marker && !dismissedSkipMarkers.has(skipMarkerKey(marker));
+  const canSkip = !watchTogetherSession || watchTogetherCanControl();
+  const visible = canSkip && marker && !dismissedSkipMarkers.has(skipMarkerKey(marker));
   els.videoSkipPrompt.classList.toggle("hidden", !visible);
   if (visible) {
     els.videoSkipPromptText.textContent = marker.type === "credits" ? "Skip credits?" : "Skip intro?";
@@ -9935,7 +11085,15 @@ function skipCurrentMarker(event) {
   if (marker.type === "credits" && Number.isFinite(duration) && duration > 0) {
     reportWebPlaybackProgress(true, targetSeconds);
   }
-  els.webPlayer.currentTime = targetSeconds;
+  if (watchTogetherSession) {
+    if (!watchTogetherCanControl()) {
+      updateSkipMarkerControl();
+      return;
+    }
+    sendWatchTogether({ type: "control", action: "seek", positionSeconds: targetSeconds });
+  } else {
+    els.webPlayer.currentTime = targetSeconds;
+  }
   updateVideoPlayerControls();
 }
 
@@ -10360,13 +11518,7 @@ async function handleWebPlayerEnded() {
   const duration = Number(els.webPlayer.duration);
   if (watchTogetherSession) {
     reportWatchTogetherProgress(true);
-    if (watchTogetherCanControl()) {
-      sendWatchTogether({
-        type: "control",
-        action: "pause",
-        positionSeconds: Number.isFinite(duration) ? duration : Number(els.webPlayer.currentTime) || 0
-      });
-    }
+    sendWatchTogether({ type: "ended", itemId: watchTogetherSession.queueItemId });
     return;
   }
   if (activeWebPlaybackRequest && activeWebPlaybackRequest.fallbackStarted) {
