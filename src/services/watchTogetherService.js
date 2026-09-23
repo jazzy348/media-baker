@@ -168,6 +168,7 @@ class WatchTogetherService {
     return {
       room: publicRoom(room),
       participant: publicParticipant(participant),
+      state: stateSnapshot(room),
       ticket,
       ...playback
     };
@@ -341,9 +342,10 @@ class WatchTogetherService {
       if (waiting.length > 0) {
         throw statusError(409, `Waiting for ${waiting.length} participant${waiting.length === 1 ? "" : "s"} to buffer`);
       }
+      const initialPlayback = !room.playbackStarted;
       room.playbackStarted = true;
       room.resumeWhenReady = false;
-      room.positionSeconds = position;
+      room.positionSeconds = initialPlayback ? 0 : position;
       room.playbackState = "playing";
       room.stateChangedAt = new Date().toISOString();
       this.system(room, `${participant.displayName} started playback.`);
@@ -636,7 +638,11 @@ function runtimeRoom(room) {
     currentQueueIndex: Math.max(0, Number(room.currentQueueIndex) || 0),
     queueRevision: Math.max(1, Number(room.queueRevision) || 1),
     everyoneCanQueue: Boolean(room.everyoneCanQueue),
-    playbackStarted: false,
+    playbackStarted: Boolean(
+      room.playbackStarted
+      || Number(room.positionSeconds) > 0
+      || room.playbackState === "playing"
+    ),
     resumeWhenReady: false,
     readinessRevision: 0,
     transitioning: false,

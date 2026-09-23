@@ -1058,6 +1058,7 @@ els.minimizeVideoPlayer.addEventListener("click", minimizeVideoPlayback);
 els.restoreVideoPlayer.addEventListener("click", restoreVideoPlayback);
 els.closeVideoMiniPlayer.addEventListener("click", closePlayer);
 els.webPlayer.addEventListener("playing", startOnDeckPolling);
+els.webPlayer.addEventListener("playing", () => clearPlayerStatus("Press play to allow synchronized playback."));
 els.webPlayer.addEventListener("pause", stopOnDeckPolling);
 els.webPlayer.addEventListener("ended", handleWebPlayerEnded);
 els.webPlayer.addEventListener("play", handleWebPlayerReplay);
@@ -9056,15 +9057,25 @@ async function joinWatchTogether(inviteToken, name = "") {
   els.watchTogetherJoinOverlay.classList.add("hidden");
   els.watchTogetherJoinOverlay.setAttribute("aria-hidden", "true");
   pendingWatchTogetherInvite = null;
+  const initialState = joined.state || {
+    state: "paused",
+    positionSeconds: 0,
+    changedAt: new Date().toISOString(),
+    serverTime: new Date().toISOString(),
+    readinessRevision: 0
+  };
+  const initialPosition = watchTogetherStatePosition(initialState);
 
-  await openWebPlayer(new URL(joined.streamUrl, window.location.origin), {
+  const playbackOpening = openWebPlayer(new URL(joined.streamUrl, window.location.origin), {
     category: joined.category || joined.room.libraryTitle,
     title: joined.title || joined.room.mediaTitle,
     autoplay: false,
+    resumeSeconds: initialPosition,
+    startAtBeginning: initialPosition <= 0.25,
     autoAdvance: false,
     skipMarkers: joined.skipMarkers || joined.room.skipMarkers,
     errorMessage: "The Watch Together stream could not be played.",
-    hlsOptions: { lowLatencyMode: false, backBufferLength: 90 }
+    hlsOptions: { lowLatencyMode: false, backBufferLength: 90, startPosition: initialPosition }
   });
   activePlaybackMedia = null;
   watchTogetherSession = {
@@ -9085,6 +9096,12 @@ async function joinWatchTogether(inviteToken, name = "") {
   setWatchTogetherPanelOpen(true);
   renderWatchTogetherRoom(joined.room);
   connectWatchTogetherSocket();
+  try {
+    await playbackOpening;
+  } catch (err) {
+    leaveWatchTogether({ navigate: false });
+    throw err;
+  }
 }
 
 function setWatchTogetherPanelOpen(open) {
@@ -9219,7 +9236,7 @@ function connectWatchTogetherSocket() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${window.location.host}/api/watch-together/socket?ticket=${encodeURIComponent(session.ticket)}`);
   session.socket = socket;
-  socket.addEventListener("open", () => setPlayerStatus("Connected. Waiting for playback state..."));
+  socket.addEventListener("open", () => clearPlayerStatus("Connection interrupted. Reconnecting..."));
   socket.addEventListener("message", (event) => handleWatchTogetherMessage(event.data));
   socket.addEventListener("close", (event) => {
     if (!watchTogetherSession || watchTogetherSession !== session || session.closed) return;
@@ -9246,6 +9263,7 @@ function handleWatchTogetherMessage(raw) {
     (message.chat || []).forEach(renderWatchTogetherMessage);
     applyWatchTogetherState(message.state, true);
     notifyWatchTogetherReady();
+    clearPlayerStatus("Connection interrupted. Reconnecting...");
     return;
   }
   if (message.type === "state") {
@@ -9316,6 +9334,8 @@ async function switchWatchTogetherPlayback(playback, room) {
     category: playback.category || session.room.libraryTitle,
     title: playback.title || session.room.mediaTitle,
     autoplay: false,
+    resumeSeconds: 0,
+    startAtBeginning: true,
     autoAdvance: false,
     skipMarkers: playback.skipMarkers || [],
     errorMessage: "The queued Watch Together item could not be played.",
@@ -9604,9 +9624,6 @@ function updateWatchTogetherRoomStatus() {
   const session = watchTogetherSession;
   if (!session || !session.room) return;
   const waiting = watchTogetherWaitingParticipants();
-  if (waiting.length === 0 && els.playerStatus.textContent === "Waiting for everyone to buffer.") {
-    setPlayerStatus("");
-  }
   if (session.state && session.state.state === "playing") {
     els.watchTogetherRoomStatus.textContent = "Playing";
     return;
@@ -9699,10 +9716,12 @@ function sendWatchTogetherLocalState(action) {
   if (action === "play" && !watchTogetherCanStart()) {
     watchTogetherSuppressControlsUntil = Date.now() + 1000;
     els.webPlayer.pause();
-    setTemporaryPlayerStatus("Waiting for everyone to buffer.");
     return;
   }
-  sendWatchTogether({ type: "control", action, positionSeconds: Number(els.webPlayer.currentTime) || 0 });
+  const positionSeconds = action === "play"
+    ? watchTogetherStatePosition(watchTogetherSession.state)
+    : Number(els.webPlayer.currentTime) || 0;
+  sendWatchTogether({ type: "control", action, positionSeconds });
 }
 
 function applyWatchTogetherState(roomState, force = false) {
@@ -9716,10 +9735,7 @@ function applyWatchTogetherState(roomState, force = false) {
     return;
   }
   pendingWatchTogetherState = null;
-  const transportSeconds = roomState.state === "playing"
-    ? Math.max(0, Date.now() - Date.parse(roomState.serverTime || new Date())) / 1000
-    : 0;
-  const expected = Math.max(0, Number(roomState.positionSeconds) + transportSeconds);
+  const expected = watchTogetherStatePosition(roomState);
   const drift = expected - (Number(els.webPlayer.currentTime) || 0);
   watchTogetherSuppressControlsUntil = Date.now() + 1000;
   if (watchTogetherSession.trackSwitching) {
@@ -9749,15 +9765,31 @@ function applyWatchTogetherState(roomState, force = false) {
   }, 3000);
 }
 
+function watchTogetherStatePosition(roomState) {
+  if (!roomState) return 0;
+  const transportSeconds = roomState.state === "playing"
+    ? Math.max(0, Date.now() - Date.parse(roomState.serverTime || new Date())) / 1000
+    : 0;
+  return Math.max(0, (Number(roomState.positionSeconds) || 0) + transportSeconds);
+}
+
 function notifyWatchTogetherReady() {
   if (!watchTogetherSession) return;
-  const durationSeconds = Number(els.webPlayer.duration) || 0;
-  const positionSeconds = Number(els.webPlayer.currentTime) || 0;
+  const video = els.webPlayer;
+  const playerDuration = Number(video.duration);
+  const roomDuration = Number(watchTogetherSession.room && watchTogetherSession.room.durationSeconds);
+  const durationSeconds = Number.isFinite(playerDuration) && playerDuration > 0
+    ? playerDuration
+    : Number.isFinite(roomDuration) && roomDuration > 0 ? roomDuration : 0;
+  const positionSeconds = Number(video.currentTime) || 0;
   const remainingSeconds = Math.max(0, durationSeconds - positionSeconds);
   const requiredSeconds = Math.min(18, remainingSeconds);
-  const bufferedSeconds = bufferedAheadSeconds(els.webPlayer, positionSeconds);
+  const bufferedSeconds = bufferedAheadSeconds(video, positionSeconds);
+  const hasPlayableData = video.readyState >= 3; // HTMLMediaElement.HAVE_FUTURE_DATA
   const ready = durationSeconds > 0
-    && (remainingSeconds <= 0.25 || bufferedSeconds >= Math.max(0, requiredSeconds - 0.25));
+    && (remainingSeconds <= 0.25
+      || bufferedSeconds >= Math.max(0, requiredSeconds - 0.25)
+      || hasPlayableData);
   if (watchTogetherSession.bufferReady !== ready) {
     watchTogetherSession.bufferReady = ready;
     sendWatchTogether({
@@ -9973,12 +10005,12 @@ async function openWebPlayer(url, options = {}) {
       };
       video.addEventListener("error", nativePlayerErrorHandler);
       video.src = url.toString();
-      await seekNativeVideo(video, resumeSeconds);
+      await seekNativeVideo(video, resumeSeconds, Boolean(options.startAtBeginning));
       updateNativeTrackControls();
       if (autoplay) {
         await video.play();
       }
-      setPlayerStatus(autoplay ? "" : "Waiting for the host to start playback.");
+      setPlayerStatus("");
       return;
     }
 
@@ -10081,14 +10113,14 @@ async function openWebPlayer(url, options = {}) {
       player.on(window.Hls.Events.MANIFEST_PARSED, async () => {
         updateHlsTrackControls(player);
         try {
-          if (!isFallback && resumeSeconds > 0) {
+          if (resumeSeconds > 0 || options.startAtBeginning) {
             video.currentTime = resumeSeconds;
           }
           if (autoplay) {
             await video.play();
           }
           if (!isFallback) {
-            setPlayerStatus(autoplay ? "" : "Waiting for the host to start playback.");
+            setPlayerStatus("");
           }
         } catch (err) {
           setPlayerStatus("Press play to start playback.");
@@ -10336,25 +10368,37 @@ function toggleVideoPlayback() {
   }
   if (watchTogetherSession) {
     const roomPlaying = watchTogetherSession.state && watchTogetherSession.state.state === "playing";
-    if (watchTogetherCanControl()) {
-      if (!roomPlaying && !watchTogetherCanStart()) {
-        setTemporaryPlayerStatus("Waiting for everyone to buffer.");
-        return;
-      }
-      sendWatchTogether({
-        type: "control",
-        action: roomPlaying ? "pause" : "play",
-        positionSeconds: Number(els.webPlayer.currentTime) || 0
-      });
-      return;
-    }
     if (roomPlaying && els.webPlayer.paused) {
       watchTogetherSuppressControlsUntil = Date.now() + 1000;
-      els.webPlayer.play().catch(() => setPlayerStatus("Playback could not be started in this browser."));
-    } else {
-      setTemporaryPlayerStatus("Only the host can control playback.");
-      applyWatchTogetherState(watchTogetherSession.state, true);
+      els.webPlayer.play().catch(() => setPlayerStatus("Press play to allow synchronized playback."));
+      return;
     }
+    if (watchTogetherCanControl()) {
+      if (!roomPlaying && !watchTogetherCanStart()) {
+        return;
+      }
+      const positionSeconds = roomPlaying
+        ? Number(els.webPlayer.currentTime) || 0
+        : watchTogetherStatePosition(watchTogetherSession.state);
+      const sent = sendWatchTogether({
+        type: "control",
+        action: roomPlaying ? "pause" : "play",
+        positionSeconds
+      });
+      if (!sent) return;
+      watchTogetherSuppressControlsUntil = Date.now() + 1000;
+      if (roomPlaying) {
+        els.webPlayer.pause();
+      } else {
+        if (Math.abs((Number(els.webPlayer.currentTime) || 0) - positionSeconds) > 0.25) {
+          els.webPlayer.currentTime = positionSeconds;
+        }
+        els.webPlayer.play().catch(() => setPlayerStatus("Press play to allow synchronized playback."));
+      }
+      return;
+    }
+    setTemporaryPlayerStatus("Only the host can control playback.");
+    applyWatchTogetherState(watchTogetherSession.state, true);
     return;
   }
   if (els.webPlayer.paused) {
@@ -10918,7 +10962,7 @@ function updateVideoPlayerControls() {
   const duration = Number(els.webPlayer.duration);
   const currentTime = Number(els.webPlayer.currentTime) || 0;
   const paused = watchTogetherSession && watchTogetherSession.state
-    ? watchTogetherSession.state.state !== "playing"
+    ? watchTogetherSession.state.state !== "playing" || els.webPlayer.paused
     : els.webPlayer.paused;
   const muted = els.webPlayer.muted || els.webPlayer.volume === 0;
   els.videoPlayPause.innerHTML = paused ? "&#9654;" : "&#10074;&#10074;";
@@ -11266,6 +11310,12 @@ function setPlayerStatus(message) {
     status.classList.toggle("hidden", !text);
   }
   els.playerOverlay.classList.toggle("player-status-visible", Boolean(text));
+}
+
+function clearPlayerStatus(...messages) {
+  if (messages.includes(els.playerStatus.textContent)) {
+    setPlayerStatus("");
+  }
 }
 
 function setTemporaryPlayerStatus(message, durationMs = 3000) {
@@ -11631,8 +11681,8 @@ function askResumeChoice(action, resumeSeconds) {
   });
 }
 
-function seekNativeVideo(video, resumeSeconds) {
-  if (resumeSeconds <= 0) {
+function seekNativeVideo(video, resumeSeconds, force = false) {
+  if (resumeSeconds <= 0 && !force) {
     return Promise.resolve();
   }
 
