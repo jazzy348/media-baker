@@ -9984,7 +9984,14 @@ async function openWebPlayer(url, options = {}) {
   };
 
   try {
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    const nativeHlsSupported = Boolean(video.canPlayType("application/vnd.apple.mpegurl"));
+    if (!window.Hls) {
+      setPlayerStatus("Loading player...");
+      await loadHlsLibrary();
+    }
+    const hlsJsSupported = Boolean(window.Hls && window.Hls.isSupported());
+
+    if (!hlsJsSupported && nativeHlsSupported) {
       nativePlayerErrorHandler = () => {
         if (!fallbackStarted) {
           options.onPlaybackError?.({
@@ -10014,11 +10021,6 @@ async function openWebPlayer(url, options = {}) {
       return;
     }
 
-    if (!window.Hls) {
-      setPlayerStatus("Loading player...");
-      await loadHlsLibrary();
-    }
-    const hlsJsSupported = Boolean(window.Hls && window.Hls.isSupported());
     if (!hlsJsSupported) {
       setPlayerStatus("This browser cannot play HLS.");
       return;
@@ -10773,6 +10775,7 @@ async function changeVideoAudioTrack() {
 function changeVideoSubtitleTrack() {
   const selectedIndex = Number.parseInt(els.videoSubtitleTrack.value, 10);
   if (hlsPlayer) {
+    hlsPlayer.subtitleDisplay = selectedIndex >= 0;
     hlsPlayer.subtitleTrack = selectedIndex;
     scheduleVideoSubtitlePositionUpdate();
     return;
