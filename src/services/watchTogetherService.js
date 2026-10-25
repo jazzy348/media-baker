@@ -263,9 +263,8 @@ class WatchTogetherService {
         participant.requiredForPlayback = true;
       }
       const reportedDuration = Number(message.durationSeconds);
-      if ((!Number.isFinite(room.durationSeconds) || room.durationSeconds <= 0)
-        && Number.isFinite(reportedDuration)
-        && reportedDuration > 0) {
+      if (Number.isFinite(reportedDuration)
+        && reportedDuration > room.durationSeconds + 0.25) {
         room.durationSeconds = reportedDuration;
         this.store.save(room).catch((err) => logger.error(`[watch-together] duration save failed room=${room.id} message="${err.message}"`, err));
         this.broadcast(room, { type: "room", room: publicRoom(room) });
@@ -283,7 +282,11 @@ class WatchTogetherService {
       return;
     }
     if (message.type === "control") {
-      this.control(room, participant, message).catch((err) => send(participant.ws, { type: "error", message: err.message }));
+      this.control(room, participant, message).catch((err) => send(participant.ws, {
+        type: "error",
+        message: err.message,
+        state: stateSnapshot(room)
+      }));
       return;
     }
     if (message.type === "kick") {

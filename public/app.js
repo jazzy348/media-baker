@@ -1069,7 +1069,11 @@ els.webPlayer.addEventListener("timeupdate", trackVideoPlaybackContinuity);
 els.webPlayer.addEventListener("timeupdate", () => reportWebPlaybackProgress());
 els.webPlayer.addEventListener("timeupdate", () => reportWatchTogetherProgress());
 els.webPlayer.addEventListener("loadedmetadata", updateMusicPlayerControls);
+els.webPlayer.addEventListener("loadedmetadata", () => {
+  if (watchTogetherSession) watchTogetherSession.loadingQueueItem = false;
+});
 els.webPlayer.addEventListener("loadedmetadata", notifyWatchTogetherReady);
+els.webPlayer.addEventListener("loadeddata", notifyWatchTogetherReady);
 els.webPlayer.addEventListener("progress", notifyWatchTogetherReady);
 els.webPlayer.addEventListener("canplay", notifyWatchTogetherReady);
 els.webPlayer.addEventListener("canplaythrough", notifyWatchTogetherReady);
@@ -8136,9 +8140,6 @@ function selectedAudioOption() {
 }
 
 function selectedAudioChannels() {
-  if (state.selected && state.selected.itemType === "track") {
-    return "preserve";
-  }
   return els.audioChannelsLabel.classList.contains("hidden")
     ? "preserve"
     : els.audioChannelsSelect.value;
@@ -9294,6 +9295,7 @@ function handleWatchTogetherMessage(raw) {
   }
   if (message.type === "error") {
     setTemporaryPlayerStatus(message.message || "The room action could not be completed.");
+    if (message.state) applyWatchTogetherState(message.state, true);
     return;
   }
   if (message.type === "kicked") {
@@ -9319,6 +9321,7 @@ async function switchWatchTogetherPlayback(playback, room) {
   session.queueItemId = playback.queueItemId;
   session.queueRevision = playback.queueRevision;
   session.bufferReady = null;
+  session.loadingQueueItem = true;
   session.trackSwitching = false;
   session.room = room || session.room;
   session.state = {
@@ -9615,9 +9618,8 @@ function watchTogetherWaitingParticipants() {
 }
 
 function watchTogetherCanStart() {
-  const participants = watchTogetherSession && watchTogetherSession.participants || [];
-  const required = participants.filter((participant) => participant.blocksPlayback);
-  return required.length > 0 && required.every((participant) => participant.ready);
+  return Boolean(watchTogetherSession && watchTogetherSession.bufferReady
+    && watchTogetherWaitingParticipants().length === 0);
 }
 
 function updateWatchTogetherRoomStatus() {
@@ -9721,7 +9723,12 @@ function sendWatchTogetherLocalState(action) {
   const positionSeconds = action === "play"
     ? watchTogetherStatePosition(watchTogetherSession.state)
     : Number(els.webPlayer.currentTime) || 0;
-  sendWatchTogether({ type: "control", action, positionSeconds });
+  const sent = sendWatchTogether({ type: "control", action, positionSeconds });
+  if (action === "play") {
+    watchTogetherSuppressControlsUntil = Date.now() + 1000;
+    els.webPlayer.pause();
+  }
+  if (!sent) applyWatchTogetherState(watchTogetherSession.state, true);
 }
 
 function applyWatchTogetherState(roomState, force = false) {
@@ -9774,7 +9781,7 @@ function watchTogetherStatePosition(roomState) {
 }
 
 function notifyWatchTogetherReady() {
-  if (!watchTogetherSession) return;
+  if (!watchTogetherSession || watchTogetherSession.loadingQueueItem) return;
   const video = els.webPlayer;
   const playerDuration = Number(video.duration);
   const roomDuration = Number(watchTogetherSession.room && watchTogetherSession.room.durationSeconds);
@@ -9785,7 +9792,8 @@ function notifyWatchTogetherReady() {
   const remainingSeconds = Math.max(0, durationSeconds - positionSeconds);
   const requiredSeconds = Math.min(18, remainingSeconds);
   const bufferedSeconds = bufferedAheadSeconds(video, positionSeconds);
-  const hasPlayableData = video.readyState >= 3; // HTMLMediaElement.HAVE_FUTURE_DATA
+  const hasPlayableData = video.readyState >= 3 // HTMLMediaElement.HAVE_FUTURE_DATA
+    || (video.readyState >= 2 && bufferedSeconds >= 0.25); // HTMLMediaElement.HAVE_CURRENT_DATA
   const ready = durationSeconds > 0
     && (remainingSeconds <= 0.25
       || bufferedSeconds >= Math.max(0, requiredSeconds - 0.25)
@@ -10388,15 +10396,6 @@ function toggleVideoPlayback() {
         positionSeconds
       });
       if (!sent) return;
-      watchTogetherSuppressControlsUntil = Date.now() + 1000;
-      if (roomPlaying) {
-        els.webPlayer.pause();
-      } else {
-        if (Math.abs((Number(els.webPlayer.currentTime) || 0) - positionSeconds) > 0.25) {
-          els.webPlayer.currentTime = positionSeconds;
-        }
-        els.webPlayer.play().catch(() => setPlayerStatus("Press play to allow synchronized playback."));
-      }
       return;
     }
     setTemporaryPlayerStatus("Only the host can control playback.");
@@ -10880,16 +10879,24 @@ function scheduleVideoSubtitlePositionUpdate() {
 }
 
 function updateVideoSubtitlePositions() {
-  const surfaceRect = els.videoPlaybackSurface.getBoundingClientRect();
-  if (!(surfaceRect.height > 0)) return;
+  const playerRect = els.webPlayer.getBoundingClientRect();
+  if (!(playerRect.height > 0)) return;
+  const contentRect = containedVideoContentRect(
+    playerRect,
+    Number(els.webPlayer.videoWidth),
+    Number(els.webPlayer.videoHeight)
+  );
 
   const controlsHidden = els.videoPlaybackSurface.classList.contains("controls-hidden");
-  const gap = Math.max(8, Math.min(18, surfaceRect.height * 0.025));
-  let obstructionTop = surfaceRect.bottom - Math.max(16, Math.min(28, surfaceRect.height * 0.04));
+  // Native fullscreen captions scale with the video. Reserve enough room for
+  // the whole cue box, rather than only placing its anchor a few pixels above
+  // the picture edge or controls.
+  const cueClearance = Math.max(28, Math.min(112, contentRect.height * 0.08));
+  let obstructionTop = contentRect.bottom;
   if (!controlsHidden) {
     const controlsRect = els.videoControls.getBoundingClientRect();
     if (controlsRect.height > 0) {
-      obstructionTop = controlsRect.top;
+      obstructionTop = Math.min(obstructionTop, controlsRect.top);
     }
     if (!els.videoTrackControls.classList.contains("hidden")) {
       const trackControlsRect = els.videoTrackControls.getBoundingClientRect();
@@ -10899,7 +10906,7 @@ function updateVideoSubtitlePositions() {
     }
   }
 
-  const line = Math.max(45, Math.min(96, ((obstructionTop - surfaceRect.top - gap) / surfaceRect.height) * 100));
+  const line = Math.max(45, Math.min(96, ((obstructionTop - playerRect.top - cueClearance) / playerRect.height) * 100));
   mediaTrackList(els.webPlayer.textTracks)
     .filter(({ track }) => ["subtitles", "captions"].includes(track.kind))
     .forEach(({ track }) => {
@@ -10921,6 +10928,27 @@ function updateVideoSubtitlePositions() {
         track.mode = "showing";
       }
     });
+}
+
+function containedVideoContentRect(playerRect, videoWidth, videoHeight) {
+  if (!(videoWidth > 0) || !(videoHeight > 0) || !(playerRect.width > 0) || !(playerRect.height > 0)) {
+    return playerRect;
+  }
+
+  const mediaAspectRatio = videoWidth / videoHeight;
+  const playerAspectRatio = playerRect.width / playerRect.height;
+  if (mediaAspectRatio <= playerAspectRatio) {
+    return playerRect;
+  }
+
+  const height = playerRect.width / mediaAspectRatio;
+  const top = playerRect.top + (playerRect.height - height) / 2;
+  return {
+    ...playerRect,
+    top,
+    bottom: top + height,
+    height
+  };
 }
 
 function positionVideoSubtitleCue(cue, line) {
@@ -11302,6 +11330,7 @@ function updateVideoFullscreenControl() {
   els.videoFullscreen.title = fullscreen ? "Exit fullscreen" : "Fullscreen";
   els.videoFullscreen.setAttribute("aria-label", fullscreen ? "Exit fullscreen" : "Fullscreen");
   showVideoControls();
+  scheduleVideoSubtitlePositionUpdate();
 }
 
 function setPlayerStatus(message) {
@@ -11569,20 +11598,18 @@ function reportWebPlaybackProgress(force = false, positionOverride = null) {
 async function handleWebPlayerEnded() {
   stopOnDeckPolling();
   const duration = Number(els.webPlayer.duration);
-  if (watchTogetherSession) {
-    reportWatchTogetherProgress(true);
-    sendWatchTogether({ type: "ended", itemId: watchTogetherSession.queueItemId });
-    return;
-  }
   if (activeWebPlaybackRequest && activeWebPlaybackRequest.fallbackStarted) {
     webPlaybackNeedsRenewal = true;
     setPlayerStatus("The stream session expired. Press play to reconnect.");
     return;
   }
   const endedSessionId = webPlaybackSessionId;
-  const videoEndConfirmed = videoEndSkipRequested || videoNaturalEndSeconds >= 5;
-  if (activePlaybackMedia
-    && !activePlaybackMedia.audioOnly
+  const roomDuration = Number(watchTogetherSession && watchTogetherSession.room && watchTogetherSession.room.durationSeconds) || 0;
+  const expectedDuration = Math.max(Number.isFinite(duration) ? duration : 0, roomDuration);
+  const reachedEnd = expectedDuration > 0
+    && Number(els.webPlayer.currentTime) >= expectedDuration - 5;
+  const videoEndConfirmed = videoEndSkipRequested || (videoNaturalEndSeconds >= 5 && reachedEnd);
+  if ((watchTogetherSession || activePlaybackMedia && !activePlaybackMedia.audioOnly)
     && !videoEndConfirmed) {
     if (!seekEndRecoveryAttempted) {
       seekEndRecoveryAttempted = true;
@@ -11601,6 +11628,11 @@ async function handleWebPlayerEnded() {
     } else {
       setPlayerStatus("Playback ended unexpectedly after seeking.");
     }
+    return;
+  }
+  if (watchTogetherSession) {
+    reportWatchTogetherProgress(true);
+    sendWatchTogether({ type: "ended", itemId: watchTogetherSession.queueItemId });
     return;
   }
 

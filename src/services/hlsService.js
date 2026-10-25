@@ -8,7 +8,7 @@ const logger = require("../utils/logger");
 const SEEK_AHEAD_THRESHOLD_SECONDS = 30;
 const SEEK_PRE_ROLL_SECONDS = 24;
 const SEEK_REASSERT_INTERVAL_MS = 1500;
-const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-multitrack-v28";
+const HLS_CACHE_FORMAT_VERSION = "synthetic-vod-multitrack-v31";
 const HLS_CACHE_FORMAT_MARKER = ".hls-cache-format";
 const KEYFRAME_CACHE_FORMAT_VERSION = 2;
 const MAXIMUM_COPIED_SEGMENT_SECONDS = 60;
@@ -1562,7 +1562,10 @@ class HlsService {
     args.push(
       "-max_interleave_delta",
       "0",
-      ...(videoOnly ? ["-muxpreload", "0", "-muxdelay", "0"] : []),
+      // Keep the MPEG-TS timeline aligned with the zero-based WebVTT rendition.
+      // FFmpeg otherwise adds its default 1.4 second mux delay to combined A/V.
+      "-muxpreload", "0",
+      "-muxdelay", "0",
       "-f",
       "hls",
       "-hls_time",
@@ -1933,11 +1936,17 @@ function normalizeAudioChannelPreference(value) {
 
 function selectAudioMode(audioStream, preference) {
   if (preference === "stereo") {
+    const channelLayout = String(audioStream.channel_layout || "").toLowerCase();
+    const isSurround51 = Number(audioStream.channels) === 6
+      && (!channelLayout || channelLayout.startsWith("5.1"));
+    // FFmpeg's 5.1 channel order is FL, FR, FC, LFE, then the rear or side pair.
     return {
       id: "stereo",
       forceTranscode: true,
       channels: 2,
-      filter: null
+      filter: isSurround51
+        ? "pan=stereo|c0<c0+0.707*c2+0.5*c3+0.707*c4|c1<c1+0.707*c2+0.5*c3+0.707*c5"
+        : null
     };
   }
 
@@ -2459,17 +2468,13 @@ function roundSeconds(value) {
 function mediaDurationSeconds(probe) {
   const candidates = [
     probe && probe.format && probe.format.duration,
-    ...(probe && Array.isArray(probe.streams) ? probe.streams.map((stream) => stream.duration) : [])
+    ...(probe && Array.isArray(probe.streams)
+      ? probe.streams.filter((stream) => stream.codec_type === "video" || stream.codec_type === "audio")
+        .map((stream) => stream.duration)
+      : [])
   ];
-
-  for (const candidate of candidates) {
-    const parsed = Number.parseFloat(candidate);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-
-  return null;
+  const durations = candidates.map(Number.parseFloat).filter((value) => Number.isFinite(value) && value > 0);
+  return durations.length > 0 ? Math.max(...durations) : null;
 }
 
 function escapeSubtitleFilterPath(filePath) {
