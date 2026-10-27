@@ -201,6 +201,52 @@ class MysqlIndexStore {
     return showFromRows(rows[0], seasonRows, episodeRows);
   }
 
+  async getMediaFiles(collection, type, ids) {
+    await this.init();
+    const mediaIds = [...new Set(ids)];
+    const files = new Map();
+    const table = type === "tv" ? "media_episodes" : type === "music" ? "media_tracks" : "media_movies";
+    const fromRow = type === "tv" ? episodeFromRow : type === "music" ? trackFromRow : movieFromRow;
+    for (let offset = 0; offset < mediaIds.length; offset += 500) {
+      const chunk = mediaIds.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const [rows] = await this.pool.execute(
+        `SELECT * FROM ${table} WHERE collection = ? AND id IN (${placeholders})`,
+        [collection, ...chunk]
+      );
+      for (const row of rows) files.set(row.id, fromRow(row));
+    }
+    if (type === "tv") {
+      // TV libraries can also contain standalone videos.
+      const missingIds = mediaIds.filter((id) => !files.has(id));
+      const movies = await this.getMediaFiles(collection, "movies", missingIds);
+      for (const [id, movie] of movies) files.set(id, movie);
+    }
+    return files;
+  }
+
+  async getEpisodesForShows(collection, showIds) {
+    await this.init();
+    const ids = [...new Set(showIds)];
+    const episodes = [];
+    for (let offset = 0; offset < ids.length; offset += 500) {
+      const chunk = ids.slice(offset, offset + 500);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const [rows] = await this.pool.execute(
+        `SELECT e.id, e.show_id, e.show_name, e.season, e.episode, e.title, e.filename,
+                e.file_path, e.added_at_ms, e.mtime_ms
+         FROM media_episodes e
+         JOIN media_shows s ON s.collection = e.collection AND s.id = e.show_id
+         JOIN media_seasons r ON r.collection = e.collection AND r.show_id = e.show_id AND r.season = e.season
+         WHERE e.collection = ? AND e.show_id IN (${placeholders})
+         ORDER BY e.season, e.episode, e.filename`,
+        [collection, ...chunk]
+      );
+      for (const row of rows) episodes.push(episodeFromRow(row));
+    }
+    return episodes;
+  }
+
   async getSeason(collection, showId, seasonNumber) {
     await this.init();
     const season = Number(seasonNumber);
@@ -307,6 +353,38 @@ class MysqlIndexStore {
       [collection]
     );
     return [...rows, ...episodeRows].map(fileIdentityFromRow);
+  }
+
+  async loadRecentCollection(collection, type, limit, offset = 0) {
+    await this.init();
+    const safeLimit = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(limit) || 1));
+    const safeOffset = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(offset) || 0));
+    const table = type === "tv" ? "media_episodes" : type === "music" ? "media_tracks" : "media_movies";
+    const columns = type === "tv"
+      ? "id, show_id, show_name, season, episode, title, filename, file_path, added_at_ms, mtime_ms"
+      : type === "music"
+        ? "id, artist_id, artist_name, album_id, album_name, disc_number, track_number, title, filename, file_path, added_at_ms, mtime_ms, artists_json, album_artist"
+        : "id, title, release_year, filename, folder, file_path, added_at_ms, mtime_ms";
+    const [rows] = await this.pool.execute(
+      `SELECT ${columns} FROM ${table} WHERE collection = ?
+       ORDER BY COALESCE(NULLIF(added_at_ms, 0), mtime_ms, 0) DESC,
+                COALESCE(NULLIF(title, ''), filename), id
+       LIMIT ${safeLimit} OFFSET ${safeOffset}`,
+      [collection]
+    );
+    const [[counts]] = await this.pool.execute(
+      `SELECT COUNT(*) AS item_count${type === "tv"
+        ? ", (SELECT COUNT(*) FROM media_shows WHERE collection = ?) AS show_count" : ""}
+       FROM ${table} WHERE collection = ?`,
+      type === "tv" ? [collection, collection] : [collection]
+    );
+    const totalItems = Number(counts.item_count);
+    return {
+      collection: type === "tv" ? { episodes: rows.map(episodeFromRow) }
+        : type === "music" ? { tracks: rows.map(trackFromRow) } : { items: rows.map(movieFromRow) },
+      totalItems,
+      total: type === "tv" ? Number(counts.show_count) : totalItems
+    };
   }
 
   async searchCollection(collection, type, query, metadataIds = [], limit = 240) {

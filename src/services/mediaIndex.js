@@ -338,6 +338,67 @@ class MediaIndex {
     return this.getTrack(trackId, collection);
   }
 
+  async getMediaFiles(refs) {
+    const grouped = new Map();
+    for (const { mediaType, mediaId } of refs) {
+      const ids = grouped.get(mediaType) || new Set();
+      ids.add(mediaId);
+      grouped.set(mediaType, ids);
+    }
+    const files = new Map();
+    for (const [key, ids] of grouped) {
+      const library = this.libraryForKey(key);
+      if (!library) continue;
+      if (this.databaseBacked) {
+        const batch = await this.indexStore.getMediaFiles(key, library.type, [...ids]);
+        for (const [id, file] of batch) files.set(`${key}:${id}`, file);
+      } else {
+        const collection = this.collection(key);
+        for (const id of ids) {
+          const file = library.type === "tv"
+            ? collection.episodesById[id] || collection.byId[id]
+            : library.type === "music" ? collection.tracksById[id] : collection.byId[id];
+          if (file) files.set(`${key}:${id}`, file);
+        }
+      }
+    }
+    return files;
+  }
+
+  async getNextEpisodes(refs) {
+    const grouped = new Map();
+    for (const ref of refs) {
+      const entries = grouped.get(ref.mediaType) || [];
+      entries.push(ref);
+      grouped.set(ref.mediaType, entries);
+    }
+    const nextByKey = new Map();
+    for (const [key, entries] of grouped) {
+      const showIds = new Set(entries.map((entry) => entry.showId));
+      const episodes = this.databaseBacked
+        ? await this.indexStore.getEpisodesForShows(key, [...showIds])
+        : this.collection(key, "tv").shows
+          .filter((show) => showIds.has(show.id))
+          .flatMap((show) => show.seasons.flatMap((season) => season.episodes));
+      const episodesByShow = new Map();
+      for (const episode of episodes) {
+        const showEpisodes = episodesByShow.get(episode.showId) || [];
+        showEpisodes.push(episode);
+        episodesByShow.set(episode.showId, showEpisodes);
+      }
+      const requestedIds = new Set(entries.map((entry) => entry.mediaId));
+      for (const showEpisodes of episodesByShow.values()) {
+        showEpisodes.sort(sortEpisodes);
+        for (let index = 0; index < showEpisodes.length - 1; index += 1) {
+          if (requestedIds.has(showEpisodes[index].id)) {
+            nextByKey.set(`${key}:${showEpisodes[index].id}`, showEpisodes[index + 1]);
+          }
+        }
+      }
+    }
+    return nextByKey;
+  }
+
   async nextPlayable(collection, mediaId) {
     const library = this.libraryForKey(collection);
     if (!library) {
@@ -460,6 +521,14 @@ class MediaIndex {
       return this.indexStore.searchCollection(key, library.type, query, metadataIds, limit);
     }
     return this.loadCollection(key, library.type);
+  }
+
+  async loadRecentCollection(key, limit, offset = 0) {
+    const library = this.libraryForKey(key);
+    if (!library) {
+      return { collection: emptyCollection("movies"), totalItems: 0, total: 0 };
+    }
+    return this.indexStore.loadRecentCollection(key, library.type, limit, offset);
   }
 
   async snapshot() {

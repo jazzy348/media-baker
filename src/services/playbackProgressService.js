@@ -382,23 +382,27 @@ class PlaybackProgressService {
     const cutoff = Date.now() - this.config.playback.onDeckTtlSeconds * 1000;
     const itemsByKey = new Map();
 
-    const latestWatchedByShow = new Map();
-    for (const record of records) {
-      if (!recordAllowed(record, allowedLibraryKey)) {
-        continue;
-      }
+    const candidates = records.filter((record) => {
+      if (!recordAllowed(record, allowedLibraryKey)) return false;
+      const library = mediaIndex.libraryForKey(record.mediaType);
+      if (!library || library.trackProgress === false) return false;
+      return record.status === STATUS_WATCHED && library.type === "tv"
+        || record.status === STATUS_IN_PROGRESS && record.positionSeconds > 0 && timeMs(record.updatedAt) >= cutoff;
+    });
+    const filesByKey = await mediaIndex.getMediaFiles(candidates);
 
+    const latestWatchedByShow = new Map();
+    for (const record of candidates) {
+      const mediaFile = filesByKey.get(recordKey(record.mediaType, record.mediaId));
       const updatedAtMs = timeMs(record.updatedAt);
       if (record.status === STATUS_IN_PROGRESS && record.positionSeconds > 0 && updatedAtMs >= cutoff) {
-        const mediaFile = await mediaFileForRecord(mediaIndex, record);
         if (mediaFile && !showOnDeckSuppressed(recordsByKey, record.mediaType, mediaFile.showId, record.updatedAt)) {
-          itemsByKey.set(recordKey(record.mediaType, record.mediaId), await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, "resume"));
+          itemsByKey.set(recordKey(record.mediaType, record.mediaId), { record, mediaFile, reason: "resume" });
         }
         continue;
       }
 
       if (record.status === STATUS_WATCHED) {
-        const mediaFile = await mediaFileForRecord(mediaIndex, record);
         if (mediaFile
           && mediaFile.showId
           && !showOnDeckSuppressed(recordsByKey, record.mediaType, mediaFile.showId, record.updatedAt)) {
@@ -411,8 +415,13 @@ class PlaybackProgressService {
       }
     }
 
+    const nextEpisodes = await mediaIndex.getNextEpisodes([...latestWatchedByShow.values()].map(({ record, mediaFile }) => ({
+      mediaType: record.mediaType,
+      mediaId: mediaFile.id,
+      showId: mediaFile.showId
+    })));
     for (const { record, mediaFile } of latestWatchedByShow.values()) {
-      const nextEpisode = await nextEpisodeFor(mediaIndex, record.mediaType, mediaFile);
+      const nextEpisode = nextEpisodes.get(recordKey(record.mediaType, mediaFile.id));
       if (!nextEpisode) {
         continue;
       }
@@ -428,19 +437,23 @@ class PlaybackProgressService {
         continue;
       }
 
-      itemsByKey.set(nextKey, await this.cardForRecord(mediaIndex, metadata, authToken, authParamName, {
-        mediaType: record.mediaType,
-        mediaId: nextEpisode.id,
-        status: "next",
-        positionSeconds: 0,
-        durationSeconds: 0,
-        updatedAt: new Date(availableAtMs).toISOString(),
-        watchedAt: null
-      }, nextEpisode, "next"));
+      itemsByKey.set(nextKey, {
+        record: {
+          mediaType: record.mediaType,
+          mediaId: nextEpisode.id,
+          status: "next",
+          positionSeconds: 0,
+          durationSeconds: 0,
+          updatedAt: new Date(availableAtMs).toISOString(),
+          watchedAt: null
+        },
+        mediaFile: nextEpisode,
+        reason: "next"
+      });
     }
 
-    return [...itemsByKey.values()]
-      .sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
+    const items = await this.cardsForRecords(mediaIndex, metadata, authToken, authParamName, [...itemsByKey.values()]);
+    return items.sort((a, b) => timeMs(b.updatedAt) - timeMs(a.updatedAt));
   }
 
   async history(mediaIndex, metadata, authToken, authParamName = "authToken", allowedLibraryKey = null, userId = "global") {
@@ -594,38 +607,54 @@ class PlaybackProgressService {
     return base;
   }
 
+  async cardsForRecords(mediaIndex, metadata, authToken, authParamName, entries) {
+    if (entries.length === 0) return [];
+    const refs = entries.flatMap(({ record, mediaFile }) => [mediaFile.id, mediaFile.showId]
+      .filter(Boolean).map((id) => ({ mediaType: record.mediaType, id })));
+    const cachedByKey = metadata ? await metadata.getCachedForMediaItems(refs) : new Map();
+    return entries.map(({ record, mediaFile, reason }) => progressCard(
+      mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason,
+      cachedByKey.get(recordKey(record.mediaType, mediaFile.id)),
+      cachedByKey.get(recordKey(record.mediaType, mediaFile.showId))
+    ));
+  }
+
   async cardForRecord(mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason) {
-    const item = itemFromMediaFile(mediaIndex, record.mediaType, mediaFile);
     const [cached, seriesCached] = metadata && metadata.getCachedForMedia
       ? await Promise.all([
         metadata.getCachedForMedia(record.mediaType, metadataIdForMediaFile(mediaFile)),
         mediaFile.showId ? metadata.getCachedForMedia(record.mediaType, mediaFile.showId) : null
       ])
       : [null, null];
-    const preservePlayableTitle = Boolean(mediaFile.showId || mediaFile.artistId);
-    const title = !preservePlayableTitle && cached && cached.available && cached.title
-      ? cached.title
-      : item.title;
-    const seriesPosterUrl = seriesCached && seriesCached.available && seriesCached.posterFilename
-      ? metadata.posterUrl(seriesCached.posterFilename, authToken, authParamName)
-      : null;
-    return {
-      ...item,
-      title,
-      metadataTitle: cached && cached.available ? cached.title : null,
-      metadataAliases: cached && cached.available ? cached.aliases || [] : [],
-      posterUrl: seriesPosterUrl || (cached && cached.posterFilename ? metadata.posterUrl(cached.posterFilename, authToken, authParamName) : item.posterUrl),
-      thumbnailUrl: (item.showId || item.localThumbnail) && metadata
-        ? metadata.thumbnailUrl(record.mediaType, item.id, authToken, authParamName)
-        : item.thumbnailUrl,
-      seasonPosterUrl: item.showId && Number(item.season) !== 0 && metadata
-        ? metadata.seasonPosterUrl(record.mediaType, item.id, authToken, authParamName)
-        : seriesPosterUrl,
-      progress: toPublicProgress(record),
-      onDeckReason: reason,
-      updatedAt: record.updatedAt || null
-    };
+    return progressCard(mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason, cached, seriesCached);
   }
+}
+
+function progressCard(mediaIndex, metadata, authToken, authParamName, record, mediaFile, reason, cached, seriesCached) {
+  const item = itemFromMediaFile(mediaIndex, record.mediaType, mediaFile);
+  const preservePlayableTitle = Boolean(mediaFile.showId || mediaFile.artistId);
+  const title = !preservePlayableTitle && cached && cached.available && cached.title
+    ? cached.title
+    : item.title;
+  const seriesPosterUrl = seriesCached && seriesCached.available && seriesCached.posterFilename
+    ? metadata.posterUrl(seriesCached.posterFilename, authToken, authParamName)
+    : null;
+  return {
+    ...item,
+    title,
+    metadataTitle: cached && cached.available ? cached.title : null,
+    metadataAliases: cached && cached.available ? cached.aliases || [] : [],
+    posterUrl: seriesPosterUrl || (cached && cached.posterFilename ? metadata.posterUrl(cached.posterFilename, authToken, authParamName) : item.posterUrl),
+    thumbnailUrl: (item.showId || item.localThumbnail) && metadata
+      ? metadata.thumbnailUrl(record.mediaType, item.id, authToken, authParamName)
+      : item.thumbnailUrl,
+    seasonPosterUrl: item.showId && Number(item.season) !== 0 && metadata
+      ? metadata.seasonPosterUrl(record.mediaType, item.id, authToken, authParamName)
+      : seriesPosterUrl,
+    progress: toPublicProgress(record),
+    onDeckReason: reason,
+    updatedAt: record.updatedAt || null
+  };
 }
 
 function itemFromMediaFile(mediaIndex, mediaType, mediaFile) {
@@ -691,19 +720,6 @@ async function mediaFileForRecord(mediaIndex, record, requireProgressTracking = 
   }
 
   return await mediaIndex.getMovie(record.mediaId, library.key);
-}
-
-async function nextEpisodeFor(mediaIndex, mediaType, episode) {
-  const show = await mediaIndex.getShow(episode.showId, mediaType);
-  if (!show) {
-    return null;
-  }
-
-  const episodes = show.seasons
-    .flatMap((season) => season.episodes)
-    .sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0) || a.filename.localeCompare(b.filename));
-  const index = episodes.findIndex((item) => item.id === episode.id);
-  return index >= 0 ? episodes[index + 1] || null : null;
 }
 
 function compareEpisodes(a, b) {

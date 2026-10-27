@@ -939,15 +939,25 @@ function randomItems(items, limit) {
 }
 
 async function homeRowForCategory({ category, mediaIndex, metadata, progress, req, mode, offset, limit, seed }) {
-  const collection = await mediaIndex.loadCollection(category.collection);
-  const allItems = category.folderBrowser
-    ? rootMediaFolderItems(category, collection.items, authContext(req))
-    : await itemsForCategory(mediaIndex, category, collection);
-  const total = category.kind === "episode"
-    ? (await libraryItemsForCategory(mediaIndex, category, collection)).length
-    : allItems.length;
+  let allItems;
+  let total;
+  let totalItems;
+  if (mode === "recent" && !category.folderBrowser && mediaIndex.databaseBacked) {
+    const candidates = await recentHomeCandidates(mediaIndex, category, offset, limit);
+    allItems = candidates.items;
+    total = candidates.total;
+    totalItems = candidates.totalItems;
+  } else {
+    const collection = await mediaIndex.loadCollection(category.collection);
+    allItems = category.folderBrowser
+      ? rootMediaFolderItems(category, collection.items, authContext(req))
+      : await itemsForCategory(mediaIndex, category, collection);
+    total = category.kind === "episode" ? collection.shows.length : allItems.length;
+    totalItems = allItems.length;
+  }
   const page = await homePageItems({
     allItems,
+    totalItems,
     category,
     mediaIndex,
     metadata,
@@ -971,7 +981,24 @@ async function homeRowForCategory({ category, mediaIndex, metadata, progress, re
   };
 }
 
-async function homePageItems({ allItems, category, mediaIndex, metadata, progress, req, mode, offset, limit, seed }) {
+async function recentHomeCandidates(mediaIndex, category, offset, limit) {
+  const requiredDisplayItems = offset + limit + 1;
+  let candidateLimit = category.kind === "episode"
+    ? Math.max(requiredDisplayItems * 20, 72) : requiredDisplayItems;
+  const items = [];
+  while (true) {
+    const page = await mediaIndex.loadRecentCollection(category.collection, candidateLimit - items.length, items.length);
+    const additionalItems = await itemsForCategory(mediaIndex, category, page.collection);
+    for (const item of additionalItems) items.push(item);
+    if (category.kind !== "episode" || candidateLimit >= page.totalItems
+      || additionalItems.length === 0 || bundleRecentEpisodes(items).length >= requiredDisplayItems) {
+      return { items, total: page.total, totalItems: page.totalItems };
+    }
+    candidateLimit = Math.min(page.totalItems, candidateLimit * 2);
+  }
+}
+
+async function homePageItems({ allItems, totalItems, category, mediaIndex, metadata, progress, req, mode, offset, limit, seed }) {
   if (mode === "random") {
     const candidates = seededRandomItems(allItems, seed).slice(offset, offset + limit + 1);
     const enriched = await withCatalogState(candidates, metadata, progress, mediaIndex, req);
@@ -989,7 +1016,7 @@ async function homePageItems({ allItems, category, mediaIndex, metadata, progres
     const items = enriched.slice(0, limit);
     return {
       items,
-      hasMore: items.length > 0 && (enriched.length > limit || offset + candidates.length < ordered.length)
+      hasMore: items.length > 0 && (enriched.length > limit || offset + candidates.length < totalItems)
     };
   }
 
@@ -1010,7 +1037,7 @@ async function homePageItems({ allItems, category, mediaIndex, metadata, progres
   const items = displayItems.slice(offset, offset + limit);
   return {
     items,
-    hasMore: items.length > 0 && (displayItems.length > offset + limit || candidateLimit < ordered.length)
+    hasMore: items.length > 0 && (displayItems.length > offset + limit || candidateLimit < totalItems)
   };
 }
 

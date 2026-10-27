@@ -1643,10 +1643,19 @@ async function loadHome(mode = state.homeMode) {
     ? Promise.resolve(null)
     : api("/api/progress/on-deck").catch(() => null);
 
+  let onDeckItems = cached ? cached.onDeckItems : [];
+  // On Deck can walk a large playback history; keep it off the home render path.
+  onDeckRequest.then((onDeck) => {
+    if (state.homeRequestId !== requestId || state.currentView !== "home") return;
+    if (onDeck) onDeckItems = onDeck.items || [];
+    const snapshot = state.homeCache.get(state.homeMode);
+    if (snapshot) snapshot.onDeckItems = onDeckItems;
+    renderOnDeckRow(onDeckItems);
+  });
+
   let data;
-  let onDeck;
   try {
-    [data, onDeck] = await Promise.all([homeRequest, onDeckRequest]);
+    data = await homeRequest;
   } catch (err) {
     if (cached) {
       return;
@@ -1658,9 +1667,6 @@ async function loadHome(mode = state.homeMode) {
     return;
   }
 
-  const onDeckItems = onDeck
-    ? onDeck.items || []
-    : cached ? cached.onDeckItems : [];
   state.homeCache.set(state.homeMode, { data, onDeckItems });
   renderHomeSnapshot(data, onDeckItems);
 }
