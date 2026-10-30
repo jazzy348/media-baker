@@ -4530,6 +4530,16 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 6px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+  opacity: 1;
+  transition: opacity 200ms ease;
+}
+
+.video-skip-prompt.inactive {
+  opacity: 0.5;
+}
+
+.video-skip-prompt:hover {
+  opacity: 1;
 }
 
 .video-skip-prompt.hidden {

@@ -653,10 +653,12 @@ let musicSeeking = false;
 let videoSeeking = false;
 let videoLastSeekAt = 0;
 let videoControlsHideTimer = null;
+let videoSkipPromptFadeTimer = null;
+let videoSkipPromptMarkerKey = null;
 let videoSubtitlePositionFrame = null;
 let videoSubtitleResizeObserver = null;
 const boundVideoSubtitleTracks = new WeakSet();
-const positionedVideoSubtitleCues = new WeakSet();
+const positionedVideoSubtitleCues = new WeakMap();
 const AUDIO_SWITCH_PREFETCH_SECONDS = 18;
 const AUDIO_SWITCH_PREFETCH_ATTEMPTS = 4;
 let playerStatusHideTimer = null;
@@ -1090,7 +1092,10 @@ els.webPlayer.addEventListener("pause", () => sendWatchTogetherLocalState("pause
 els.webPlayer.addEventListener("timeupdate", updateVideoPlayerControls);
 els.webPlayer.addEventListener("loadedmetadata", updateVideoPlayerControls);
 els.webPlayer.addEventListener("loadedmetadata", updateNativeTrackControls);
+els.webPlayer.addEventListener("loadedmetadata", scheduleVideoSubtitlePositionUpdate);
+els.webPlayer.addEventListener("resize", scheduleVideoSubtitlePositionUpdate);
 if (els.webPlayer.textTracks && typeof els.webPlayer.textTracks.addEventListener === "function") {
+  els.webPlayer.textTracks.addEventListener("change", scheduleVideoSubtitlePositionUpdate);
   els.webPlayer.textTracks.addEventListener("addtrack", (event) => {
     bindVideoSubtitleTrack(event.track);
     scheduleVideoSubtitlePositionUpdate();
@@ -1100,6 +1105,8 @@ bindVideoSubtitleTracks();
 if (typeof window.ResizeObserver === "function") {
   videoSubtitleResizeObserver = new window.ResizeObserver(scheduleVideoSubtitlePositionUpdate);
   videoSubtitleResizeObserver.observe(els.videoPlaybackSurface);
+  videoSubtitleResizeObserver.observe(els.videoControls);
+  videoSubtitleResizeObserver.observe(els.videoTrackControls);
 } else {
   window.addEventListener("resize", scheduleVideoSubtitlePositionUpdate);
 }
@@ -1123,6 +1130,13 @@ els.videoPictureInPicture.addEventListener("click", toggleVideoPictureInPicture)
 els.videoFullscreen.addEventListener("click", toggleVideoFullscreen);
 els.videoSkipMarker.addEventListener("click", skipCurrentMarker);
 els.videoContinueMarker.addEventListener("click", dismissCurrentMarker);
+els.videoSkipPrompt.addEventListener("pointerenter", showVideoSkipPrompt);
+els.videoSkipPrompt.addEventListener("pointerleave", scheduleVideoSkipPromptFade);
+els.videoSkipPrompt.addEventListener("pointerdown", showVideoSkipPrompt);
+els.videoSkipPrompt.addEventListener("pointerup", scheduleVideoSkipPromptFade);
+els.videoSkipPrompt.addEventListener("pointercancel", scheduleVideoSkipPromptFade);
+els.videoSkipPrompt.addEventListener("focusin", showVideoSkipPrompt);
+els.videoSkipPrompt.addEventListener("focusout", scheduleVideoSkipPromptFade);
 const revealVideoControls = () => showVideoControls();
 els.videoPlaybackSurface.addEventListener("pointermove", revealVideoControls);
 els.videoPlaybackSurface.addEventListener("pointerdown", revealVideoControls);
@@ -10205,6 +10219,7 @@ function resetWebPlaybackSourceForTransition() {
   els.webPlayer.load();
   activeSkipMarkers = [];
   dismissedSkipMarkers = new Set();
+  updateSkipMarkerControl();
   resetVideoTrackControls();
 }
 
@@ -10894,10 +10909,7 @@ function updateVideoSubtitlePositions() {
   );
 
   const controlsHidden = els.videoPlaybackSurface.classList.contains("controls-hidden");
-  // Native fullscreen captions scale with the video. Reserve enough room for
-  // the whole cue box, rather than only placing its anchor a few pixels above
-  // the picture edge or controls.
-  const cueClearance = Math.max(28, Math.min(112, contentRect.height * 0.08));
+  const cueClearance = Math.max(8, Math.min(24, contentRect.height * 0.015));
   let obstructionTop = contentRect.bottom;
   if (!controlsHidden) {
     const controlsRect = els.videoControls.getBoundingClientRect();
@@ -10912,21 +10924,25 @@ function updateVideoSubtitlePositions() {
     }
   }
 
-  const line = Math.max(45, Math.min(96, ((obstructionTop - playerRect.top - cueClearance) / playerRect.height) * 100));
+  const cueBottom = obstructionTop - playerRect.top - cueClearance;
   mediaTrackList(els.webPlayer.textTracks)
     .filter(({ track }) => ["subtitles", "captions"].includes(track.kind))
     .forEach(({ track }) => {
       bindVideoSubtitleTrack(track);
       let cues = null;
       try {
-        cues = track.cues;
+        cues = track.activeCues;
       } catch (err) {
         return;
       }
       const cueCount = Number(cues && cues.length) || 0;
       let placementChanged = false;
       for (let index = 0; index < cueCount; index += 1) {
-        placementChanged = positionVideoSubtitleCue(cues[index], line) || placementChanged;
+        const cue = cues[index];
+        if (!cue || !("line" in cue) || cue.vertical) continue;
+        const cueHeight = measureVideoSubtitleCueHeight(cue, playerRect);
+        const line = Math.max(0, (cueBottom - cueHeight) / playerRect.height * 100);
+        placementChanged = positionVideoSubtitleCue(cue, line) || placementChanged;
       }
       if (placementChanged && track.mode === "showing" && track.activeCues && track.activeCues.length > 0) {
         // Chromium needs a track repaint before an active native cue adopts its new line.
@@ -10934,6 +10950,28 @@ function updateVideoSubtitlePositions() {
         track.mode = "showing";
       }
     });
+}
+
+function measureVideoSubtitleCueHeight(cue, playerRect) {
+  // Percentage-positioned WebVTT cues preserve line breaks without wrapping.
+  // Measure the complete block with the native default font, including markup.
+  const fontSize = Math.min(playerRect.width, playerRect.height) * 0.05;
+  const measurement = document.createElement("div");
+  measurement.setAttribute("aria-hidden", "true");
+  Object.assign(measurement.style, {
+    position: "fixed",
+    visibility: "hidden",
+    pointerEvents: "none",
+    left: "-100000px",
+    top: "0",
+    font: `${fontSize}px sans-serif`,
+    whiteSpace: "pre"
+  });
+  measurement.appendChild(cue.getCueAsHTML());
+  document.body.appendChild(measurement);
+  const height = measurement.getBoundingClientRect().height;
+  measurement.remove();
+  return height;
 }
 
 function containedVideoContentRect(playerRect, videoWidth, videoHeight) {
@@ -10959,17 +10997,30 @@ function containedVideoContentRect(playerRect, videoWidth, videoHeight) {
 
 function positionVideoSubtitleCue(cue, line) {
   if (!cue || !("line" in cue) || cue.vertical) return false;
-  if (!positionedVideoSubtitleCues.has(cue) && cue.line !== "auto") return false;
-  positionedVideoSubtitleCues.add(cue);
-  const nextLine = Number(line.toFixed(2));
-  const changed = cue.snapToLines !== false
+  if (!positionedVideoSubtitleCues.has(cue)) {
+    positionedVideoSubtitleCues.set(cue, {
+      line: cue.line,
+      snapToLines: cue.snapToLines,
+      lineAlign: cue.lineAlign
+    });
+  }
+  const original = positionedVideoSubtitleCues.get(cue);
+  // Preserve authored top captions; lift bottom captions, including native
+  // tracks that express automatic placement as a negative line number.
+  if (original.snapToLines !== false && original.line !== "auto" && original.line >= 0) return false;
+  const safeLine = Number(line.toFixed(2));
+  const useOriginal = original.snapToLines === false && original.line <= safeLine;
+  const nextLine = useOriginal ? original.line : safeLine;
+  const nextSnapToLines = useOriginal ? original.snapToLines : false;
+  const nextLineAlign = useOriginal ? original.lineAlign : "start";
+  const changed = cue.snapToLines !== nextSnapToLines
     || cue.line !== nextLine
-    || ("lineAlign" in cue && cue.lineAlign !== "end");
+    || ("lineAlign" in cue && cue.lineAlign !== nextLineAlign);
   try {
-    cue.snapToLines = false;
+    cue.snapToLines = nextSnapToLines;
     cue.line = nextLine;
     if ("lineAlign" in cue) {
-      cue.lineAlign = "end";
+      cue.lineAlign = nextLineAlign;
     }
     return changed;
   } catch (err) {
@@ -11145,9 +11196,33 @@ function updateSkipMarkerControl() {
   const canSkip = !watchTogetherSession || watchTogetherCanControl();
   const visible = canSkip && marker && !dismissedSkipMarkers.has(skipMarkerKey(marker));
   els.videoSkipPrompt.classList.toggle("hidden", !visible);
+  const markerKey = visible ? skipMarkerKey(marker) : null;
+  if (markerKey !== videoSkipPromptMarkerKey) {
+    videoSkipPromptMarkerKey = markerKey;
+    showVideoSkipPrompt();
+    if (visible) scheduleVideoSkipPromptFade();
+  }
   if (visible) {
     els.videoSkipPromptText.textContent = marker.type === "credits" ? "Skip credits?" : "Skip intro?";
   }
+}
+
+function showVideoSkipPrompt() {
+  clearTimeout(videoSkipPromptFadeTimer);
+  videoSkipPromptFadeTimer = null;
+  els.videoSkipPrompt.classList.remove("inactive");
+}
+
+function scheduleVideoSkipPromptFade() {
+  showVideoSkipPrompt();
+  if (els.videoSkipPrompt.classList.contains("hidden")
+    || els.videoSkipPrompt.matches(":hover")) return;
+  videoSkipPromptFadeTimer = window.setTimeout(() => {
+    videoSkipPromptFadeTimer = null;
+    if (!els.videoSkipPrompt.matches(":hover")) {
+      els.videoSkipPrompt.classList.add("inactive");
+    }
+  }, 5000);
 }
 
 function skipCurrentMarker(event) {
